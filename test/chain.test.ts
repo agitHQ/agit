@@ -58,6 +58,28 @@ describe("hash chain (SPEC §4)", () => {
     expect(res.firstBroken!.reason).toMatch(/truncated/);
   });
 
+  it("reports a non-object line instead of crashing on it", () => {
+    // Valid JSON is not necessarily an event. `null` is the sharp case: it
+    // parses cleanly and then throws on every property read, so a tampered
+    // log used to take the verifier down with it — the one thing verifyChain
+    // exists to survive. Scalars and arrays reported "unknown schema version
+    // undefined", which names the wrong problem.
+    for (const junk of ["null", "123", '"a string"', "[]"]) {
+      const ls = lines();
+      ls[2] = junk;
+      const res = verifyChain(ls);
+      expect(res.ok).toBe(false);
+      expect(res.firstBroken!.seq).toBe(2);
+      expect(res.firstBroken!.reason).toMatch(/not a JSON object/);
+    }
+  });
+
+  it("still reports unparseable lines as bad JSON", () => {
+    const ls = lines();
+    ls[2] = "{not json";
+    expect(verifyChain(ls).firstBroken!.reason).toMatch(/not valid JSON/);
+  });
+
   it("rejects unknown event types", () => {
     const ls = lines();
     ls[1] = ls[1]!.replace('"message.user"', '"message.alien"');
