@@ -39,6 +39,7 @@ import {
 import { excerpt, fileStateAt, timelineLines, usageTotals } from "./state.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter];
+const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
 const USAGE = `agit — git for running agents
 
@@ -103,7 +104,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     timeline: false,
     state: false,
     json: false,
-    relay: process.env.AGIT_RELAY ?? "http://127.0.0.1:7717",
+    relay: DEFAULT_RELAY,
     static: false,
     resume: false,
     args: [],
@@ -649,10 +650,20 @@ async function cmdShareResume(opts: Opts): Promise<number> {
     viewUrl: state.viewUrl,
   };
   // --relay overrides; otherwise resume against the relay the share lives on.
-  const defaultRelay = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
-  const relay = opts.relay !== defaultRelay ? opts.relay : state.relay;
+  const relay = opts.relay !== DEFAULT_RELAY ? opts.relay : state.relay;
 
-  const head = await getShareHead(relay, share);
+  let head;
+  try {
+    head = await getShareHead(relay, share);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("404")) {
+      console.error("that share no longer exists on the relay (expired); start a new one.");
+      deleteShareState(opts.dir, share.shareId);
+      return 1;
+    }
+    throw err;
+  }
   if (head.ended) {
     console.error("that share was ended on the relay; start a new one.");
     deleteShareState(opts.dir, share.shareId);
@@ -684,14 +695,31 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   );
   console.log("  Ctrl+C ends the share.\n");
   const inbox = openShareInbox(relay, share);
+  // Only end the share once this process has successfully attached as its
+  // writer. If the catch-up push fails (e.g. 409 because the original CLI is
+  // in fact still alive and pushing), ending the share here would kill it
+  // out from under that healthy writer — leave it alone and just report.
+  let attached = false;
   try {
     await pushAll(relay, share, all.slice(head.events));
+    attached = true;
     return await liveLoop(relay, share, follower, all.length);
+  } catch (err) {
+    if (!attached) {
+      console.error(
+        "could not attach to the share (is the original CLI still running?). Leaving it untouched.",
+      );
+      console.error(err instanceof Error ? err.message : String(err));
+      return 1;
+    }
+    throw err;
   } finally {
     inbox.abort();
-    await endShare(relay, share);
-    deleteShareState(opts.dir, share.shareId);
-    console.log("share ended.");
+    if (attached) {
+      await endShare(relay, share);
+      deleteShareState(opts.dir, share.shareId);
+      console.log("share ended.");
+    }
   }
 }
 
