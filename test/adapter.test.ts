@@ -35,6 +35,38 @@ describe("claude-code adapter", () => {
     expect(claudeCodeAdapter.detect(["not json"])).toBe(false);
   });
 
+  it("finds a native record past a leading record it cannot map", () => {
+    // `convert` skips-and-counts these; `detect` used to reject the file over
+    // the first one, so agit reported "no adapter recognizes this file" for
+    // logs it converts perfectly.
+    const real = lines[0]!;
+    for (const lead of [
+      '{"type":"summary","summary":"Earlier work","leafUuid":"u0"}',
+      '{"type":"file-history-snapshot","messageId":"m0"}',
+      '{"half":"written',
+      "null",
+      "[]",
+      '"a string"',
+    ]) {
+      expect(claudeCodeAdapter.detect([lead, real])).toBe(true);
+    }
+  });
+
+  it("converts what it now detects", () => {
+    const withLead = ['{"type":"summary","summary":"Earlier work","leafUuid":"u0"}', ...lines];
+    expect(claudeCodeAdapter.detect(withLead)).toBe(true);
+    const res = claudeCodeAdapter.convert(withLead);
+    expect(res.sessionId).toBe("fixture-simple-0001");
+    expect(res.skipped.summary).toBe(1);
+  });
+
+  it("still refuses a file with no native record in reach", () => {
+    expect(claudeCodeAdapter.detect(Array.from({ length: 40 }, () => '{"foo":1}'))).toBe(false);
+    // A native record beyond the 25-record window is out of scope, by design.
+    const far = [...Array.from({ length: 30 }, () => '{"foo":1}'), lines[0]!];
+    expect(claudeCodeAdapter.detect(far)).toBe(false);
+  });
+
   it("maps the fixture to the expected event sequence", () => {
     const res = claudeCodeAdapter.convert(lines);
     expect(res.sessionId).toBe("fixture-simple-0001");

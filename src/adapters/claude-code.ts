@@ -71,15 +71,26 @@ export const claudeCodeAdapter: Adapter = {
   name: ADAPTER_NAME,
   version: ADAPTER_VERSION,
 
+  /**
+   * Look for a Claude Code record among the first 25, rather than demanding
+   * that the very first one be it. `convert` already skips-and-counts records
+   * it cannot map (a `summary`, a title, a queue operation, a line still being
+   * written); `detect` refusing the whole file over the same record is the
+   * inconsistency — it made agit answer "no adapter recognizes this file" for
+   * files this adapter converts perfectly.
+   */
   detect(lines: string[]): boolean {
     for (const line of lines.slice(0, 25)) {
       if (line.trim() === "") continue;
+      let o: unknown;
       try {
-        const o = JSON.parse(line) as NativeRecord;
-        return typeof o.sessionId === "string" && typeof o.type === "string";
+        o = JSON.parse(line);
       } catch {
-        return false;
+        continue; // one unparseable line is not a verdict on the file
       }
+      if (o === null || typeof o !== "object" || Array.isArray(o)) continue;
+      const rec = o as NativeRecord;
+      if (typeof rec.sessionId === "string" && typeof rec.type === "string") return true;
     }
     return false;
   },
