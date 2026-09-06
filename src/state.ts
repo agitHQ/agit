@@ -165,3 +165,17 @@ export function excerpt(s: string, max: number): string {
   const one = s.replace(/\s+/g, " ").trim();
   return one.length <= max ? one : one.slice(0, max - 1) + "…";
 }
+
+/**
+ * One display line, clipped to `max` with its indentation intact.
+ *
+ * `excerpt` collapses every run of whitespace into a single space, which is
+ * exactly right for squeezing an event into a one-line timeline row and
+ * exactly wrong anywhere the leading whitespace *is* the content — a unified
+ * diff, or tool input that was pretty-printed on purpose. Use this for text
+ * rendered line by line.
+ */
+export function clipLine(s: string, max: number): string {
+  const line = s.endsWith("\r") ? s.slice(0, -1) : s; // CRLF logs render on one line
+  return line.length <= max ? line : line.slice(0, max - 1) + "…";
+}

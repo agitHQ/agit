@@ -36,7 +36,7 @@ import {
   writeSession,
   writeShareState,
 } from "./store.js";
-import { excerpt, fileStateAt, timelineLines, usageTotals } from "./state.js";
+import { clipLine, fileStateAt, timelineLines, usageTotals } from "./state.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
@@ -896,7 +896,7 @@ function printStateAt(events: AgitEvent[], seq: number): void {
 
 function indentClip(text: string, maxLines: number): string {
   const lines = text.split("\n");
-  const shown = lines.slice(0, maxLines).map((l) => "  " + excerpt(l, 160));
+  const shown = lines.slice(0, maxLines).map((l) => "  " + clipLine(l, 160));
   if (lines.length > maxLines) shown.push(`  … ${lines.length - maxLines} more lines`);
   return shown.join("\n");
 }
