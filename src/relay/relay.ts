@@ -164,6 +164,14 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         return json(res, 200, { ended: true });
       }
 
+      if (verb === "head" && req.method === "GET") {
+        // Writer resume: where does the stored chain end? A restarted CLI
+        // re-derives its chain (conversion is deterministic), verifies its
+        // event at events-1 carries this lastHash, and pushes only the tail.
+        if (!authed(req, share)) return json(res, 401, { error: "bad writer token" });
+        return json(res, 200, { events: share.events.length, lastHash: share.lastHash, ended: share.ended });
+      }
+
       if (verb === "stream" && req.method === "GET") {
         sseHead(res);
         share.viewers.add(res);

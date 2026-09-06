@@ -1,6 +1,6 @@
 /** The .agit/ directory: sessions/<id>/events.jsonl + meta.json (SPEC §1, §10). */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isEventType, type AgitEvent, type SessionMeta } from "./format/events.js";
 
@@ -64,4 +64,50 @@ export function readSessionMeta(base: string, id: string): SessionMeta | null {
   const p = join(sessionDir(base, id), "meta.json");
   if (!existsSync(p)) return null;
   return JSON.parse(readFileSync(p, "utf8")) as SessionMeta;
+}
+
+// ---------------------------------------------------------------------------
+// Share state: credentials for resuming a live share after a crash. Written
+// when a live share starts, deleted when it ends cleanly — so a surviving
+// file means "resumable". Contains the writer token in plaintext; it lives
+// under .agit/ on the sharer's own machine, same trust domain as the logs.
+
+export interface ShareState {
+  shareId: string;
+  writerToken: string;
+  ttlMs: number;
+  viewUrl: string;
+  relay: string;
+  nativePath: string;
+  createdAt: string;
+}
+
+export function sharesDir(base: string): string {
+  return join(agitDir(base), "shares");
+}
+
+export function writeShareState(base: string, state: ShareState): void {
+  mkdirSync(sharesDir(base), { recursive: true });
+  writeFileSync(
+    join(sharesDir(base), `${state.shareId}.json`),
+    JSON.stringify(state, null, 2) + "\n",
+    "utf8",
+  );
+}
+
+export function deleteShareState(base: string, shareId: string): void {
+  rmSync(join(sharesDir(base), `${shareId}.json`), { force: true });
+}
+
+export function resolveShareState(base: string, prefix: string): ShareState {
+  const dir = sharesDir(base);
+  const ids = existsSync(dir)
+    ? readdirSync(dir)
+        .filter((f) => f.endsWith(".json"))
+        .map((f) => f.slice(0, -5))
+    : [];
+  const matches = ids.filter((id) => id.startsWith(prefix));
+  if (matches.length === 0) throw new Error(`no resumable share matches "${prefix}" (nothing in ${dir})`);
+  if (matches.length > 1) throw new Error(`"${prefix}" is ambiguous: ${matches.join(", ")}`);
+  return JSON.parse(readFileSync(join(dir, `${matches[0]!}.json`), "utf8")) as ShareState;
 }

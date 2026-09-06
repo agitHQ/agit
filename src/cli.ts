@@ -16,6 +16,7 @@ import { startRelay } from "./relay/relay.js";
 import {
   createShare,
   endShare,
+  getShareHead,
   openInbox,
   pushEvents,
   SessionFollower,
@@ -23,13 +24,17 @@ import {
   type ShareInfo,
 } from "./share.js";
 import {
+  deleteShareState,
   listSessionIds,
   readSessionEvents,
   readSessionLines,
   readSessionMeta,
   resolveSessionId,
+  resolveShareState,
   sessionDir,
+  type ShareState,
   writeSession,
+  writeShareState,
 } from "./store.js";
 import { excerpt, fileStateAt, timelineLines, usageTotals } from "./state.js";
 
@@ -57,6 +62,8 @@ usage:
                                        meta + verified tree + context seed
   agit share <id | native.jsonl>       share a session through a relay — live if it
                                        is still running; viewer messages land here
+  agit share --resume <share-id>       resume a live share after a crash (relay
+                                       keeps the buffer; only the tail is pushed)
   agit relay                           run a relay (self-hosted, in-memory)
 
 options:
@@ -84,6 +91,7 @@ interface Opts {
   relay: string;
   ttlHours?: number;
   static: boolean;
+  resume: boolean;
   port?: number;
   host?: string;
   args: string[];
@@ -97,6 +105,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     json: false,
     relay: process.env.AGIT_RELAY ?? "http://127.0.0.1:7717",
     static: false,
+    resume: false,
     args: [],
   };
   const rest: string[] = [];
@@ -113,6 +122,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--relay") opts.relay = argv[++i] ?? opts.relay;
     else if (a === "--ttl") opts.ttlHours = Number(argv[++i]);
     else if (a === "--static") opts.static = true;
+    else if (a === "--resume") opts.resume = true;
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--help" || a === "-h") rest.unshift("help");
@@ -527,9 +537,10 @@ async function cmdRelay(opts: Opts): Promise<number> {
 }
 
 async function cmdShare(opts: Opts): Promise<number> {
+  if (opts.resume) return cmdShareResume(opts);
   const target = opts.args[0];
   if (!target) {
-    console.error("usage: agit share <session-id | native-session.jsonl>");
+    console.error("usage: agit share <session-id | native-session.jsonl>   (or --resume <share-id>)");
     return 2;
   }
   const ttlMs =
@@ -568,14 +579,134 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
 
   const share = await createShare(opts.relay, ttlMs);
+  if (nativePath !== null) {
+    // Live shares are resumable after a crash: keep the credentials locally
+    // (deleted again on a clean end — a surviving file means "resumable").
+    writeShareState(opts.dir, {
+      shareId: share.shareId,
+      writerToken: share.writerToken,
+      ttlMs: share.ttlMs,
+      viewUrl: share.viewUrl,
+      relay: opts.relay,
+      nativePath,
+      createdAt: new Date().toISOString(),
+    });
+  }
   const expiry = new Date(Date.now() + share.ttlMs).toLocaleString();
   console.log(`\n  ${share.viewUrl}\n`);
   console.log(`  sharing the redacted event log — anyone with the link can read it until ${expiry}.`);
   console.log("  viewer messages appear below; they are NOT injected into the running agent.");
-  console.log("  Ctrl+C ends the share.\n");
+  console.log(
+    nativePath !== null
+      ? `  Ctrl+C ends the share. If this process dies instead: agit share --resume ${share.shareId.slice(0, 8)}\n`
+      : "  Ctrl+C ends the share.\n",
+  );
 
+  const inbox = openShareInbox(opts.relay, share);
+  try {
+    if (staticEvents) {
+      await pushAll(opts.relay, share, staticEvents);
+      console.log(`pushed ${staticEvents.length} events (static). Holding the share open…`);
+      await waitForSigint();
+      return 0;
+    }
+    const follower = followerFor(nativePath!);
+    if (!follower) return 1;
+    const initial = follower.poll();
+    await pushAll(opts.relay, share, initial);
+    console.log(`live: ${initial.length} events so far, tailing ${nativePath}`);
+    return await liveLoop(opts.relay, share, follower, initial.length);
+  } finally {
+    inbox.abort();
+    await endShare(opts.relay, share);
+    deleteShareState(opts.dir, share.shareId);
+    console.log("share ended.");
+  }
+}
+
+/**
+ * Resume a live share whose CLI died: the relay reports where its stored
+ * chain ends; deterministic conversion regenerates the identical prefix,
+ * which must carry the relay's head hash — then only the tail is pushed.
+ */
+async function cmdShareResume(opts: Opts): Promise<number> {
+  const prefix = opts.args[0];
+  if (!prefix) {
+    console.error("usage: agit share --resume <share-id-prefix>");
+    return 2;
+  }
+  let state: ShareState;
+  try {
+    state = resolveShareState(opts.dir, prefix);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+  const share: ShareInfo = {
+    shareId: state.shareId,
+    writerToken: state.writerToken,
+    ttlMs: state.ttlMs,
+    viewUrl: state.viewUrl,
+  };
+  // --relay overrides; otherwise resume against the relay the share lives on.
+  const defaultRelay = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
+  const relay = opts.relay !== defaultRelay ? opts.relay : state.relay;
+
+  const head = await getShareHead(relay, share);
+  if (head.ended) {
+    console.error("that share was ended on the relay; start a new one.");
+    deleteShareState(opts.dir, share.shareId);
+    return 1;
+  }
+  if (!existsSync(state.nativePath)) {
+    console.error(`source file is gone: ${state.nativePath}`);
+    return 1;
+  }
+  const follower = followerFor(state.nativePath);
+  if (!follower) return 1;
+  const all = follower.poll();
+  if (all.length < head.events) {
+    console.error(
+      `the source file now yields ${all.length} events but the relay already holds ${head.events} — history shrank; refusing to resume.`,
+    );
+    return 1;
+  }
+  if (head.events > 0 && all[head.events - 1]!.hash !== head.lastHash) {
+    console.error(
+      "the regenerated chain does not match the relay's head — the source file's history changed since the original share; refusing to resume.",
+    );
+    return 1;
+  }
+
+  console.log(`\n  ${share.viewUrl}\n`);
+  console.log(
+    `  resumed: relay holds ${head.events} events; pushing ${all.length - head.events} more, then tailing ${state.nativePath}`,
+  );
+  console.log("  Ctrl+C ends the share.\n");
+  const inbox = openShareInbox(relay, share);
+  try {
+    await pushAll(relay, share, all.slice(head.events));
+    return await liveLoop(relay, share, follower, all.length);
+  } finally {
+    inbox.abort();
+    await endShare(relay, share);
+    deleteShareState(opts.dir, share.shareId);
+    console.log("share ended.");
+  }
+}
+
+function followerFor(nativePath: string): SessionFollower | null {
+  const adapter = pickAdapterFor(nativePath);
+  if (!adapter) {
+    console.error("no adapter recognizes this file");
+    return null;
+  }
+  return new SessionFollower(nativePath, adapter);
+}
+
+function openShareInbox(relayUrl: string, share: ShareInfo): AbortController {
   let lastViewers = -1;
-  const inbox = openInbox(opts.relay, share, {
+  return openInbox(relayUrl, share, {
     onMessage: (m) => console.log(`◀ ${m.ts.slice(11, 19)} [${m.name}] ${m.text}`),
     onInfo: (i) => {
       if (i.viewers !== lastViewers) {
@@ -584,69 +715,55 @@ async function cmdShare(opts: Opts): Promise<number> {
       }
     },
   });
+}
 
-  try {
-    if (staticEvents) {
-      await pushAll(opts.relay, share, staticEvents);
-      console.log(`pushed ${staticEvents.length} events (static). Holding the share open…`);
-      await waitForSigint();
-    } else {
-      const adapter = pickAdapterFor(nativePath!);
-      if (!adapter) {
-        console.error("no adapter recognizes this file");
-        return 1;
-      }
-      const follower = new SessionFollower(nativePath!, adapter);
-      let pushed = 0;
-      const pushNew = async (events: AgitEvent[]) => {
-        await pushAll(opts.relay, share, events);
-        pushed += events.length;
-      };
-      await pushNew(follower.poll());
-      console.log(`live: ${pushed} events so far, tailing ${nativePath}`);
-
-      let ticking = false;
-      let fatal: Error | null = null;
-      const timer = setInterval(() => {
-        if (ticking || fatal) return;
-        ticking = true;
-        void (async () => {
-          try {
-            await pushNew(follower.poll());
-          } catch (err) {
-            if (err instanceof StabilityError) {
-              fatal = err;
-            }
-            // Other errors (relay hiccup, file mid-write) retry next tick.
-          } finally {
-            ticking = false;
-          }
-        })();
-      }, 1000);
-
-      await waitForSigint(() => fatal !== null);
-      clearInterval(timer);
-      if (fatal !== null) {
-        console.error((fatal as Error).message);
-        return 1;
-      }
+/** Tail the native log until Ctrl+C (or a stability failure), then seal the stream. */
+async function liveLoop(
+  relayUrl: string,
+  share: ShareInfo,
+  follower: SessionFollower,
+  alreadyPushed: number,
+): Promise<number> {
+  let pushed = alreadyPushed;
+  let ticking = false;
+  let fatal: Error | null = null;
+  const timer = setInterval(() => {
+    if (ticking || fatal) return;
+    ticking = true;
+    void (async () => {
       try {
-        const tail = follower.finish();
-        await pushNew(tail);
-        if (tail.length > 0)
-          console.log(
-            `sealed the stream with its final ${tail.length} events — it now matches a full import exactly.`,
-          );
-      } catch {
-        /* best effort on shutdown */
+        const fresh = follower.poll();
+        await pushAll(relayUrl, share, fresh);
+        pushed += fresh.length;
+      } catch (err) {
+        if (err instanceof StabilityError) {
+          fatal = err;
+        }
+        // Other errors (relay hiccup, file mid-write) retry next tick.
+      } finally {
+        ticking = false;
       }
-      console.log(`shared ${pushed} events total.`);
-    }
-  } finally {
-    inbox.abort();
-    await endShare(opts.relay, share);
-    console.log("share ended.");
+    })();
+  }, 1000);
+
+  await waitForSigint(() => fatal !== null);
+  clearInterval(timer);
+  if (fatal !== null) {
+    console.error((fatal as Error).message);
+    return 1;
   }
+  try {
+    const tail = follower.finish();
+    await pushAll(relayUrl, share, tail);
+    pushed += tail.length;
+    if (tail.length > 0)
+      console.log(
+        `sealed the stream with its final ${tail.length} events — it now matches a full import exactly.`,
+      );
+  } catch {
+    /* best effort on shutdown */
+  }
+  console.log(`shared ${pushed} events total.`);
   return 0;
 }
 

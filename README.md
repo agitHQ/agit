@@ -70,8 +70,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   read-only**: viewer messages reach the human at the keyboard, never the
   agent (see below). A completed live stream is byte-identical to a full
   import — viewers can download `events.jsonl` and `agit verify` what they
-  watched. Links expire (24h default) and sharing is opt-in per session,
-  always.
+  watched. If the sharing CLI dies, `agit share --resume <share-id>`
+  reattaches to the same link and pushes only the missing tail. Links
+  expire (24h default) and sharing is opt-in per session, always.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -108,9 +109,6 @@ Said plainly:
   inject input into a live interactive session, and agit does not pretend
   otherwise; if a runtime ever offers a real path, it gets wired
   per-adapter, opt-in.
-- **No writer resume.** If the sharing CLI dies, that share cannot be
-  resumed — start a new one. The relay keeps what was already streamed
-  until the link expires.
 - **No TLS in the relay.** It binds loopback by default; exposing it to a
   network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
 - **A `pr` bundle cannot be imported into a store yet.** `agit verify`

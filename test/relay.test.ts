@@ -6,7 +6,15 @@ import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { buildChain } from "../src/format/hash.js";
 import type { AgitEvent } from "../src/format/events.js";
 import { startRelay, type RelayHandle } from "../src/relay/relay.js";
-import { createShare, endShare, openInbox, pushEvents, readSse, type ShareInfo } from "../src/share.js";
+import {
+  createShare,
+  endShare,
+  getShareHead,
+  openInbox,
+  pushEvents,
+  readSse,
+  type ShareInfo,
+} from "../src/share.js";
 
 const FIXTURE = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -126,6 +134,28 @@ describe("relay protocol v0", () => {
     expect(got[0]!.name).toHaveLength(40);
     inbox.abort();
     await endShare(base, share);
+  });
+
+  it("reports its head to the writer, enabling crash resume", async () => {
+    const share = await createShare(base);
+    expect(await getShareHead(base, share)).toMatchObject({ events: 0, lastHash: null, ended: false });
+
+    // A first CLI pushes part of the chain, then dies.
+    await pushEvents(base, share, EVENTS.slice(0, 7));
+    const head = await getShareHead(base, share);
+    expect(head).toMatchObject({ events: 7, lastHash: EVENTS[6]!.hash, ended: false });
+
+    // The resumed CLI re-derives the chain, checks alignment, pushes the tail.
+    expect(EVENTS[head.events - 1]!.hash).toBe(head.lastHash);
+    await pushEvents(base, share, EVENTS.slice(head.events));
+    const jsonl = await (await fetch(`${base}/api/shares/${share.shareId}/events.jsonl`)).text();
+    expect(jsonl.trimEnd().split("\n")).toHaveLength(EVENTS.length);
+
+    // head requires the writer token, and reflects the ended state.
+    const wrong: ShareInfo = { ...share, writerToken: "x".repeat(share.writerToken.length) };
+    await expect(getShareHead(base, wrong)).rejects.toThrow(/401/);
+    await endShare(base, share);
+    expect((await getShareHead(base, share)).ended).toBe(true);
   });
 
   it("404s unknown shares and refuses pushes after end", async () => {

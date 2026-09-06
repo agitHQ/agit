@@ -43,6 +43,7 @@ relay and `agit verify` reproduces the same hashes.
 | POST | `/api/shares` | — | `{ttlMs?}` → `{shareId, writerToken, ttlMs, path}` |
 | POST | `/api/shares/:id/events` | writer | `{events: [AgitEvent…]}`; relay enforces `seq` contiguity and `prev` linkage, 409 on violation |
 | POST | `/api/shares/:id/end` | writer | marks the share ended |
+| GET | `/api/shares/:id/head` | writer | `{events, lastHash, ended}` — where the stored chain ends, for crash resume |
 | GET | `/api/shares/:id/stream` | link | SSE for viewers (below) |
 | GET | `/api/shares/:id/inbox` | writer | SSE: viewer messages + info |
 | POST | `/api/shares/:id/message` | link | `{text, name?}` → broadcast to everyone incl. the sharer's terminal |
@@ -70,6 +71,18 @@ TTL (default 24h, max 7d), or 30 minutes after the sharer ends it (grace for
 late viewers), whichever comes first — the reaper closes all streams and
 drops the buffer. Defaults: 200 concurrent shares, 200k events per share,
 25MB per push, 4000-char messages, 30 messages/minute per share.
+
+## Writer resume
+
+A live share survives its CLI: the relay keeps the buffered chain until TTL,
+and the sharer's machine keeps the share credentials under `.agit/shares/`
+(written when a live share starts, deleted on a clean end — a surviving file
+means "resumable"). `agit share --resume <share-id>` asks the relay for its
+head, regenerates the chain from the native log — conversion is
+deterministic, so the prefix is byte-identical — refuses to continue unless
+its event at `events-1` carries the relay's `lastHash`, then pushes only the
+tail and keeps tailing. A source file whose history changed since the
+original share fails that check and is refused rather than papered over.
 
 ## What the relay does and does not check
 

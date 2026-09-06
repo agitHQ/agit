@@ -82,6 +82,19 @@ describe("SessionFollower", () => {
     expect(toJsonl(streamed)).toBe(toJsonl(imported));
   });
 
+  it("a fresh follower regenerates the identical chain — the crash-resume invariant", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.join("\n") + "\n", "utf8");
+
+    const first = new SessionFollower(path, claudeCodeAdapter).poll();
+    const second = new SessionFollower(path, claudeCodeAdapter).poll();
+    // Deterministic conversion means a restarted CLI derives byte-identical
+    // events, so any relay head hash it must align with will match.
+    expect(toJsonl(second)).toBe(toJsonl(first));
+    expect(second[6]!.hash).toBe(first[6]!.hash);
+  });
+
   it("stops loudly if streamed history stops being a prefix", () => {
     const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
     const path = join(dir, "native.jsonl");

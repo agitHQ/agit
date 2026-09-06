@@ -136,6 +136,21 @@ export async function pushEvents(relayUrl: string, share: ShareInfo, events: Agi
   if (!res.ok) throw new Error(`relay refused events: ${res.status} ${await res.text()}`);
 }
 
+export interface ShareHead {
+  events: number;
+  lastHash: string | null;
+  ended: boolean;
+}
+
+/** Where the relay's stored chain ends — the anchor for writer resume. */
+export async function getShareHead(relayUrl: string, share: ShareInfo): Promise<ShareHead> {
+  const res = await fetch(new URL(`/api/shares/${share.shareId}/head`, relayUrl), {
+    headers: { authorization: `Bearer ${share.writerToken}` },
+  });
+  if (!res.ok) throw new Error(`relay refused head: ${res.status} ${await res.text()}`);
+  return (await res.json()) as ShareHead;
+}
+
 export async function endShare(relayUrl: string, share: ShareInfo): Promise<void> {
   await fetch(new URL(`/api/shares/${share.shareId}/end`, relayUrl), {
     method: "POST",

@@ -3,6 +3,21 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Writer resume** (share protocol v0): a live share survives its CLI.
+  Credentials persist under `.agit/shares/` while a live share runs; the
+  relay's new `/head` endpoint reports where its chain ends; and
+  `agit share --resume <share-id>` re-derives the (deterministic) chain,
+  verifies it carries the relay's head hash, and pushes only the tail.
+  A source file whose history changed is refused, never papered over.
+
+## 0.2.1 — 2026-09-06
+
+Version bump republish of 0.2.0 (no code changes).
+
 ## 0.2.0 — 2026-09-06
 
 ### Added
