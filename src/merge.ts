@@ -176,24 +176,27 @@ export function gitMergeFile(
     writeFileSync(b, base, "utf8");
     writeFileSync(o, ours, "utf8");
     writeFileSync(t, theirs, "utf8");
+    // No -p: git merge-file writes the result into its first argument. Piping
+    // it through stdout instead ran into execFileSync's 1 MB maxBuffer, so any
+    // file whose merged form crossed that died with a bare `spawnSync git
+    // ENOBUFS` — mid-merge, after earlier files had already been written.
+    // Reading the file back has no size ceiling to pick.
     try {
-      const out = execFileSync(
-        "git",
-        ["merge-file", "-p", "-L", "ours", "-L", "base", "-L", "fork", o, b, t],
-        { encoding: "utf8" },
-      );
-      return { content: out, clean: true };
+      execFileSync("git", ["merge-file", "-L", "ours", "-L", "base", "-L", "fork", o, b, t], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      return { content: readFileSync(o, "utf8"), clean: true };
     } catch (err) {
-      const e = err as { status?: number | null; stdout?: string; code?: string };
+      const e = err as { status?: number | null; code?: string };
       if (e.code === "ENOENT") {
         throw new Error("git is required for three-way merges (`git merge-file`) and was not found on PATH", {
           cause: err,
         });
       }
-      // git merge-file exits with the number of conflicts; stdout still holds
-      // the merged content with markers.
-      if (typeof e.status === "number" && e.status > 0 && e.status < 128 && typeof e.stdout === "string") {
-        return { content: e.stdout, clean: false };
+      // git merge-file exits with the number of conflicts; the file it wrote
+      // holds the merged content with markers.
+      if (typeof e.status === "number" && e.status > 0 && e.status < 128) {
+        return { content: readFileSync(o, "utf8"), clean: false };
       }
       throw err;
     }

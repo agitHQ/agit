@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { buildChain } from "../src/format/hash.js";
 import type { DraftEvent } from "../src/format/events.js";
-import { fileStateAt, timelineLines, usageTotals } from "../src/state.js";
+import { clipLine, excerpt, fileStateAt, timelineLines, usageTotals } from "../src/state.js";
 
 const FIXTURE = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -90,5 +90,40 @@ describe("replay state folds", () => {
     const early = usageTotals(events, 5); // only msg_A's cost has landed
     expect(early.apiMessages).toBe(1);
     expect(early.inputTokens).toBe(10);
+  });
+});
+
+describe("clipLine", () => {
+  it("keeps the indentation that excerpt destroys", () => {
+    const diffLine = "+    if (tokens <= 0) return false;";
+    expect(clipLine(diffLine, 160)).toBe(diffLine);
+    // The contrast, spelled out: excerpt is for one-line timeline summaries.
+    expect(excerpt(diffLine, 160)).toBe("+ if (tokens <= 0) return false;");
+  });
+
+  it("keeps pretty-printed JSON readable", () => {
+    const json = JSON.stringify({ file_path: "a.ts", edits: [{ old: "x" }] }, null, 2);
+    const rendered = json.split("\n").map((l) => clipLine(l, 160));
+    expect(rendered.join("\n")).toBe(json);
+    expect(rendered.some((l) => l.startsWith("  "))).toBe(true);
+  });
+
+  it("clips over-long lines with an ellipsis", () => {
+    expect(clipLine("abcdef", 6)).toBe("abcdef");
+    expect(clipLine("abcdef", 5)).toBe("abcd\u2026");
+    expect(clipLine("abcdef", 5)).toHaveLength(5);
+  });
+
+  it("drops a trailing CR so CRLF logs do not render as two lines", () => {
+    expect(clipLine("const a = 1;\r", 160)).toBe("const a = 1;");
+  });
+
+  it("leaves every indented line of a real fixture diff untouched", () => {
+    const diffs = events.filter((e) => e.type === "file.diff");
+    expect(diffs.length).toBeGreaterThan(0);
+    const diff = (diffs[0]!.payload as { diff: string }).diff;
+    const indented = diff.split("\n").filter((l) => /^[+\- ]\s/.test(l));
+    expect(indented.length).toBeGreaterThan(0);
+    for (const l of indented) expect(clipLine(l, 160)).toBe(l);
   });
 });
