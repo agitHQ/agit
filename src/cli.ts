@@ -170,6 +170,11 @@ async function main(): Promise<number> {
   }
 }
 
+/** Read a native log, tolerating a UTF-8 BOM (editors add them on re-save). */
+function readNativeLog(path: string): string {
+  return readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+}
+
 function cmdImport(opts: Opts): number {
   const src = opts.args[0];
   if (!src) {
@@ -177,7 +182,7 @@ function cmdImport(opts: Opts): number {
     return 2;
   }
   const path = resolve(src);
-  const raw = readFileSync(path, "utf8");
+  const raw = readNativeLog(path);
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
 
   const adapter = ADAPTERS.find((a) => a.detect(lines));
@@ -238,7 +243,21 @@ function cmdLs(opts: Opts): number {
     return 0;
   }
   const rows = ids.map((id) => {
-    const events = readSessionEvents(opts.dir, id);
+    // One corrupt session must not take down the whole listing.
+    let events;
+    try {
+      events = readSessionEvents(opts.dir, id);
+      if (events.length === 0) throw new Error("empty log");
+    } catch {
+      return {
+        id: id.slice(0, 8),
+        started: "(corrupt — run `agit verify " + id.slice(0, 8) + "`)",
+        dur: "",
+        events: "",
+        files: "",
+        runtime: "",
+      };
+    }
     const first = events[0]!;
     const last = events[events.length - 1]!;
     const files = fileStateAt(events).size;
@@ -524,7 +543,18 @@ function cmdExport(opts: Opts): number {
 }
 
 async function cmdRelay(opts: Opts): Promise<number> {
-  const handle = await startRelay({ port: opts.port, host: opts.host });
+  let handle;
+  try {
+    handle = await startRelay({ port: opts.port, host: opts.host });
+  } catch (err) {
+    if ((err as { code?: string }).code === "EADDRINUSE") {
+      console.error(
+        `port ${opts.port ?? 7717} is already in use (another relay?) — pass --port <n> to use a different one`,
+      );
+      return 1;
+    }
+    throw err;
+  }
   const host = opts.host ?? "127.0.0.1";
   console.log(`agit relay listening on http://${host}:${handle.port}`);
   console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
@@ -565,7 +595,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
   if (opts.static && nativePath !== null && staticEvents === null) {
     // --static on a path: one full (non-live) conversion, pushed once.
-    const lines = readFileSync(nativePath, "utf8")
+    const lines = readNativeLog(nativePath)
       .split("\n")
       .filter((l) => l.trim() !== "");
     const adapter = ADAPTERS.find((a) => a.detect(lines));
@@ -797,7 +827,7 @@ async function liveLoop(
 }
 
 function pickAdapterFor(path: string): Adapter | undefined {
-  const lines = readFileSync(path, "utf8")
+  const lines = readNativeLog(path)
     .split("\n")
     .filter((l) => l.trim() !== "");
   return ADAPTERS.find((a) => a.detect(lines));

@@ -138,13 +138,20 @@ export const claudeCodeAdapter: Adapter = {
     for (const line of lines) {
       if (line.trim() === "") continue;
       records++;
-      let rec: NativeRecord;
+      let parsed: unknown;
       try {
-        rec = JSON.parse(line) as NativeRecord;
+        parsed = JSON.parse(line);
       } catch {
         skip("<unparseable>");
         continue;
       }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        // `null` parses cleanly and then throws on the first property read —
+        // a corrupt line must be counted, never crash the import.
+        skip("<non-object>");
+        continue;
+      }
+      const rec = parsed as NativeRecord;
 
       if (sessionId === null && typeof rec.sessionId === "string") sessionId = rec.sessionId;
 

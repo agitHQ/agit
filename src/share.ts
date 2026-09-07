@@ -132,8 +132,20 @@ export interface ShareInfo {
   viewUrl: string;
 }
 
+/** fetch() that turns "fetch failed" into an actionable first-run message. */
+async function relayFetch(relayUrl: string, path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(new URL(path, relayUrl), init);
+  } catch (err) {
+    throw new Error(
+      `cannot reach the relay at ${relayUrl} — start one with \`agit relay\` (in another terminal), or pass --relay <url>`,
+      { cause: err },
+    );
+  }
+}
+
 export async function createShare(relayUrl: string, ttlMs?: number): Promise<ShareInfo> {
-  const res = await fetch(new URL("/api/shares", relayUrl), {
+  const res = await relayFetch(relayUrl, "/api/shares", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(ttlMs ? { ttlMs } : {}),
@@ -161,7 +173,7 @@ export interface ShareHead {
 
 /** Where the relay's stored chain ends — the anchor for writer resume. */
 export async function getShareHead(relayUrl: string, share: ShareInfo): Promise<ShareHead> {
-  const res = await fetch(new URL(`/api/shares/${share.shareId}/head`, relayUrl), {
+  const res = await relayFetch(relayUrl, `/api/shares/${share.shareId}/head`, {
     headers: { authorization: `Bearer ${share.writerToken}` },
   });
   if (!res.ok) throw new Error(`relay refused head: ${res.status} ${await res.text()}`);

@@ -180,6 +180,10 @@ describe("relay protocol v0", () => {
     await endShare(base, share);
   });
 
+  it("an unreachable relay yields an actionable first-run message", async () => {
+    await expect(createShare("http://127.0.0.1:1")).rejects.toThrow(/agit relay/);
+  });
+
   it("404s unknown shares and refuses pushes after end", async () => {
     const missing = await fetch(`${base}/api/shares/${"A".repeat(22)}/events.jsonl`);
     expect(missing.status).toBe(404);

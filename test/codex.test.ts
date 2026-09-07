@@ -135,6 +135,12 @@ describe("codex adapter", () => {
     expect(payloadOf(full, full.length - 1).reason).toBe("log-end");
   });
 
+  it("skip-counts non-object JSON lines instead of crashing", () => {
+    const res = codexAdapter.convert([codexLines[0]!, "null", "[]", '"str"', ...codexLines.slice(1)]);
+    expect(res.skipped["<non-object>"]).toBe(3);
+    expect(res.drafts.length).toBeGreaterThan(0);
+  });
+
   it("refuses a file with no session_meta", () => {
     expect(() => codexAdapter.convert(codexLines.slice(1))).toThrow(/session_meta/);
   });

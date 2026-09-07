@@ -71,6 +71,12 @@ describe("writeSession path safety", () => {
 });
 
 describe("readSessionEvents on a corrupt log", () => {
+  it("names an empty events.jsonl clearly instead of a bare TypeError downstream", () => {
+    const base = tmpBase();
+    writeSession(base, "hollow", "", { ...META, sessionId: "hollow" });
+    expect(() => readSessionEvents(base, "hollow")).toThrow(/empty events\.jsonl/);
+  });
+
   it("names the offending line instead of throwing a bare TypeError", () => {
     const base = tmpBase();
     const good =

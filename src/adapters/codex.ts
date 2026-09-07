@@ -86,13 +86,18 @@ export const codexAdapter: Adapter = {
     for (const line of lines) {
       if (line.trim() === "") continue;
       records++;
-      let rec: Envelope;
+      let parsed: unknown;
       try {
-        rec = JSON.parse(line) as Envelope;
+        parsed = JSON.parse(line);
       } catch {
         skip("<unparseable>");
         continue;
       }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        skip("<non-object>"); // counted, never a crash
+        continue;
+      }
+      const rec = parsed as Envelope;
       const ts = typeof rec.timestamp === "string" ? rec.timestamp : null;
       const p = rec.payload;
       if (ts === null || p === null || typeof p !== "object") {

@@ -67,6 +67,12 @@ describe("claude-code adapter", () => {
     expect(claudeCodeAdapter.detect(far)).toBe(false);
   });
 
+  it("skip-counts non-object JSON lines instead of crashing", () => {
+    const res = claudeCodeAdapter.convert([lines[0]!, "null", "123", ...lines.slice(1)]);
+    expect(res.skipped["<non-object>"]).toBe(2);
+    expect(res.drafts.length).toBeGreaterThan(0);
+  });
+
   it("maps the fixture to the expected event sequence", () => {
     const res = claudeCodeAdapter.convert(lines);
     expect(res.sessionId).toBe("fixture-simple-0001");

@@ -72,7 +72,11 @@ export function readSessionLines(base: string, id: string): string[] {
 /** Parse events leniently for display verbs; verify is the strict path. */
 export function readSessionEvents(base: string, id: string): AgitEvent[] {
   const events: AgitEvent[] = [];
-  const lines = readSessionLines(base, id);
+  const all = readSessionLines(base, id);
+  if (all.length === 0 || (all.length === 1 && all[0] === "")) {
+    throw new Error(`session ${id} has an empty events.jsonl — the store is corrupt; re-import the session`);
+  }
+  const lines = all;
   for (let i = 0; i < lines.length; i++) {
     // `null` parses cleanly and then throws on the first property read, so a
     // corrupt log crashed the display verbs with a bare TypeError. Same guard
