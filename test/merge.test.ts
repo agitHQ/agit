@@ -51,6 +51,28 @@ describe("gitMergeFile", () => {
     expect(r.content).toContain("<<<<<<< ours");
     expect(r.content).toContain(">>>>>>> fork");
   });
+
+  // The merged result used to come back through execFileSync's stdout, capped
+  // at the default 1 MB maxBuffer -- so an ordinary large file (a lockfile, a
+  // generated module) took the whole `agit merge` down with `spawnSync git
+  // ENOBUFS`, after earlier files had already been written to the target.
+  const BULK = "a line of perfectly ordinary source code\n".repeat(36_000); // ~1.4 MB
+
+  it("merges a file whose result exceeds 1 MB", () => {
+    const r = gitMergeFile(BULK, "ours header\n" + BULK, BULK + "fork footer\n");
+    expect(r.clean).toBe(true);
+    expect(r.content.length).toBeGreaterThan(1024 * 1024);
+    expect(r.content.startsWith("ours header\n")).toBe(true);
+    expect(r.content.endsWith("fork footer\n")).toBe(true);
+  });
+
+  it("still reports conflicts in a file that large", () => {
+    const r = gitMergeFile(BULK, BULK + "ours tail\n", BULK + "fork tail\n");
+    expect(r.clean).toBe(false);
+    expect(r.content.length).toBeGreaterThan(1024 * 1024);
+    expect(r.content).toContain("<<<<<<< ours");
+    expect(r.content).toContain(">>>>>>> fork");
+  });
 });
 
 describe("mergeFork", () => {
