@@ -51,6 +51,16 @@ interface Share {
 
 const LIMITS = {
   pushBody: 25 * 1024 * 1024,
+  /**
+   * Backpressure bound per SSE connection: a viewer that cannot drain its
+   * stream (dead link, glacial network) accumulates outbound buffer on the
+   * relay. Past this, the connection is shed — the browser's EventSource
+   * reconnects with Last-Event-ID and catches up from the buffer, so a
+   * healthy-but-slow viewer loses nothing; an unhealthy one stops costing
+   * memory. Without a bound, one stuck viewer holds the whole share's
+   * buffer twice over, per connection, forever (#4).
+   */
+  maxBufferedPerConnection: 8 * 1024 * 1024,
   messageBody: 8 * 1024,
   messageText: 4000,
   messageName: 40,
@@ -295,12 +305,18 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
 
   function broadcast(share: Share, event: string, data: unknown): void {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const res of [...share.viewers, ...share.inboxes]) res.write(frame);
+    for (const res of [...share.viewers, ...share.inboxes]) writeOrShed(res, frame);
   }
 }
 
 function sendEvent(res: ServerResponse, seq: number, line: string): void {
-  res.write(`event: ev\nid: ${seq}\ndata: ${line}\n\n`);
+  writeOrShed(res, `event: ev\nid: ${seq}\ndata: ${line}\n\n`);
+}
+
+/** Write one SSE frame; shed the connection if its outbound buffer is past the bound. */
+function writeOrShed(res: ServerResponse, frame: string): void {
+  res.write(frame);
+  if (res.writableLength > LIMITS.maxBufferedPerConnection) res.destroy();
 }
 
 function sseHead(res: ServerResponse): void {

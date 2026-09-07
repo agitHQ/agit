@@ -95,6 +95,25 @@ describe("SessionFollower", () => {
     expect(second[6]!.hash).toBe(first[6]!.hash);
   });
 
+  it("the idle fast path does not weaken rewrite detection (same-size mutation)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.slice(0, 6).join("\n") + "\n", "utf8");
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    expect(follower.poll().length).toBeGreaterThan(0);
+    expect(follower.poll()).toEqual([]); // idle tick: stat-gated, nothing new
+
+    // Same-length in-place mutation: size identical, only mtime moves. The
+    // stat gate must treat that as change and the digest must catch it.
+    const mutated = lines
+      .slice(0, 6)
+      .map((l, i) => (i === 1 ? l.replace("greeting module", "greetinj module") : l));
+    expect(mutated.join("\n").length).toBe(lines.slice(0, 6).join("\n").length);
+    writeFileSync(path, mutated.join("\n") + "\n", "utf8");
+    expect(() => follower.poll()).toThrow(StabilityError);
+  });
+
   it("stops loudly if streamed history stops being a prefix", () => {
     const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
     const path = join(dir, "native.jsonl");

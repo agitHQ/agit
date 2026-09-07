@@ -13,7 +13,7 @@
  * stream is byte-identical to `agit import` of the same file.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { Adapter } from "./adapters/adapter.js";
 import { canonicalJson } from "./format/canonical.js";
 import { buildChain, sha256Hex } from "./format/hash.js";
@@ -39,6 +39,9 @@ export class SessionFollower {
   /** Rolling digest over the canonical form of every draft streamed so far. */
   private prefixDigest = "";
   private finished = false;
+  /** stat() of the file when last converted; idle polls stop here. */
+  private lastSize = -1;
+  private lastMtimeMs = -1;
 
   constructor(
     private readonly path: string,
@@ -59,6 +62,20 @@ export class SessionFollower {
 
   private step(live: boolean): AgitEvent[] {
     if (this.finished && live) throw new Error("follower already finished");
+    // Idle fast path: a poll where the file has not changed does one stat()
+    // and nothing else — no read, no convert, no digest work. Long quiet
+    // sessions cost O(1) per tick instead of a full re-read (#4).
+    //
+    // Growth (or any change) still re-reads and re-converts the WHOLE file:
+    // byte-offset tailing was considered and rejected, because reading only
+    // appended bytes is blind to in-place prefix rewrites — exactly the
+    // history tampering the full-prefix digest below exists to catch.
+    if (live) {
+      const st = statSync(this.path);
+      if (st.size === this.lastSize && st.mtimeMs === this.lastMtimeMs) return [];
+      this.lastSize = st.size;
+      this.lastMtimeMs = st.mtimeMs;
+    }
     const lines = readFileSync(this.path, "utf8")
       .split("\n")
       .filter((l) => l.trim() !== "");

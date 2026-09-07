@@ -72,6 +72,15 @@ late viewers), whichever comes first — the reaper closes all streams and
 drops the buffer. Defaults: 200 concurrent shares, 200k events per share,
 25MB per push, 4000-char messages, 30 messages/minute per sender per share (the message endpoint is unauthenticated, so the budget must isolate senders).
 
+Slow consumers are shed, not accumulated: an SSE connection whose outbound
+buffer passes 8MB is destroyed. A healthy-but-slow browser reconnects with
+`Last-Event-ID` and replays what it missed from the relay's buffer; a dead
+connection stops costing memory. The sharer's CLI polls its native log with
+an idle fast path — an unchanged file costs one stat() per tick, and any
+change still triggers the full re-read + prefix-digest verification
+(byte-offset tailing was rejected: reading only appended bytes cannot see
+in-place prefix rewrites, which is exactly what the digest exists to catch).
+
 ## Writer resume
 
 A live share survives its CLI: the relay keeps the buffered chain until TTL,
@@ -102,7 +111,33 @@ ever offers a real injection path, it gets wired per-adapter, opt-in.
 
 ## Deployment notes
 
-The relay binds loopback by default. Exposing it (`--host 0.0.0.0`) is your
-call; put TLS in front (reverse proxy or tunnel) — share links are bearer
-capabilities and deserve encrypted transport. There is no persistence, no
-accounts, and no cross-share enumeration: `GET /api/shares` does not exist.
+The relay binds loopback by default and speaks plain HTTP. **Never expose it
+directly** (`--host 0.0.0.0`) without TLS in front: share links and writer
+tokens are bearer capabilities, and on a plaintext link anyone on the path
+can read the session and hijack the writer role. The two easy shapes:
+
+- **Tunnel** — keep the relay on loopback and put `cloudflared tunnel`,
+  `tailscale funnel`, or an SSH forward in front. Zero relay configuration.
+- **Reverse proxy** — Caddy (`caddy reverse-proxy --from share.example.com
+  --to localhost:7717`) or nginx with proxied SSE (`proxy_buffering off`).
+
+There is no persistence, no accounts, and no cross-share enumeration:
+`GET /api/shares` does not exist.
+
+## v1 freeze criteria
+
+This protocol stays v0 until all of the following hold, and is then frozen
+as v1 — after which changes version rather than mutate:
+
+1. **Resume semantics are normative** — `Last-Event-ID` viewer resume and
+   writer `/head` resume are specified precisely enough to reimplement from
+   this document alone, including every error code they can return.
+2. **Error codes are enumerated** — each endpoint's non-2xx responses are
+   listed here and covered by tests, not discovered in source.
+3. **Limits are contractual** — the numbers above stop being "defaults" and
+   become guarantees a client may rely on, with 413/429 behavior specified.
+4. **A second independent client exists** — something that is not this
+   repo's CLI (a viewer, a bridge, an importer) speaks the protocol from the
+   spec, proving the document is sufficient.
+5. **One release cycle of stability** — no wire-visible change needed for a
+   full release while the above hold.
