@@ -315,6 +315,10 @@ function sendEvent(res: ServerResponse, seq: number, line: string): void {
 
 /** Write one SSE frame; shed the connection if its outbound buffer is past the bound. */
 function writeOrShed(res: ServerResponse, frame: string): void {
+  // A broadcast iterates a snapshot, so a connection shed earlier in the same
+  // loop (or tick) can still appear here — writing to it would raise
+  // ERR_STREAM_DESTROYED. Skip it; its close handler already deregistered it.
+  if (res.destroyed || res.writableEnded) return;
   res.write(frame);
   if (res.writableLength > LIMITS.maxBufferedPerConnection) res.destroy();
 }
