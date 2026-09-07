@@ -27,12 +27,22 @@ export function verifyChain(
       if (i === lines.length - 1) break; // trailing newline
       return broken(count, i, "blank line inside log");
     }
-    let e: AgitEvent;
+    let parsed: unknown;
     try {
-      e = JSON.parse(line) as AgitEvent;
+      parsed = JSON.parse(line);
     } catch {
       return broken(count, i, "line is not valid JSON");
     }
+    // A line may be valid JSON and still not be an event. `null` in
+    // particular parses fine and then throws on every property read, so a
+    // tampered log could crash the verifier instead of being reported by it —
+    // the one thing this function exists to do. Scalars and arrays reach the
+    // version check today and are reported as "unknown schema version
+    // undefined", which describes the wrong problem.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return broken(count, i, "line is not a JSON object");
+    }
+    const e = parsed as AgitEvent;
     if (e.v !== SCHEMA_VERSION) return broken(count, i, `unknown schema version ${e.v}`);
     if (typeof e.type !== "string" || !isEventType(e.type))
       return broken(count, i, `unknown event type ${JSON.stringify(e.type)}`);
