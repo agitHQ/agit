@@ -72,8 +72,16 @@ export function readSessionLines(base: string, id: string): string[] {
 /** Parse events leniently for display verbs; verify is the strict path. */
 export function readSessionEvents(base: string, id: string): AgitEvent[] {
   const events: AgitEvent[] = [];
-  for (const line of readSessionLines(base, id)) {
-    const e = JSON.parse(line) as AgitEvent;
+  const lines = readSessionLines(base, id);
+  for (let i = 0; i < lines.length; i++) {
+    // `null` parses cleanly and then throws on the first property read, so a
+    // corrupt log crashed the display verbs with a bare TypeError. Same guard
+    // as verifyChain, pointing at the verb that explains the whole log.
+    const parsed: unknown = JSON.parse(lines[i]!);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`line ${i + 1} is not a JSON object — run \`agit verify\` on this session`);
+    }
+    const e = parsed as AgitEvent;
     if (typeof e.type !== "string" || !isEventType(e.type)) {
       throw new Error(
         `event ${e.seq}: unknown type ${JSON.stringify(e.type)} — was this written by a newer agit?`,
