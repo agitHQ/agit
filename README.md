@@ -30,11 +30,14 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 
 ## What works today
 
-- **`agit import <session.jsonl>`** — ingest a native Claude Code session
-  (`~/.claude/projects/<project>/<uuid>.jsonl`) into
-  `.agit/sessions/<id>/events.jsonl`. Deterministic: the same input always
-  produces byte-identical output. Credential-looking strings are redacted on
-  the way in (see [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
+- **`agit import <session.jsonl>`** — ingest a native session into
+  `.agit/sessions/<id>/events.jsonl`. Two adapters, auto-detected:
+  **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`) and
+  **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`) — the
+  same event log, the same verbs, whichever agent produced the session.
+  Deterministic: the same input always produces byte-identical output.
+  Credential-looking strings are redacted on the way in (see
+  [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
 - **`agit ls`** — list imported sessions: start, duration, events, files touched.
 - **`agit show <id>`** — one-session summary: model, tools, token totals,
   per-file diffstat.
@@ -94,9 +97,11 @@ fall out of that chain.
 
 Said plainly:
 
-- **One adapter.** Claude Code only. Codex and OpenClaw are next; the adapter
-  interface is three functions, written to make that real rather than
-  aspirational.
+- **Two adapters, unevenly deep.** Claude Code is the reference; the Codex
+  adapter (built and validated against real rollouts) does not yet emit
+  `file.diff` events — the sampled logs contained no structured edit
+  records, and agit does not guess. Codex reasoning arrives encrypted and
+  is dropped, counted. OpenClaw is next.
 - **`file.diff` coverage is partial.** Diffs come from structured edit tools
   (`Edit`/`Write`). Files changed through shell commands leave no diff event;
   file state from replay is a lower bound on what changed. Fork trees

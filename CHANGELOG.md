@@ -7,6 +7,15 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Codex adapter** — the second runtime, making runtime-agnostic empirical
+  rather than aspirational: OpenAI Codex CLI rollouts import into the same
+  event log with auto-detection. Built against a real 297-record rollout;
+  every mapping ambiguity (duplicate assistant channels, scaffolding
+  messages, per-response token deltas, encrypted reasoning) was resolved
+  with data and is documented in the adapter. Known gaps stated plainly:
+  no file.diff yet (no structured edit records observed), encrypted
+  reasoning dropped and counted.
+
 - Share hardening (#4 closed): idle tailing polls cost one stat() call
   (byte-offset tailing rejected with a test — it cannot see prefix
   rewrites); the relay sheds SSE connections buffering past 8MB
