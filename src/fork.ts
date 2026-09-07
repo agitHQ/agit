@@ -26,7 +26,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import type { AgitEvent, Json } from "./format/events.js";
 import { sha256Hex } from "./format/hash.js";
 import { applyUnifiedDiff, PatchError } from "./patch.js";
-import { eventLine, excerpt, fileStateAt, usageTotals } from "./state.js";
+import { eventLine, fileStateAt, usageTotals } from "./state.js";
 
 export interface ForkFile {
   path: string;
@@ -198,6 +198,20 @@ export function writeFork(
   return { outDir, written, skipped };
 }
 
+/**
+ * A free-text block for SEED.md: truncated, never reflowed.
+ *
+ * `excerpt` collapses every run of whitespace into a single space — it exists
+ * to squeeze an event into a one-line timeline row. Running a whole user or
+ * assistant message through it turned fenced code, lists, and paragraph
+ * breaks into a single unreadable line, which is not the "verbatim" this
+ * file's header promises and not something an agent can act on.
+ */
+function seedBlock(s: string, max: number): string {
+  const t = s.replace(/\r\n/g, "\n").trim();
+  return t.length <= max ? t : t.slice(0, max - 1).trimEnd() + "…";
+}
+
 /** Deterministic, model-free context seed. SPEC-honest: a summary, not a transplant. */
 export function buildSeed(
   events: AgitEvent[],
@@ -241,13 +255,13 @@ recorded; shell-driven changes were invisible to it.
 
 ## The task, as originally given
 
-${excerpt(text(users[0]), 2000) || "(no user message before the fork point)"}
+${seedBlock(text(users[0]), 2000) || "(no user message before the fork point)"}
 
 ## Where the session stood at the fork point
 
 Last assistant statement:
 
-${excerpt(text([...upto].reverse().find((e) => e.type === "message.assistant")), 2000) || "(none)"}
+${seedBlock(text([...upto].reverse().find((e) => e.type === "message.assistant")), 2000) || "(none)"}
 
 Recent events:
 

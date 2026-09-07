@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { buildChain, sha256Hex } from "../src/format/hash.js";
 import type { AgitEvent } from "../src/format/events.js";
-import { reconstructTree, treeRelativePath, writeFork } from "../src/fork.js";
+import { buildSeed, reconstructTree, treeRelativePath, writeFork } from "../src/fork.js";
 import { applyUnifiedDiff, PatchError } from "../src/patch.js";
 import { redactDeep, type RedactionCounts } from "../src/redact.js";
 
@@ -125,5 +125,56 @@ describe("writeFork", () => {
     expect(seed).toContain("mechanical summary");
     expect(seed).toContain(DEMO[at]!.hash.slice(0, 12));
     expect(existsSync(join(out, "tree"))).toBe(true);
+  });
+});
+
+describe("buildSeed", () => {
+  const TS = "2026-01-01T00:00:00.000Z";
+  const TASK = "Fix the parser.\n\n```ts\nconst a = 1;\n  const b = 2;\n```\n\nKeep the tests green.";
+  const REPLY = "Done:\n- parsed the header\n- added a test";
+
+  function seedOf(task = TASK): string {
+    const events = buildChain("s", [
+      { ts: TS, type: "session.start", payload: { runtime: "claude-code", cwd: "/proj" } },
+      { ts: TS, type: "message.user", payload: { text: task } },
+      { ts: TS, type: "message.assistant", payload: { model: "m", blocks: [{ type: "text", text: REPLY }] } },
+    ]);
+    return buildSeed(events, 2, "src-0001", [], []);
+  }
+
+  /** The body of one "## heading" section of the seed. */
+  function section(seed: string, heading: string): string {
+    const body = seed.split(`## ${heading}\n`)[1];
+    expect(body).toBeDefined();
+    return body!.split("\n## ")[0]!;
+  }
+
+  it("carries a multi-line task verbatim instead of reflowing it to one line", () => {
+    const task = section(seedOf(), "The task, as originally given");
+    expect(task).toContain("```ts\nconst a = 1;\n  const b = 2;\n```");
+    // What the old rendering produced for this block, and must not again.
+    // (The one-line "Recent events" rows below it are still `excerpt`ed --
+    // that is what excerpt is for.)
+    expect(task).not.toContain("Fix the parser. ```ts const a = 1;");
+  });
+
+  it("keeps the assistant statement's line structure", () => {
+    const where = section(seedOf(), "Where the session stood at the fork point");
+    expect(where).toContain("Done:\n- parsed the header\n- added a test");
+  });
+
+  it("still truncates over-long text, without reflowing what it keeps", () => {
+    const long = "line one\n" + "x".repeat(3000);
+    const seed = section(seedOf(long), "The task, as originally given");
+    expect(seed).toContain("line one\nxxx");
+    expect(seed).toContain("\u2026");
+    expect(seed).not.toContain("x".repeat(2100));
+  });
+
+  it("still says so when there is no user message before the fork point", () => {
+    const events = buildChain("s", [
+      { ts: TS, type: "session.start", payload: { runtime: "claude-code", cwd: "/proj" } },
+    ]);
+    expect(buildSeed(events, 0, "src-0001", [], [])).toContain("(no user message before the fork point)");
   });
 });
