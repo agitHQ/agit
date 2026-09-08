@@ -3,6 +3,24 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Codex file edits become real `file.diff` events.** The adapter maps
+  structured `apply_patch` data on both paths Codex persists it
+  (`patch_apply_end` in Legacy history mode, `item_completed` ->
+  `TurnItem::FileChange` in Paginated), so `replay --state` and `fork` work
+  on Codex sessions instead of producing nothing. Adds are hashed exactly
+  from their recorded content; updates are hashed only while agit already
+  holds the file from earlier in the same session. Updates to files that
+  predate the session, deletions, renames, and failed or declined patches
+  are skipped and counted — Codex records no base content for them, and
+  agit does not guess. Multi-file patches emit sorted by path so imports
+  stay byte-identical.
+- Corrects the earlier claim that Codex records no structured edits: that
+  described one sampled rollout, not the format.
+
 ## 0.3.1 — 2026-09-07
 
 ### Fixed
