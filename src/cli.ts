@@ -9,7 +9,7 @@ import { codexAdapter } from "./adapters/codex.js";
 import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
 import { verifyChain } from "./format/verify.js";
-import type { AgitEvent, SessionMeta } from "./format/events.js";
+import { SCHEMA_VERSION, type AgitEvent, type SessionMeta } from "./format/events.js";
 import { writeFork } from "./fork.js";
 import { mergeFork, readForkInfo } from "./merge.js";
 import { redactDeep, type RedactionCounts } from "./redact.js";
@@ -25,6 +25,7 @@ import {
   type ShareInfo,
 } from "./share.js";
 import {
+  assertSafeSessionId,
   deleteShareState,
   listSessionIds,
   readSessionEvents,
@@ -45,7 +46,8 @@ const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 const USAGE = `agit — git for running agents
 
 usage:
-  agit import <native-session.jsonl>   ingest a native session into .agit/
+  agit import <session | bundle>       ingest a native session into .agit/, or
+                                       adopt an agit log or pr bundle as-is
   agit ls                              list imported sessions
   agit show <id>                       summarize one session
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
@@ -175,15 +177,51 @@ function readNativeLog(path: string): string {
   return readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 }
 
+/**
+ * Does this look like an agit event log rather than a runtime's native one?
+ * The first event of a chain is unmistakable — schema version, seq 0, a known
+ * type, a session id and a hash — and no native format carries that shape.
+ */
+function looksLikeAgitLog(lines: string[]): boolean {
+  const first = lines.find((l) => l.trim() !== "");
+  if (first === undefined) return false;
+  let o: unknown;
+  try {
+    o = JSON.parse(first);
+  } catch {
+    return false;
+  }
+  if (o === null || typeof o !== "object" || Array.isArray(o)) return false;
+  const e = o as Record<string, unknown>;
+  return (
+    e.v === SCHEMA_VERSION &&
+    e.seq === 0 &&
+    typeof e.session === "string" &&
+    typeof e.hash === "string" &&
+    typeof e.type === "string"
+  );
+}
+
 function cmdImport(opts: Opts): number {
   const src = opts.args[0];
   if (!src) {
-    console.error("usage: agit import <native-session.jsonl>");
+    console.error("usage: agit import <native-session.jsonl | agit-bundle>");
     return 2;
   }
-  const path = resolve(src);
+  // `agit pr` writes a directory; accept it as directly as a file.
+  let path = resolve(src);
+  if (existsSync(path) && statSync(path).isDirectory()) {
+    const inner = join(path, "events.jsonl");
+    if (!existsSync(inner)) {
+      console.error(`${path} is a directory with no events.jsonl in it`);
+      return 1;
+    }
+    path = inner;
+  }
   const raw = readNativeLog(path);
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
+
+  if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, lines);
 
   const adapter = ADAPTERS.find((a) => a.detect(lines));
   if (!adapter) {
@@ -233,6 +271,85 @@ function cmdImport(opts: Opts): number {
   );
   console.log(`  head        ${meta.headHash.slice(0, 12)}`);
   console.log(`  wrote       ${sessionDir(opts.dir, converted.sessionId)}`);
+  return 0;
+}
+
+/**
+ * Adopt an already-normalized agit log (a `pr` bundle, a downloaded share
+ * log) into the local store — the receiving half of `agit pr`.
+ *
+ * Nothing here rewrites history: the events are stored byte for byte, so
+ * their hashes stay the ones the origin published. The chain is verified
+ * first and a broken or tampered log is refused outright; redaction is NOT
+ * re-run, because re-scanning would change bytes and invalidate every hash
+ * downstream — the log carries whatever the origin decided to publish.
+ */
+function adoptBundle(opts: Opts, path: string, lines: string[]): number {
+  // A sibling meta.json is the origin's own account of the import. It is kept
+  // verbatim when present (it truthfully describes where the log came from)
+  // and never invented when absent.
+  const metaPath = join(dirname(path), "meta.json");
+  let meta: SessionMeta | undefined;
+  if (existsSync(metaPath)) {
+    try {
+      meta = JSON.parse(readFileSync(metaPath, "utf8")) as SessionMeta;
+    } catch {
+      console.error(`${metaPath} is not readable JSON — remove it or fix it; the log itself may be fine`);
+      return 1;
+    }
+  }
+
+  const res = verifyChain(lines, meta);
+  if (!res.ok) {
+    const b = res.firstBroken;
+    console.error(`refusing to adopt: ${b ? `event ${b.seq}: ${b.reason}` : "chain verification failed"}`);
+    console.error(`${res.events} events verified before the break`);
+    return 1;
+  }
+
+  const first = JSON.parse(lines[0]!) as AgitEvent;
+  const id = first.session;
+  try {
+    assertSafeSessionId(id);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+  if (meta && meta.sessionId !== id) {
+    console.error(`refusing to adopt: meta.json says session ${meta.sessionId}, the log says ${id}`);
+    return 1;
+  }
+
+  const jsonl = lines.join("\n") + "\n";
+  if (listSessionIds(opts.dir).includes(id)) {
+    // Re-adopting the same bundle is a no-op; a different log under the same
+    // id is someone else's session and is never overwritten.
+    const existing = readSessionLines(opts.dir, id).join("\n") + "\n";
+    if (existing === jsonl) {
+      console.log(`already adopted ${id} (identical log; nothing to do)`);
+      return 0;
+    }
+    console.error(`refusing to adopt: session ${id} already exists here with different content`);
+    return 1;
+  }
+  writeSession(opts.dir, id, jsonl, meta);
+
+  const head = lines[lines.length - 1]!;
+  console.log(`adopted ${id}`);
+  console.log(`  events      ${res.events}, chain intact${meta ? ", matches meta.json head" : ""}`);
+  if (meta) {
+    console.log(`  origin      ${meta.adapter.name}@${meta.adapter.version}, imported ${meta.importedAt}`);
+    const redacted = Object.entries(meta.redactions);
+    if (redacted.length > 0) {
+      console.log(
+        `  redactions  ${redacted.map(([k, v]) => `${k}×${v}`).join(", ")} (applied at the origin; agit did not re-scan)`,
+      );
+    }
+  } else {
+    console.log("  meta        none in the bundle — truncation is not checkable for this session");
+  }
+  console.log(`  head        ${(JSON.parse(head) as AgitEvent).hash.slice(0, 12)}`);
+  console.log(`  wrote       ${sessionDir(opts.dir, id)}`);
   return 0;
 }
 

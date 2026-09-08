@@ -37,8 +37,11 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 
 ## What works today
 
-- **`agit import <session.jsonl>`** — ingest a native session into
-  `.agit/sessions/<id>/events.jsonl`. Two adapters, auto-detected:
+- **`agit import <session | bundle>`** — ingest a native session into
+  `.agit/sessions/<id>/events.jsonl`, or **adopt** an agit log someone sent
+  you (a `pr` bundle, a downloaded share log) — auto-detected, verified
+  before it is stored, and kept byte for byte so the sender's hashes still
+  check out. Two adapters for native logs, also auto-detected:
   **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`) and
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`) — the
   same event log, the same verbs, whichever agent produced the session.
@@ -70,9 +73,10 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `--summary` of what the fork learned — is recorded in the fork's
   `merge.json`. Not a merge of two minds; file-level, as promised.
 - **`agit pr <id>`** — hand a session to a colleague as a directory: the
-  full event log (they run `agit verify` on it directly), `meta.json`, the
-  reconstructed hash-verified tree, `SEED.md` context, and provenance.
-  Working context, not a read-only transcript.
+  full event log, `meta.json`, the reconstructed hash-verified tree,
+  `SEED.md` context, and provenance. They run `agit import` on the
+  directory and get a session they can replay, fork and verify like any
+  other — working context, not a read-only transcript.
 - **`agit share <id | native.jsonl>`** — share a session through a relay,
   **live while the agent is still running**: the CLI tails the native log
   and streams events; teammates watch in a browser (timeline, diffs, token
@@ -127,9 +131,6 @@ Said plainly:
   per-adapter, opt-in.
 - **No TLS in the relay.** It binds loopback by default; exposing it to a
   network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
-- **A `pr` bundle cannot be imported into a store yet.** `agit verify`
-  reads its `events.jsonl` directly, but replaying or forking the bundled
-  log on another machine still requires importing the source's native log.
 - **Merge is file-level and needs git.** Three-way content merge only:
   deletions in a fork are invisible (the fork tree records what the log
   could reconstruct, so absence means untouched, not deleted), renames are

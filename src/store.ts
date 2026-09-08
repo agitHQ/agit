@@ -35,12 +35,15 @@ export function assertSafeSessionId(id: string): void {
   }
 }
 
-export function writeSession(base: string, id: string, eventsJsonl: string, meta: SessionMeta): void {
+export function writeSession(base: string, id: string, eventsJsonl: string, meta?: SessionMeta): void {
   assertSafeSessionId(id);
   const dir = sessionDir(base, id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "events.jsonl"), eventsJsonl, "utf8");
-  writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
+  // meta is optional: a bundle adopted without one gets no meta.json rather
+  // than a fabricated adapter and source it never had. Readers already treat
+  // a missing meta.json as "truncation not checkable".
+  if (meta) writeFileSync(join(dir, "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
 }
 
 export function listSessionIds(base: string): string[] {

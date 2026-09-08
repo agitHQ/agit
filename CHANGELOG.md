@@ -3,6 +3,21 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`agit import` adopts agit bundles**, closing the receiving half of
+  `agit pr` (#28): hand someone a bundle directory or a bare `events.jsonl`
+  and they can replay, fork and verify it like any other session. The log
+  is verified before it is stored and kept byte for byte, so the sender's
+  hashes stay valid; a tampered, truncated or malformed log is refused, and
+  a session id that already exists with different content is never
+  overwritten. Re-adopting the same bundle is a no-op. Redaction is not
+  re-run — that would change bytes and break every hash downstream — so the
+  output says plainly that redaction was the origin's. A bundle without
+  `meta.json` gets none invented for it.
+
 ## 0.4.1 — 2026-09-08
 
 ### Changed
