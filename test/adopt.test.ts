@@ -137,6 +137,19 @@ describe("adopting an agit bundle (agit import <bundle>)", () => {
     expect(r.out).toMatch(/truncated or extended/);
   });
 
+  it("refuses a log with a blank line inside it, rather than quietly normalizing it", () => {
+    // Filtering blanks before verification would hide this break AND rewrite
+    // a log this path promises to store byte for byte.
+    const dir = bundleCopy();
+    const lines = readFileSync(join(dir, "events.jsonl"), "utf8").trimEnd().split("\n");
+    lines.splice(5, 0, "");
+    writeFileSync(join(dir, "events.jsonl"), lines.join("\n") + "\n", "utf8");
+    rmSync(join(dir, "meta.json"));
+    const r = agit(["import", dir, "--dir", freshStore()]);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/blank line inside log/);
+  });
+
   it("refuses a malformed event line", () => {
     const dir = bundleCopy();
     const lines = readFileSync(join(dir, "events.jsonl"), "utf8").trimEnd().split("\n");

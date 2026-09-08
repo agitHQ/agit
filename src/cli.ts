@@ -221,7 +221,10 @@ function cmdImport(opts: Opts): number {
   const raw = readNativeLog(path);
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
 
-  if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, lines);
+  // Adoption gets the unfiltered text: dropping blank lines first would both
+  // hide the "blank line inside log" break from verifyChain and quietly
+  // rewrite a log this path promises to store byte for byte.
+  if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, raw);
 
   const adapter = ADAPTERS.find((a) => a.detect(lines));
   if (!adapter) {
@@ -284,7 +287,10 @@ function cmdImport(opts: Opts): number {
  * re-run, because re-scanning would change bytes and invalidate every hash
  * downstream — the log carries whatever the origin decided to publish.
  */
-function adoptBundle(opts: Opts, path: string, lines: string[]): number {
+function adoptBundle(opts: Opts, path: string, raw: string): number {
+  // Split, do not filter: verifyChain tolerates exactly one trailing empty
+  // element (the final newline) and treats any other blank as a break.
+  const lines = raw.split("\n");
   // A sibling meta.json is the origin's own account of the import. It is kept
   // verbatim when present (it truthfully describes where the log came from)
   // and never invented when absent.
@@ -320,7 +326,7 @@ function adoptBundle(opts: Opts, path: string, lines: string[]): number {
     return 1;
   }
 
-  const jsonl = lines.join("\n") + "\n";
+  const jsonl = raw; // byte for byte, exactly as the origin published it
   if (listSessionIds(opts.dir).includes(id)) {
     // Re-adopting the same bundle is a no-op; a different log under the same
     // id is someone else's session and is never overwritten.
@@ -334,7 +340,7 @@ function adoptBundle(opts: Opts, path: string, lines: string[]): number {
   }
   writeSession(opts.dir, id, jsonl, meta);
 
-  const head = lines[lines.length - 1]!;
+  const head = [...lines].reverse().find((l) => l.trim() !== "")!;
   console.log(`adopted ${id}`);
   console.log(`  events      ${res.events}, chain intact${meta ? ", matches meta.json head" : ""}`);
   if (meta) {
