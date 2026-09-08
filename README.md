@@ -97,11 +97,15 @@ fall out of that chain.
 
 Said plainly:
 
-- **Two adapters, unevenly deep.** Claude Code is the reference; the Codex
-  adapter (built and validated against real rollouts) does not yet emit
-  `file.diff` events — the sampled logs contained no structured edit
-  records, and agit does not guess. Codex reasoning arrives encrypted and
-  is dropped, counted. OpenClaw is next.
+- **Two adapters, unevenly deep.** Claude Code is the reference. The Codex
+  adapter maps structured `apply_patch` edits to hash-verified `file.diff`
+  events, with real limits: Codex records the full content of a file it
+  *creates*, but only a diff when it *updates*, so agit can verify an update
+  only while it already holds that file's content from earlier in the same
+  session — an edit to a file that predates the session is skipped and
+  counted, never hashed on a guess. Deletions and renames are skipped too
+  (no event type says either). Codex reasoning arrives encrypted and is
+  dropped, counted. OpenClaw is next.
 - **`file.diff` coverage is partial.** Diffs come from structured edit tools
   (`Edit`/`Write`). Files changed through shell commands leave no diff event;
   file state from replay is a lower bound on what changed. Fork trees

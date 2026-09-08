@@ -22,12 +22,23 @@
  * - `token_count.info.last_token_usage` is the per-response delta (verified
  *   against total_token_usage accumulation) → one cost event each, with the
  *   model taken from the most recent turn_context.
- * - No file.diff events yet: the sampled logs contain no structured edit
- *   records (no apply_patch results). Emitting diffs without observed data
- *   would be guessing; real rollouts containing apply_patch are wanted.
+ * - Structured edits arrive as FileChange maps, on either of two paths
+ *   depending on the thread's history mode (codex-rs/rollout/src/policy.rs):
+ *   `patch_apply_end` (Legacy) or `item_completed` -> FileChange (Paginated).
+ *   PatchApplyBegin and TurnDiff are transient and never persisted, so those
+ *   two are the only sources. What each variant supports:
+ *     add    -> full content recorded, so an exactly hashed create
+ *     update -> unified_diff only; Codex never records the base, so hashes
+ *               are real only when agit already holds that file's content
+ *               from earlier in the same session, and the change is skipped
+ *               otherwise rather than hashed on a guess
+ *     delete -> content known, but SPEC has no deletion event (agit issue #3)
+ *   Patches that failed or were declined changed nothing and are skipped.
  */
 
+import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
+import { applyUnifiedDiff } from "../patch.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 export const CODEX_ADAPTER_NAME = "codex";
@@ -76,6 +87,14 @@ export const codexAdapter: Adapter = {
     };
 
     const body: DraftEvent[] = [];
+    /**
+     * File content agit can vouch for, keyed by the path Codex reports.
+     * Seeded by Add (full content recorded) and carried forward through
+     * Updates whose diff applies cleanly. An Update to a file that was never
+     * seen in this session has no entry — Codex records only the diff, never
+     * the base — and is skipped rather than hashed on a guess.
+     */
+    const known = new Map<string, string>();
     let sessionId: string | null = null;
     let startDraft: DraftEvent | null = null;
     let currentModel: string | null = null;
@@ -260,6 +279,49 @@ export const codexAdapter: Adapter = {
           });
           continue;
         }
+        // Structured file edits. Codex records the same FileChange data on
+        // two paths depending on the thread's history mode (verified against
+        // codex-rs/rollout/src/policy.rs): Legacy persists `patch_apply_end`,
+        // Paginated persists `item_completed` carrying a FileChange turn item.
+        // PatchApplyBegin/TurnDiff are transient and never written, so this is
+        // the only place structured edits appear.
+        if (kind === "patch_apply_end") {
+          emitFileDiffs({
+            ts,
+            changes: p.changes,
+            callId: str(p.call_id),
+            applied: p.success === true || p.status === "completed",
+            status: str(p.status) || (p.success === true ? "completed" : "unknown"),
+            body,
+            known,
+            skip,
+          });
+          continue;
+        }
+        if (kind === "item_completed") {
+          const item = p.item;
+          if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+            const it = item as Record<string, unknown>;
+            // TurnItem is serde-tagged without a rename, so the variant tag is
+            // "FileChange"; snake_case is accepted too since only the wire
+            // form of the tag is in question, never the payload's meaning.
+            if (it.type === "FileChange" || it.type === "file_change") {
+              emitFileDiffs({
+                ts,
+                changes: it.changes,
+                callId: str(it.id),
+                applied: it.status === undefined || it.status === "completed",
+                status: str(it.status) || "completed",
+                body,
+                known,
+                skip,
+              });
+              continue;
+            }
+          }
+          skip("event_msg:item_completed");
+          continue;
+        }
         // agent_message and task_complete duplicate assistant response_items
         // text for text (verified); everything else is runtime telemetry.
         skip(`event_msg:${str(kind) || "?"}`);
@@ -280,6 +342,151 @@ export const codexAdapter: Adapter = {
     return { sessionId, drafts, records, skipped };
   },
 };
+
+/**
+ * Turn one patch application's `changes` map into file.diff drafts.
+ *
+ * What each FileChange variant gives us (codex-rs/protocol/src/protocol.rs):
+ *  - add    { content }                    full after-content -> exact hashes
+ *  - update { unified_diff, move_path }    diff only; hashes need the base,
+ *                                          which agit has only if the file was
+ *                                          created or updated earlier in this
+ *                                          same session
+ *  - delete { content }                    before-content, but agit has no
+ *                                          deletion event (SPEC has 8 types)
+ *
+ * Only verified content is emitted: every draft carries hashes computed from
+ * bytes agit actually holds. Anything else is skipped and counted, never
+ * inferred — the same rule the shell-edit blind spot follows.
+ */
+function emitFileDiffs(args: {
+  ts: string;
+  changes: unknown;
+  callId: string;
+  applied: boolean;
+  status: string;
+  body: DraftEvent[];
+  known: Map<string, string>;
+  skip: (key: string) => void;
+}): void {
+  const { ts, changes, callId, applied, status, body, known, skip } = args;
+  if (changes === null || typeof changes !== "object" || Array.isArray(changes)) {
+    skip("patch_apply:no changes");
+    return;
+  }
+  if (!applied) {
+    // Failed or declined patches changed nothing on disk.
+    skip(`patch_apply:${status || "not applied"}`);
+    return;
+  }
+  // Rust serializes `changes` from a HashMap, whose order is not stable.
+  // Sorting keeps imports byte-identical run to run (SPEC §7).
+  for (const path of Object.keys(changes as Record<string, unknown>).sort()) {
+    const change = (changes as Record<string, unknown>)[path];
+    if (change === null || typeof change !== "object" || Array.isArray(change)) {
+      skip("patch_apply:malformed change");
+      continue;
+    }
+    const c = change as Record<string, unknown>;
+    const kind = str(c.type);
+
+    if (kind === "add") {
+      if (typeof c.content !== "string") {
+        skip("patch_apply:add(no content)");
+        continue;
+      }
+      body.push({
+        ts,
+        type: "file.diff",
+        payload: fileDiffPayload(path, null, c.content, null, callId, "apply_patch"),
+      });
+      known.set(path, c.content);
+      continue;
+    }
+
+    if (kind === "update") {
+      if (typeof c.unified_diff !== "string") {
+        skip("patch_apply:update(no diff)");
+        continue;
+      }
+      if (typeof c.move_path === "string" && c.move_path !== "") {
+        // A rename is two paths and no agit event says so; recording only the
+        // content change would silently lose the move.
+        skip("patch_apply:update(rename)");
+        continue;
+      }
+      const before = known.get(path);
+      if (before === undefined) {
+        // The file predates this session: Codex recorded the diff but never
+        // the base, so no hash here would be verifiable.
+        skip("patch_apply:update(base content not in log)");
+        continue;
+      }
+      let after: string;
+      try {
+        after = applyUnifiedDiff(before, c.unified_diff);
+      } catch {
+        // Our reconstruction and the runtime's diff disagree — emitting a
+        // hash now would assert something unproven.
+        skip("patch_apply:update(diff did not apply)");
+        continue;
+      }
+      body.push({
+        ts,
+        type: "file.diff",
+        payload: fileDiffPayload(path, before, after, c.unified_diff, callId, "apply_patch"),
+      });
+      known.set(path, after);
+      continue;
+    }
+
+    if (kind === "delete") {
+      known.delete(path);
+      skip("patch_apply:delete(no deletion event in SPEC)");
+      continue;
+    }
+    skip(`patch_apply:${kind || "?"}`);
+  }
+}
+
+/** Same payload shape the Claude Code adapter emits, so views need no special cases. */
+function fileDiffPayload(
+  path: string,
+  before: string | null,
+  after: string,
+  runtimeDiff: string | null,
+  toolUseId: string,
+  source: string,
+): { [key: string]: Json } {
+  return {
+    path,
+    kind: before === null ? "create" : "modify",
+    diff: runtimeDiff ?? synthesizeDiff(path, before, after),
+    beforeHash: before === null ? null : sha256Utf8(before),
+    afterHash: sha256Utf8(after),
+    toolUseId,
+    source,
+  };
+}
+
+/** A correct, if unminimized, full-file diff — used when the runtime gave none (adds). */
+function synthesizeDiff(path: string, before: string | null, after: string): string {
+  const header = before === null ? `--- /dev/null\n+++ b/${path}` : `--- a/${path}\n+++ b/${path}`;
+  const split = (s: string): string[] => {
+    if (s === "") return [];
+    const lines = s.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    return lines;
+  };
+  const b = before === null ? [] : split(before);
+  const a = split(after);
+  const lines = [...b.map((l) => `-${l}`), ...a.map((l) => `+${l}`)];
+  return `${header}\n@@ -${b.length === 0 ? 0 : 1},${b.length} +${a.length === 0 ? 0 : 1},${a.length} @@\n${lines.join("\n")}\n`;
+}
+
+function sha256Utf8(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";

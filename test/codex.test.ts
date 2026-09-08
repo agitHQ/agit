@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ import { canonicalJson } from "../src/format/canonical.js";
 import { buildChain, toJsonl } from "../src/format/hash.js";
 import { verifyChain } from "../src/format/verify.js";
 import type { DraftEvent, Json } from "../src/format/events.js";
+import { reconstructTree } from "../src/fork.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const codexLines = readFileSync(join(ROOT, "fixtures", "codex", "simple.jsonl"), "utf8")
@@ -16,6 +18,11 @@ const codexLines = readFileSync(join(ROOT, "fixtures", "codex", "simple.jsonl"),
 const claudeLines = readFileSync(join(ROOT, "fixtures", "claude-code", "simple.jsonl"), "utf8")
   .split("\n")
   .filter((l) => l.trim() !== "");
+
+const editLines = readFileSync(join(ROOT, "fixtures", "codex", "edits.jsonl"), "utf8")
+  .split("\n")
+  .filter((l) => l.trim() !== "");
+const sha = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
 const payloadOf = (drafts: DraftEvent[], i: number): { [k: string]: Json } =>
   drafts[i]!.payload as { [k: string]: Json };
@@ -143,6 +150,126 @@ describe("codex adapter", () => {
 
   it("refuses a file with no session_meta", () => {
     expect(() => codexAdapter.convert(codexLines.slice(1))).toThrow(/session_meta/);
+  });
+
+  it("emits verified file.diff events from structured patches", () => {
+    const res = codexAdapter.convert(editLines);
+    const diffs = res.drafts
+      .filter((d) => d.type === "file.diff")
+      .map((d) => d.payload as { [k: string]: Json });
+
+    const ADDED = 'def main():\n    print("hi")\n';
+    const UPDATED = 'def main():\n    print("hello there")\n';
+
+    // Add: full content is recorded, so the create is exactly hashable.
+    const create = diffs[0]!;
+    expect(create).toMatchObject({
+      path: "C:\\work\\app\\hello.py",
+      kind: "create",
+      beforeHash: null,
+      afterHash: sha(ADDED),
+      source: "apply_patch",
+      toolUseId: "call_add1",
+    });
+    expect(create.diff).toContain("--- /dev/null");
+    expect(create.diff).toContain('+    print("hi")');
+
+    // Update: the base is known from the create, so both hashes are real and
+    // the chain links — this is the property fork depends on.
+    const modify = diffs[1]!;
+    expect(modify).toMatchObject({
+      path: "C:\\work\\app\\hello.py",
+      kind: "modify",
+      beforeHash: sha(ADDED),
+      afterHash: sha(UPDATED),
+    });
+    expect(modify.beforeHash).toBe(create.afterHash);
+    // The runtime's own unified diff is kept verbatim, not re-synthesized.
+    expect(modify.diff).toContain('+    print("hello there")');
+
+    // Paginated history mode delivers the same data as a FileChange turn item.
+    const notes = diffs.find((d) => String(d.path).endsWith("notes.md"))!;
+    expect(notes).toMatchObject({ kind: "create", afterHash: sha("# notes\n\n- shipped\n") });
+  });
+
+  it("orders a multi-file patch by path so imports stay byte-identical", () => {
+    // Rust serializes `changes` from a HashMap; its order is not stable, and
+    // the fixture deliberately lists z, a, m in that order.
+    const res = codexAdapter.convert(editLines);
+    const singles = res.drafts
+      .filter((d) => d.type === "file.diff")
+      .map((d) => String((d.payload as { path: Json }).path))
+      .filter((p) => /\\[amz]\.py$/.test(p));
+    expect(singles).toEqual(["C:\\work\\app\\a.py", "C:\\work\\app\\m.py", "C:\\work\\app\\z.py"]);
+  });
+
+  it("skips every change it cannot verify, and says why", () => {
+    const res = codexAdapter.convert(editLines);
+    expect(res.skipped).toMatchObject({
+      // Codex records only the diff for a file that predates the session.
+      "patch_apply:update(base content not in log)": 1,
+      // SPEC has eight event types and none of them is a deletion.
+      "patch_apply:delete(no deletion event in SPEC)": 1,
+      // Nothing reached disk for these two.
+      "patch_apply:failed": 1,
+      "patch_apply:declined": 1,
+      // A rename is two paths; recording only content would lose the move.
+      "patch_apply:update(rename)": 1,
+      // Malformed and partial payloads, counted rather than guessed at.
+      "patch_apply:add(no content)": 1,
+      "patch_apply:update(no diff)": 1,
+      "patch_apply:malformed change": 1,
+      "patch_apply:teleport": 1,
+      "patch_apply:no changes": 1,
+      // Our reconstruction and the runtime's diff disagreed.
+      "patch_apply:update(diff did not apply)": 1,
+    });
+    // None of those produced an event.
+    const paths = res.drafts
+      .filter((d) => d.type === "file.diff")
+      .map((d) => String((d.payload as { path: Json }).path));
+    expect(paths.some((p) => p.endsWith("existing.py"))).toBe(false);
+    expect(paths.some((p) => p.endsWith("obsolete.py"))).toBe(false);
+    expect(paths.some((p) => p.endsWith("renamed.py"))).toBe(false);
+  });
+
+  it("a failed patch does not poison the content chain for later updates", () => {
+    // call_fail and call_drift both target hello.py; neither may change what
+    // agit believes hello.py contains.
+    const res = codexAdapter.convert(editLines);
+    const hello = res.drafts
+      .filter((d) => d.type === "file.diff")
+      .map((d) => d.payload as { [k: string]: Json })
+      .filter((p) => String(p.path).endsWith("hello.py"));
+    expect(hello).toHaveLength(2);
+    expect(hello[1]!.afterHash).toBe(sha('def main():\n    print("hello there")\n'));
+  });
+
+  it("file.diff payloads match the Claude Code adapter's shape exactly", () => {
+    const codexDiff = codexAdapter.convert(editLines).drafts.find((d) => d.type === "file.diff")!
+      .payload as Record<string, Json>;
+    const claudeDiff = claudeCodeAdapter.convert(claudeLines).drafts.find((d) => d.type === "file.diff")!
+      .payload as Record<string, Json>;
+    expect(Object.keys(codexDiff).sort()).toEqual(Object.keys(claudeDiff).sort());
+  });
+
+  it("the edits fixture is deterministic and chains into a verifiable log", () => {
+    const a = codexAdapter.convert(editLines);
+    const b = codexAdapter.convert(editLines);
+    const jsonl = toJsonl(buildChain(a.sessionId, a.drafts));
+    expect(jsonl).toBe(toJsonl(buildChain(b.sessionId, b.drafts)));
+    expect(verifyChain(jsonl.trimEnd().split("\n")).ok).toBe(true);
+  });
+
+  it("reconstructs a working tree from a Codex session (what fork needs)", () => {
+    const res = codexAdapter.convert(editLines);
+    const events = buildChain(res.sessionId, res.drafts);
+    const { files, skipped } = reconstructTree(events, events.length - 1);
+    expect(skipped).toEqual([]);
+    const byName = Object.fromEntries(files.map((f) => [f.path.split("\\").pop(), f.content]));
+    expect(byName["hello.py"]).toBe('def main():\n    print("hello there")\n');
+    expect(byName["notes.md"]).toBe("# notes\n\n- shipped\n");
+    expect(Object.keys(byName).sort()).toEqual(["a.py", "hello.py", "m.py", "notes.md", "z.py"]);
   });
 
   it("session.start carries provenance", () => {
