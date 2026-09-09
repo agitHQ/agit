@@ -52,6 +52,15 @@ import {
   writeShareState,
 } from "./store.js";
 import { clipLine, fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
+import {
+  computeStats,
+  GROUP_BY,
+  isGroupBy,
+  parsePriceTable,
+  PriceTableError,
+  type PriceTable,
+  type StatsRow,
+} from "./stats.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
@@ -73,6 +82,9 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
+  agit stats [--by day|model|runtime|project]
+                                       store-wide usage across every session;
+                                       --since narrows, --price <file> costs it
   agit grep <pattern>                  search every imported session; --type
                                        narrows to one event type, --path matches
                                        file paths only, --regex, -s case-sensitive
@@ -99,7 +111,9 @@ options:
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
-  --since <dur>    import --all: only logs modified within 7d / 24h / 30m
+  --since <dur>    import --all / stats: window of 7d / 24h / 30m
+  --by <group>     stats: day (default), model, runtime or project
+  --price <file>   stats: a local rate table; without it no money is shown
   --type <t>       grep: only this event type (tool.call, file.diff, ...)
   --path           grep: match file.diff paths instead of rendered lines
   --regex          grep: treat the pattern as a regular expression
@@ -137,6 +151,8 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  by?: string;
+  price?: string;
   args: string[];
 }
 
@@ -191,6 +207,8 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--by") opts.by = argv[++i];
+    else if (a === "--price") opts.price = argv[++i];
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -212,6 +230,8 @@ async function main(): Promise<number> {
       return cmdVerify(opts);
     case "replay":
       return cmdReplay(opts);
+    case "stats":
+      return cmdStats(opts);
     case "grep":
       return cmdGrep(opts);
     case "export":
@@ -1079,6 +1099,106 @@ function cmdPr(opts: Opts): number {
  * anyway. Sessions that fail to parse are reported to stderr and skipped:
  * one corrupt store entry must not hide every other session's matches.
  */
+function cmdStats(opts: Opts): number {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    return 1;
+  }
+  const by = opts.by ?? "day";
+  if (!isGroupBy(by)) {
+    console.error(`unknown --by ${JSON.stringify(by)}; one of: ${GROUP_BY.join(", ")}`);
+    return 2;
+  }
+  let prices: PriceTable | undefined;
+  if (opts.price !== undefined) {
+    try {
+      prices = parsePriceTable(readFileSync(resolve(opts.price), "utf8"));
+    } catch (err) {
+      console.error(
+        err instanceof PriceTableError
+          ? `--price ${opts.price}: ${err.message}`
+          : `--price ${opts.price}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 2;
+    }
+  }
+
+  const sessions = [];
+  for (const id of listSessionIds(opts.dir)) {
+    try {
+      sessions.push({ id, events: readSessionEvents(opts.dir, id) });
+    } catch {
+      // One corrupt session must not take down the whole report.
+      console.error(`skipping ${id.slice(0, 8)}: unreadable (agit verify it)`);
+    }
+  }
+  if (sessions.length === 0) {
+    if (opts.json) process.stdout.write(JSON.stringify({ by, rows: [], totals: null }, null, 2) + "\n");
+    else console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+
+  const res = computeStats(sessions, { by, sinceMs: opts.since, prices });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ by, since: opts.since ?? null, ...res }, null, 2) + "\n");
+    return 0;
+  }
+
+  const money = (r: StatsRow): string =>
+    prices === undefined ? "" : r.cost === undefined ? "—" : r.cost.toFixed(2);
+  const n = (x: number): string => x.toLocaleString("en-US");
+  const cell = (r: StatsRow): Record<string, string> => ({
+    key: r.key,
+    calls: r.costRecorded ? n(r.apiCalls) : "—",
+    in: r.costRecorded ? n(r.inputTokens) : "—",
+    out: r.costRecorded ? n(r.outputTokens) : "—",
+    cacheRead: r.costRecorded ? n(r.cacheReadInputTokens) : "—",
+    cacheWrite: r.costRecorded ? n(r.cacheCreationInputTokens) : "—",
+    sessions: n(r.sessions),
+    files: n(r.files),
+    ...(prices ? { cost: money(r) } : {}),
+  });
+
+  const head: Record<string, string> = {
+    key: by.toUpperCase(),
+    calls: "CALLS",
+    in: "IN",
+    out: "OUT",
+    cacheRead: "CACHE READ",
+    cacheWrite: "CACHE WRITE",
+    sessions: "SESSIONS",
+    files: "FILES",
+    ...(prices ? { cost: prices.currency ? `COST (${prices.currency})` : "COST" } : {}),
+  };
+  const cols = Object.keys(head);
+  const table = [...res.rows.map(cell), cell(res.totals)];
+  table[table.length - 1]!.key = "total";
+  const widths = cols.map((c) => Math.max(head[c]!.length, ...table.map((r) => r[c]!.length)));
+  const line = (r: Record<string, string>): string =>
+    cols.map((c, i) => (c === "key" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
+
+  console.log(line(head));
+  for (const r of table.slice(0, -1)) console.log(line(r));
+  console.log(line(table[table.length - 1]!));
+
+  // A dash is not a zero: say which it is.
+  if (res.rows.some((r) => !r.costRecorded)) {
+    console.log("\n— = no cost events recorded for that group; its token counts are unknown, not zero.");
+  }
+  const unpriced = res.totals.unpriced ?? [];
+  if (unpriced.length > 0) {
+    console.log(`no rate in the price table for: ${unpriced.join(", ")} — those rows are uncosted.`);
+  }
+  if (prices === undefined) {
+    console.log("\n(no money shown: pass --price <file> with your own rate table. See README.)");
+  }
+  if (res.skippedBySince > 0) {
+    console.log(`${res.skippedBySince} session(s) outside --since were not counted.`);
+  }
+  console.log("(files = lower bound: structured edits only — shell-driven changes are not tracked)");
+  return 0;
+}
+
 function cmdGrep(opts: Opts): number {
   const pattern = opts.args[0];
   if (pattern === undefined || pattern === "") {
