@@ -38,7 +38,13 @@ import {
   type ShareInfo,
 } from "./share.js";
 import {
+  addTag,
   assertSafeSessionId,
+  minimalPrefixes,
+  readNotes,
+  removeSession,
+  removeTag,
+  setNote,
   deleteShareState,
   listSessionIds,
   readSessionEvents,
@@ -47,6 +53,7 @@ import {
   resolveSessionId,
   resolveShareState,
   sessionDir,
+  type SessionNotes,
   type ShareState,
   writeSession,
   writeShareState,
@@ -64,7 +71,13 @@ usage:
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
   agit import --latest                 import the most recently written session
-  agit ls                              list imported sessions
+  agit ls [--tag T] [--runtime R]       list imported sessions; --sort orders by
+         [--project P] [--sort KEY]     started (default), events, files or id
+  agit tag <id> <tag>                  tag a session (--remove <tag> to drop one)
+  agit note <id> "<text>"              attach a note (--clear to remove it)
+  agit rm <id> [--yes]                 delete a session from the store
+  agit gc --older-than 90d             delete sessions older than a cutoff;
+         [--keep-tagged] [--yes]       --keep-tagged spares anything tagged
   agit show <id> [--by-model]          summarize one session; --by-model splits
                                        cost and file edits per model
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
@@ -96,6 +109,13 @@ usage:
 
 options:
   --dir <path>     where .agit/ lives (default: current directory)
+  --tag <t>        ls/grep: only sessions carrying this tag
+  --runtime <r>    ls: only sessions from this runtime
+  --project <p>    ls: only sessions whose cwd ends in this directory name
+  --sort <key>     ls: started (default), events, files or id
+  --older-than <d> gc: cutoff, e.g. 90d
+  --keep-tagged    gc: never delete a tagged session
+  --yes, -y        rm/gc: skip the confirmation prompt
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
@@ -137,6 +157,13 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  tag?: string;
+  runtime?: string;
+  project?: string;
+  sort?: string;
+  olderThan?: number;
+  keepTagged: boolean;
+  yes: boolean;
   args: string[];
 }
 
@@ -156,6 +183,8 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     static: false,
     resume: false,
     trustedProxies: [],
+    keepTagged: false,
+    yes: false,
     args: [],
   };
   const rest: string[] = [];
@@ -191,7 +220,20 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
-    else if (a === "--help" || a === "-h") rest.unshift("help");
+    else if (a === "--tag") opts.tag = argv[++i];
+    else if (a === "--runtime") opts.runtime = argv[++i];
+    else if (a === "--project") opts.project = argv[++i];
+    else if (a === "--sort") opts.sort = argv[++i];
+    else if (a === "--keep-tagged") opts.keepTagged = true;
+    else if (a === "--yes" || a === "-y") opts.yes = true;
+    else if (a === "--older-than") {
+      const ms = parseSince(argv[++i] ?? "");
+      if (ms === null) {
+        console.error("--older-than takes a duration like 90d, 24h or 30m");
+        process.exit(2);
+      }
+      opts.olderThan = ms;
+    } else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
   const verb = rest.shift() ?? "help";
@@ -204,6 +246,14 @@ async function main(): Promise<number> {
   switch (verb) {
     case "import":
       return cmdImport(opts);
+    case "tag":
+      return cmdTag(opts);
+    case "note":
+      return cmdNote(opts);
+    case "rm":
+      return cmdRm(opts);
+    case "gc":
+      return cmdGc(opts);
     case "ls":
       return cmdLs(opts);
     case "show":
@@ -637,6 +687,130 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   return 0;
 }
 
+async function confirm(question: string, yes: boolean): Promise<boolean> {
+  if (yes) return true;
+  if (!process.stdin.isTTY) {
+    console.error(`${question} — refusing without a terminal to ask; pass --yes to mean it.`);
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+  rl.close();
+  return answer === "y" || answer === "yes";
+}
+
+function cmdTag(opts: Opts): number {
+  const [idArg, tag] = opts.args;
+  if (!idArg || !tag) {
+    console.error("usage: agit tag <id> <tag>   |   agit tag <id> --remove <tag>");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  // `agit tag x --remove y` parses as args [x, --remove?]; keep it explicit.
+  const remove = opts.args.includes("--remove");
+  const value = remove ? opts.args[opts.args.indexOf("--remove") + 1] : tag;
+  if (remove && !value) {
+    console.error("usage: agit tag <id> --remove <tag>");
+    return 2;
+  }
+  const notes = remove ? removeTag(opts.dir, id, value!) : addTag(opts.dir, id, value!);
+  console.log(`${id}: tags ${notes.tags.length > 0 ? notes.tags.join(", ") : "(none)"}`);
+  return 0;
+}
+
+function cmdNote(opts: Opts): number {
+  const idArg = opts.args[0];
+  if (!idArg) {
+    console.error('usage: agit note <id> "<text>"   |   agit note <id> --clear');
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  if (opts.args.includes("--clear")) {
+    setNote(opts.dir, id, null);
+    console.log(`${id}: note cleared`);
+    return 0;
+  }
+  const text = opts.args.slice(1).join(" ").trim();
+  if (text === "") {
+    const current = readNotes(opts.dir, id).note;
+    console.log(current ?? "(no note)");
+    return 0;
+  }
+  setNote(opts.dir, id, text);
+  console.log(`${id}: note saved`);
+  return 0;
+}
+
+async function cmdRm(opts: Opts): Promise<number> {
+  const idArg = opts.args[0];
+  if (!idArg) {
+    console.error("usage: agit rm <id> [--yes]");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  const events = (() => {
+    try {
+      return readSessionEvents(opts.dir, id);
+    } catch {
+      return [];
+    }
+  })();
+  console.log(`${id}: ${events.length} events${events[0] ? `, started ${events[0].ts}` : ""}`);
+  const notes = readNotes(opts.dir, id);
+  if (notes.tags.length > 0) console.log(`  tagged ${notes.tags.join(", ")}`);
+  if (notes.note) console.log(`  note: ${notes.note}`);
+  // A fork made from this session lives outside the store and keeps only the
+  // session id in fork.json; deleting the log leaves it with no merge base.
+  console.log("  any fork of this session loses its merge base — `agit merge` needs the log.");
+  if (!(await confirm(`delete ${id} permanently?`, opts.yes))) {
+    console.log("nothing deleted.");
+    return 1;
+  }
+  removeSession(opts.dir, id);
+  console.log(`deleted ${id}`);
+  return 0;
+}
+
+async function cmdGc(opts: Opts): Promise<number> {
+  if (opts.olderThan === undefined) {
+    console.error("usage: agit gc --older-than 90d [--keep-tagged] [--yes]");
+    return 2;
+  }
+  const cutoff = Date.now() - opts.olderThan;
+  const doomed: { id: string; last: string; tags: string[] }[] = [];
+  for (const id of listSessionIds(opts.dir)) {
+    let events;
+    try {
+      events = readSessionEvents(opts.dir, id);
+    } catch {
+      continue; // unreadable: leave it alone rather than delete what we cannot read
+    }
+    if (events.length === 0) continue;
+    const last = events[events.length - 1]!.ts;
+    if (Date.parse(last) >= cutoff) continue;
+    const tags = readNotes(opts.dir, id).tags;
+    if (opts.keepTagged && tags.length > 0) continue;
+    doomed.push({ id, last, tags });
+  }
+  if (doomed.length === 0) {
+    console.log("nothing older than the cutoff.");
+    return 0;
+  }
+  console.log(`${doomed.length} session(s) older than the cutoff:`);
+  for (const d of doomed) {
+    console.log(
+      `  ${d.id}  last event ${d.last.slice(0, 16).replace("T", " ")}${d.tags.length > 0 ? `  [${d.tags.join(", ")}]` : ""}`,
+    );
+  }
+  if (!(await confirm(`delete all ${doomed.length} permanently?`, opts.yes))) {
+    console.log("nothing deleted.");
+    return 1;
+  }
+  for (const d of doomed) removeSession(opts.dir, d.id);
+  console.log(`deleted ${doomed.length} session(s)`);
+  return 0;
+}
+
 function cmdLs(opts: Opts): number {
   if (!existsSync(opts.dir)) {
     console.error(`no such directory: ${opts.dir}`);
@@ -647,7 +821,10 @@ function cmdLs(opts: Opts): number {
     console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
-  const rows = ids.map((id) => {
+  // Show the shortest id prefix that is still unique here, the way git does.
+  const prefixes = minimalPrefixes(ids);
+  const built = ids.map((id) => {
+    const short = prefixes.get(id)!;
     // One corrupt session must not take down the whole listing.
     let events;
     try {
@@ -655,28 +832,79 @@ function cmdLs(opts: Opts): number {
       if (events.length === 0) throw new Error("empty log");
     } catch {
       return {
-        id: id.slice(0, 8),
-        started: "(corrupt — run `agit verify " + id.slice(0, 8) + "`)",
-        dur: "",
-        events: "",
-        files: "",
-        runtime: "",
+        sortKey: 0,
+        runtimeRaw: "",
+        projectRaw: "",
+        tags: [] as string[],
+        row: {
+          id: short,
+          started: "(corrupt — run `agit verify " + short + "`)",
+          dur: "",
+          events: "",
+          files: "",
+          runtime: "",
+          tags: "",
+        },
       };
     }
     const first = events[0]!;
     const last = events[events.length - 1]!;
-    const files = fileStateAt(events).size;
-    const start = (first.payload as { runtime?: unknown }).runtime;
+    const start = first.payload as { runtime?: unknown; cwd?: unknown };
+    const runtimeRaw = typeof start.runtime === "string" ? start.runtime : "?";
+    const cwd = typeof start.cwd === "string" ? start.cwd : "";
+    const projectRaw =
+      cwd === ""
+        ? ""
+        : (cwd
+            .replace(/[\\/]+$/, "")
+            .split(/[\\/]/)
+            .pop() ?? "");
+    const tags = readNotes(opts.dir, id).tags;
     return {
-      id: id.slice(0, 8),
-      started: first.ts.slice(0, 16).replace("T", " "),
-      dur: humanDuration(Date.parse(last.ts) - Date.parse(first.ts)),
-      events: String(events.length),
-      files: String(files),
-      runtime: typeof start === "string" ? start : "?",
+      sortKey: Date.parse(first.ts),
+      runtimeRaw,
+      projectRaw,
+      tags,
+      row: {
+        id: short,
+        started: first.ts.slice(0, 16).replace("T", " "),
+        dur: humanDuration(Date.parse(last.ts) - Date.parse(first.ts)),
+        events: String(events.length),
+        files: String(fileStateAt(events).size),
+        runtime: runtimeRaw,
+        tags: tags.join(","),
+      },
     };
   });
-  const cols = ["id", "started", "dur", "events", "files", "runtime"] as const;
+
+  const filtered = built.filter(
+    (b) =>
+      (opts.tag === undefined || b.tags.includes(opts.tag)) &&
+      (opts.runtime === undefined || b.runtimeRaw === opts.runtime) &&
+      (opts.project === undefined || b.projectRaw === opts.project),
+  );
+  const sortBy = opts.sort ?? "started";
+  if (!["started", "events", "files", "id"].includes(sortBy)) {
+    console.error(`unknown --sort ${JSON.stringify(sortBy)}; one of: started, events, files, id`);
+    return 2;
+  }
+  filtered.sort((a, b) => {
+    if (sortBy === "events") return Number(b.row.events) - Number(a.row.events);
+    if (sortBy === "files") return Number(b.row.files) - Number(a.row.files);
+    if (sortBy === "id") return a.row.id.localeCompare(b.row.id);
+    return a.sortKey - b.sortKey;
+  });
+  if (filtered.length === 0) {
+    console.log("no sessions match those filters.");
+    return 0;
+  }
+  const rows = filtered.map((b) => b.row);
+  const anyTags = rows.some((r) => r.tags !== "");
+  const cols = (
+    anyTags
+      ? ["id", "started", "dur", "events", "files", "runtime", "tags"]
+      : ["id", "started", "dur", "events", "files", "runtime"]
+  ) as readonly ("id" | "started" | "dur" | "events" | "files" | "runtime" | "tags")[];
   const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => r[c].length)));
   console.log(cols.map((c, i) => c.toUpperCase().padEnd(widths[i]!)).join("  "));
   for (const r of rows) console.log(cols.map((c, i) => r[c].padEnd(widths[i]!)).join("  "));
@@ -700,6 +928,9 @@ function cmdShow(opts: Opts): number {
   console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
   if (meta)
     console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+  const notes: SessionNotes = readNotes(opts.dir, id);
+  if (notes.tags.length > 0) console.log(`  tags        ${notes.tags.join(", ")}`);
+  if (notes.note) console.log(`  note        ${notes.note}`);
 
   const byType = new Map<string, number>();
   const tools = new Map<string, number>();
@@ -1106,9 +1337,14 @@ function cmdGrep(opts: Opts): number {
     return 2;
   }
 
-  const ids = listSessionIds(opts.dir);
+  let ids = listSessionIds(opts.dir);
+  if (opts.tag !== undefined) ids = ids.filter((id) => readNotes(opts.dir, id).tags.includes(opts.tag!));
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    console.log(
+      opts.tag !== undefined
+        ? `no sessions tagged ${JSON.stringify(opts.tag)}`
+        : "no sessions imported yet (agit import <file>)",
+    );
     return 0;
   }
   const idWidth = 8;
