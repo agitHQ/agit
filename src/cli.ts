@@ -12,6 +12,8 @@ import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
 import { verifyChain } from "./format/verify.js";
 import {
+  EVENT_TYPES,
+  isEventType,
   SCHEMA_VERSION,
   SUPPORTED_SCHEMA_VERSIONS,
   type AgitEvent,
@@ -71,11 +73,13 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
-  agit grep <pattern> [--type T]       search every imported session; --path
-        [--path] [--regex] [-i|-s]     matches file.diff paths only
+  agit grep <pattern>                  search every imported session; --type
+                                       narrows to one event type, --path matches
+                                       file paths only, --regex, -s case-sensitive
   agit export <id> [--json]            write the event log to stdout — JSONL, or a
                                        JSON array with --json — for other tools
-  agit export-html <id> [--out FILE]   write a self-contained, offline HTML session viewer
+  agit export-html <id> [--out FILE]   write a self-contained, offline HTML session
+                       [--at N]        viewer; --at N exports the prefix up to event N
   agit fork <id> --at N [--out DIR]    branch at event N: reconstruct the file tree
                                        (hash-verified) and write a context seed
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
@@ -634,6 +638,10 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
 }
 
 function cmdLs(opts: Opts): number {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    return 1;
+  }
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
     console.log("no sessions imported yet (agit import <file>)");
@@ -763,8 +771,17 @@ function cmdShow(opts: Opts): number {
  */
 function printByModel(events: AgitEvent[]): void {
   const rows = usageByModel(events);
-  if (rows.length === 0) {
-    console.log("\nno cost events in this session — nothing to attribute");
+  const calls = rows.reduce((n, r) => n + r.apiMessages, 0);
+  if (calls === 0) {
+    // No tokens to split; say what is known instead of printing a row of zeros.
+    const touched = rows.reduce((n, r) => n + r.files.size, 0);
+    const credited = rows.map((r) => r.model).filter((m) => m !== "(unattributed)");
+    console.log(
+      `\nno cost events in this session — ${touched} file${touched === 1 ? "" : "s"} touched` +
+        (credited.length > 0
+          ? `, credited to ${credited.join(", ")} (the only model named)`
+          : ", no model to credit"),
+    );
     return;
   }
   const table = rows.map((r) => ({
@@ -835,6 +852,10 @@ async function cmdReplay(opts: Opts): Promise<number> {
     return 0;
   }
 
+  if (opts.at !== undefined && (!Number.isInteger(opts.at) || opts.at < 0 || opts.at >= events.length)) {
+    console.error(`--at ${opts.at} is outside this session (0..${events.length - 1})`);
+    return 2;
+  }
   let pos = clamp(opts.at ?? 0, 0, events.length - 1);
   printEventDetail(events, pos);
   if (opts.state) printStateAt(events, pos);
@@ -1074,6 +1095,16 @@ function cmdGrep(opts: Opts): number {
     console.error(err instanceof GrepPatternError ? err.message : String(err));
     return 2;
   }
+  if (opts.grepType !== undefined && !isEventType(opts.grepType)) {
+    console.error(`unknown event type ${JSON.stringify(opts.grepType)}; one of: ${EVENT_TYPES.join(", ")}`);
+    return 2;
+  }
+  if (opts.grepPath && opts.grepType !== undefined && !["file.diff", "file.delete"].includes(opts.grepType)) {
+    console.error(
+      `--path searches file.diff and file.delete paths; it cannot combine with --type ${opts.grepType}`,
+    );
+    return 2;
+  }
 
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
@@ -1124,20 +1155,31 @@ function cmdExportHtml(opts: Opts): number {
   const meta = readSessionMeta(opts.dir, id);
   if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
 
-  const events = readSessionEvents(opts.dir, id);
-  const outPath = resolve(opts.out ?? `agit-${id.slice(0, 8)}.html`);
+  const all = readSessionEvents(opts.dir, id);
+  if (opts.at !== undefined && (!Number.isInteger(opts.at) || opts.at < 0 || opts.at >= all.length)) {
+    console.error(`--at ${opts.at} is outside this session (0..${all.length - 1})`);
+    return 2;
+  }
+  const at = opts.at;
+  const events = at === undefined ? all : all.filter((e) => e.seq <= at);
+  const outPath = resolve(opts.out ?? `agit-${id.slice(0, 8)}${at === undefined ? "" : `-at${at}`}.html`);
 
   if (existsSync(outPath)) {
     console.error(`refusing to overwrite existing ${outPath} — pass a fresh --out`);
     return 1;
   }
 
-  const html = renderSessionHtml(events, meta);
+  // meta.json describes the whole log; a prefix must not claim its head.
+  const html = renderSessionHtml(events, at === undefined ? meta : null);
   writeFileSync(outPath, html, "utf8");
+  const bytes = Buffer.byteLength(html, "utf8");
 
   console.log(`exported session ${id} to:`);
   console.log(`  ${outPath}`);
-  console.log(`  ${events.length} events`);
+  console.log(
+    `  ${events.length} events${at === undefined ? "" : ` (of ${all.length}, up to --at ${at})`}, ${(bytes / 1e6).toFixed(1)} MB`,
+  );
+  if (bytes > 10e6) console.log("  large page — the viewer renders every event; --at N exports a prefix");
   console.log("  self-contained HTML — no network or external resources");
 
   return 0;
@@ -1542,6 +1584,10 @@ function short(h: unknown): string {
 }
 
 function requireId(opts: Opts): string {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    process.exit(1);
+  }
   const arg = opts.args[0];
   if (!arg) {
     console.error("missing <id> (agit ls to list sessions)");

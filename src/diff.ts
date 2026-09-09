@@ -72,15 +72,24 @@ function treeOf(events: AgitEvent[], at: number): { files: Map<string, string>; 
   return { files: map, skipped: skipped.length };
 }
 
-function statsOf(events: AgitEvent[], at: number, label: string, files: number, skipped: number): SideStats {
-  const upto = events.filter((e) => e.seq <= at);
+/** Work on one side; with `since`, only what happened after the shared point. */
+function statsOf(
+  events: AgitEvent[],
+  at: number,
+  label: string,
+  files: number,
+  skipped: number,
+  since: number | null = null,
+): SideStats {
+  const upto = events.filter((e) => e.seq <= at && (since === null || e.seq > since));
   const u = usageTotals(events, at);
+  const before = since === null ? null : usageTotals(events, since);
   return {
     label,
     events: upto.length,
     toolCalls: upto.filter((e) => e.type === "tool.call").length,
-    inputTokens: u.inputTokens,
-    outputTokens: u.outputTokens,
+    inputTokens: u.inputTokens - (before?.inputTokens ?? 0),
+    outputTokens: u.outputTokens - (before?.outputTokens ?? 0),
     files,
     unreconstructible: skipped,
   };
@@ -124,9 +133,9 @@ export function diffSessions(args: {
   });
 
   return {
-    a: statsOf(args.a.events, atA, args.a.label, treeA.files.size, treeA.skipped),
+    a: statsOf(args.a.events, atA, args.a.label, treeA.files.size, treeA.skipped, args.from?.seq ?? null),
     b: args.b.events
-      ? statsOf(args.b.events, atB, args.b.label, treeB.files.size, treeB.skipped)
+      ? statsOf(args.b.events, atB, args.b.label, treeB.files.size, treeB.skipped, args.from?.seq ?? null)
       : {
           label: args.b.label,
           events: 0,

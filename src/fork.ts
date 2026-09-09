@@ -103,11 +103,22 @@ export function reconstructTree(events: AgitEvent[], at: number): TreeReconstruc
         recovered.add(path);
       } else {
         content.delete(path);
+        // Three different situations used to read as one. Name the real one,
+        // and when the payload carries a redaction marker say so: a redacted
+        // diff or originalFile can never reproduce the hash recorded before
+        // redaction, and that is the cause, not a missing record.
+        const why =
+          orig === null
+            ? "no recorded originalFile to recover from"
+            : "the recorded originalFile does not hash to beforeHash";
+        const redacted =
+          p.diff.includes("[REDACTED:") || (orig !== null && orig.includes("[REDACTED:"))
+            ? " — content was redacted on import, so its recorded hash cannot be reproduced"
+            : "";
         broken.set(
           path,
-          diverged
-            ? `diverged at seq ${e.seq} with no recorded originalFile to recover from`
-            : `first seen as a modify at seq ${e.seq} with no recorded originalFile`,
+          (diverged ? `diverged at seq ${e.seq}, ${why}` : `first seen as a modify at seq ${e.seq}, ${why}`) +
+            redacted,
         );
         continue;
       }
@@ -126,7 +137,13 @@ export function reconstructTree(events: AgitEvent[], at: number): TreeReconstruc
     }
     if (sha256Hex(next) !== p.afterHash) {
       content.delete(path);
-      broken.set(path, `reconstruction did not match afterHash at seq ${e.seq}`);
+      broken.set(
+        path,
+        `reconstruction did not match afterHash at seq ${e.seq}` +
+          (p.diff.includes("[REDACTED:")
+            ? " — content was redacted on import, so its recorded hash cannot be reproduced"
+            : ""),
+      );
       continue;
     }
     broken.delete(path);

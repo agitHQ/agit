@@ -158,3 +158,47 @@ describe("diffSessions", () => {
     expect(paths).toEqual([...paths].sort());
   });
 });
+
+describe("work since the fork point (#58)", () => {
+  it("counts only what happened after `from` when a fork point is given", () => {
+    const withWork = session(
+      "sess-w",
+      "/work/w",
+      [["x.ts", "x\n"]],
+      [
+        { ts: TS(8), type: "tool.call", payload: { toolUseId: "t9", name: "Bash", input: {} } },
+        {
+          ts: TS(9),
+          type: "cost",
+          payload: {
+            model: "m",
+            usage: { inputTokens: 5, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+          },
+        },
+        { ts: TS(10), type: "tool.call", payload: { toolUseId: "t10", name: "Bash", input: {} } },
+        {
+          ts: TS(11),
+          type: "cost",
+          payload: {
+            model: "m",
+            usage: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+          },
+        },
+      ],
+    );
+    const whole = diffSessions({ a: { events: withWork, label: "A" }, b: { events: B, label: "B" } });
+    expect(whole.a.toolCalls).toBe(2);
+    expect(whole.a.outputTokens).toBe(9);
+
+    // From the first cost event onward: one tool call and one cost remain.
+    const fromSeq = withWork.find((e) => e.type === "cost")!.seq;
+    const since = diffSessions({
+      a: { events: withWork, label: "A" },
+      b: { events: B, label: "B" },
+      from: { seq: fromSeq, hash: withWork[fromSeq]!.hash },
+    });
+    expect(since.a.toolCalls).toBe(1);
+    expect(since.a.outputTokens).toBe(2);
+    expect(since.a.events).toBe(withWork.length - fromSeq - 1);
+  });
+});

@@ -181,10 +181,36 @@ export function usageByModel(events: AgitEvent[], at?: number): ModelUsage[] {
     return m;
   };
 
-  let current: string | null = null;
+  // Every model named anywhere in the window. With exactly one, there is no
+  // attribution question to be honest about: every edit is its.
+  const named = new Set<string>();
   for (const e of events) {
     if (at !== undefined && e.seq > at) break;
+    const m = (e.payload as { model?: Json }).model;
+    if (typeof m === "string" && m !== "") named.add(m);
+  }
+  const only = named.size === 1 ? [...named][0]! : null;
+
+  // Codex names the model on the assistant message that *ends* a turn, after
+  // its tool calls; Claude Code names it on the one that starts the turn.
+  // So an edit with nothing before it looks forward to the end of its turn.
+  const modelLaterInTurn = (from: number): string | null => {
+    for (let j = from + 1; j < events.length; j++) {
+      const e = events[j]!;
+      if (at !== undefined && e.seq > at) break;
+      if (e.type === "message.user") break;
+      const m = (e.payload as { model?: Json }).model;
+      if (typeof m === "string" && m !== "") return m;
+    }
+    return null;
+  };
+
+  let current: string | null = null;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i]!;
+    if (at !== undefined && e.seq > at) break;
     const p = e.payload as { model?: Json; usage?: { [k: string]: Json }; path?: Json };
+    if (e.type === "message.user") current = null; // a new turn: nothing precedes yet
     if (typeof p.model === "string" && p.model !== "") current = p.model;
 
     if (e.type === "cost") {
@@ -198,7 +224,7 @@ export function usageByModel(events: AgitEvent[], at?: number): ModelUsage[] {
       continue;
     }
     if (e.type === "file.diff" && typeof p.path === "string") {
-      bucket(current ?? UNATTRIBUTED).files.add(p.path);
+      bucket(current ?? modelLaterInTurn(i) ?? only ?? UNATTRIBUTED).files.add(p.path);
     }
   }
 

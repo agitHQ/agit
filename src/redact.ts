@@ -13,6 +13,12 @@ interface Pattern {
   replacement?: string;
 }
 
+// Anchoring: a pattern whose prefix is distinctive on its own (sk-ant-,
+// ghp_, AKIA, AIza, xoxb-, sk_live_, npm_) carries no leading \b — the prefix
+// is the boundary, and `_` or a letter immediately before a key is exactly
+// how a key ends up glued to an identifier or a filename. Only the generic
+// `sk-` shape keeps its anchor; unanchored it would eat `disk-usage-report-…`.
+//
 // Order matters: anthropic-key must run before the generic openai-key shape,
 // and specific token shapes before the generic assignment catch-all.
 const PATTERNS: Pattern[] = [
@@ -20,21 +26,21 @@ const PATTERNS: Pattern[] = [
     label: "private-key",
     regexes: [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g],
   },
-  { label: "anthropic-key", regexes: [/\bsk-ant-[A-Za-z0-9_-]{16,}/g] },
-  { label: "openai-key", regexes: [/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g] },
-  { label: "aws-access-key-id", regexes: [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g] },
+  { label: "anthropic-key", regexes: [/sk-ant-[A-Za-z0-9_-]{16,}/g] },
+  { label: "openai-key", regexes: [/sk-proj-[A-Za-z0-9_-]{20,}/g, /\bsk-[A-Za-z0-9_-]{20,}/g] },
+  { label: "aws-access-key-id", regexes: [/(?:AKIA|ASIA)[0-9A-Z]{16}\b/g] },
   {
     label: "github-token",
-    regexes: [/\bgh[pousr]_[A-Za-z0-9]{36,}\b/g, /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g],
+    regexes: [/gh[pousr]_[A-Za-z0-9]{36,}\b/g, /github_pat_[A-Za-z0-9_]{22,}\b/g],
   },
-  { label: "slack-token", regexes: [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g] },
+  { label: "slack-token", regexes: [/xox[baprs]-[A-Za-z0-9-]{10,}\b/g] },
   {
     label: "slack-webhook",
     regexes: [/\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9]+\/[A-Za-z0-9]+\/[A-Za-z0-9]+\b/g],
   },
-  { label: "google-api-key", regexes: [/\bAIza[0-9A-Za-z_-]{35}\b/g] },
-  { label: "stripe-key", regexes: [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b/g] },
-  { label: "npm-token", regexes: [/\bnpm_[A-Za-z0-9]{36}\b/g] },
+  { label: "google-api-key", regexes: [/AIza[0-9A-Za-z_-]{35}\b/g] },
+  { label: "stripe-key", regexes: [/(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b/g] },
+  { label: "npm-token", regexes: [/npm_[A-Za-z0-9]{36}\b/g] },
   { label: "jwt", regexes: [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g] },
   { label: "bearer", regexes: [/\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi] },
   {

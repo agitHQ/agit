@@ -186,18 +186,6 @@ describe("usageByModel", () => {
     expect(usageByModel(events)[0]!.files.size).toBe(1);
   });
 
-  it("says (unattributed) rather than guessing when no model precedes an edit", () => {
-    const events = buildChain("s", [
-      diff("2026-01-01T00:00:00.000Z", "orphan.ts"),
-      assistant("2026-01-01T00:00:01.000Z", "opus"),
-      cost("2026-01-01T00:00:02.000Z", "opus", 1),
-    ]);
-    const rows = usageByModel(events);
-    const orphan = rows.find((r) => r.model === "(unattributed)")!;
-    expect([...orphan.files]).toEqual(["orphan.ts"]);
-    expect(orphan.apiMessages).toBe(0);
-  });
-
   it("respects the --at cutoff, like the other folds", () => {
     const events = buildChain("s", [
       cost("2026-01-01T00:00:00.000Z", "opus", 10),
@@ -215,5 +203,68 @@ describe("usageByModel", () => {
     const t = usageTotals(events);
     expect(rows.reduce((n, r) => n + r.outputTokens, 0)).toBe(t.outputTokens);
     expect(rows.reduce((n, r) => n + r.apiMessages, 0)).toBe(t.apiMessages);
+  });
+});
+
+describe("usageByModel attribution across runtimes (#56)", () => {
+  const user = (ts: string): DraftEvent => ({ ts, type: "message.user", payload: { text: "go" } });
+  const assistant = (ts: string, model: string): DraftEvent => ({
+    ts,
+    type: "message.assistant",
+    payload: { model, blocks: [{ type: "text", text: "done" }], stopReason: null },
+  });
+  const diff = (ts: string, path: string): DraftEvent => ({
+    ts,
+    type: "file.diff",
+    payload: { path, kind: "create", diff: "", beforeHash: null, afterHash: "h", toolUseId: "t" },
+  });
+
+  it("Codex order — the model is named after the turn's edits — still attributes", () => {
+    const events = buildChain("s", [
+      user("2026-01-01T00:00:00.000Z"),
+      diff("2026-01-01T00:00:01.000Z", "a.py"),
+      diff("2026-01-01T00:00:02.000Z", "b.py"),
+      assistant("2026-01-01T00:00:03.000Z", "gpt-5.5"),
+    ]);
+    const rows = usageByModel(events);
+    expect(rows.map((r) => r.model)).toEqual(["gpt-5.5"]);
+    expect([...rows[0]!.files].sort()).toEqual(["a.py", "b.py"]);
+  });
+
+  it("a turn's model does not leak into the next turn's edits when that turn names its own", () => {
+    const events = buildChain("s", [
+      user("2026-01-01T00:00:00.000Z"),
+      assistant("2026-01-01T00:00:01.000Z", "opus"),
+      diff("2026-01-01T00:00:02.000Z", "a.py"),
+      user("2026-01-01T00:00:03.000Z"),
+      diff("2026-01-01T00:00:04.000Z", "b.py"),
+      assistant("2026-01-01T00:00:05.000Z", "haiku"),
+    ]);
+    const byModel = Object.fromEntries(usageByModel(events).map((r) => [r.model, [...r.files]]));
+    expect(byModel["opus"]).toEqual(["a.py"]);
+    expect(byModel["haiku"]).toEqual(["b.py"]);
+  });
+
+  it("with exactly one model in the session, edits are its even with nothing nearby", () => {
+    const events = buildChain("s", [
+      diff("2026-01-01T00:00:00.000Z", "orphan.py"),
+      user("2026-01-01T00:00:01.000Z"),
+      assistant("2026-01-01T00:00:02.000Z", "opus"),
+    ]);
+    const rows = usageByModel(events);
+    expect(rows.map((r) => r.model)).toEqual(["opus"]);
+    expect([...rows[0]!.files]).toEqual(["orphan.py"]);
+  });
+
+  it("with two models and nothing to go on, an edit stays unattributed rather than guessed", () => {
+    const events = buildChain("s", [
+      diff("2026-01-01T00:00:00.000Z", "orphan.py"),
+      user("2026-01-01T00:00:01.000Z"),
+      assistant("2026-01-01T00:00:02.000Z", "opus"),
+      user("2026-01-01T00:00:03.000Z"),
+      assistant("2026-01-01T00:00:04.000Z", "haiku"),
+    ]);
+    const orphan = usageByModel(events).find((r) => r.model === "(unattributed)");
+    expect(orphan && [...orphan.files]).toEqual(["orphan.py"]);
   });
 });

@@ -170,3 +170,34 @@ describe("redaction (SPEC §8)", () => {
     expect(out).toHaveLength(500_000); // untouched: no keyword, nothing to redact
   });
 });
+
+describe("redaction boundaries (#53)", () => {
+  const glued = (key: string): string => `WINDOW_${key}`;
+  const cases: [string, string][] = [
+    ["anthropic-key", "sk-ant-api03-" + "A".repeat(40)],
+    ["openai-key", "sk-proj-" + "B".repeat(40)],
+    ["github-token", "ghp_" + "C".repeat(36)],
+    ["github-token", "github_pat_" + "D".repeat(30)],
+    ["aws-access-key-id", "AKIA" + "E".repeat(16)],
+    ["slack-token", "xoxb-" + "1".repeat(12)],
+    ["google-api-key", "AIza" + "F".repeat(35)],
+    ["stripe-key", "sk_live_" + "G".repeat(24)],
+    ["npm-token", "npm_" + "H".repeat(36)],
+  ];
+  for (const [label, key] of cases) {
+    it(`${label}: a key glued to a preceding identifier is still caught`, () => {
+      const counts: RedactionCounts = {};
+      const out = redactString(glued(key), counts);
+      expect(out).not.toContain(key);
+      expect(out).toContain(`[REDACTED:${label}]`);
+      expect(counts[label]).toBe(1);
+    });
+  }
+
+  it("the generic sk- shape keeps its anchor, so ordinary hyphenated words survive", () => {
+    const counts: RedactionCounts = {};
+    const text = "see disk-usage-report-2026-09-09-final-v2 for details";
+    expect(redactString(text, counts)).toBe(text);
+    expect(counts).toEqual({});
+  });
+});
