@@ -630,7 +630,11 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
 function cmdLs(opts: Opts): number {
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    if (opts.json) {
+      console.log("[]");
+    } else {
+      console.log("no sessions imported yet (agit import <file>)");
+    }
     return 0;
   }
   const rows = ids.map((id) => {
@@ -662,6 +666,10 @@ function cmdLs(opts: Opts): number {
       runtime: typeof start === "string" ? start : "?",
     };
   });
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return 0;
+  }
   const cols = ["id", "started", "dur", "events", "files", "runtime"] as const;
   const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => r[c].length)));
   console.log(cols.map((c, i) => c.toUpperCase().padEnd(widths[i]!)).join("  "));
@@ -677,6 +685,51 @@ function cmdShow(opts: Opts): number {
   const first = events[0]!;
   const last = events[events.length - 1]!;
   const start = first.payload as { [k: string]: unknown };
+
+  if (opts.json) {
+    if (opts.byModel) {
+      const rows = usageByModel(events);
+      const jsonRows = rows.map((r) => ({
+        ...r,
+        files: [...r.files],
+      }));
+      console.log(JSON.stringify(jsonRows, null, 2));
+      return 0;
+    }
+    const byTypeMap = new Map<string, number>();
+    const toolsMap = new Map<string, number>();
+    for (const e of events) {
+      byTypeMap.set(e.type, (byTypeMap.get(e.type) ?? 0) + 1);
+      if (e.type === "tool.call") {
+        const name = (e.payload as { name?: unknown }).name;
+        if (typeof name === "string") toolsMap.set(name, (toolsMap.get(name) ?? 0) + 1);
+      }
+    }
+    const u = usageTotals(events);
+    const filesMap = fileStateAt(events);
+    const summary = {
+      id,
+      runtime: typeof start.runtime === "string" ? start.runtime : undefined,
+      runtimeVersion: typeof start.runtimeVersion === "string" ? start.runtimeVersion : undefined,
+      cwd: typeof start.cwd === "string" ? start.cwd : undefined,
+      branch: typeof start.gitBranch === "string" && start.gitBranch ? start.gitBranch : undefined,
+      started: first.ts,
+      durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+      importedAt: meta?.importedAt,
+      adapter: meta?.adapter,
+      events: events.length,
+      byType: Object.fromEntries(byTypeMap),
+      tools: Object.fromEntries(toolsMap),
+      usage: {
+        ...u,
+        models: [...u.models],
+      },
+      files: [...filesMap.values()],
+      redactions: meta?.redactions,
+    };
+    console.log(JSON.stringify(summary, null, 2));
+    return 0;
+  }
 
   console.log(`session ${id}`);
   console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
@@ -809,6 +862,10 @@ function cmdVerify(opts: Opts): number {
     meta = readSessionMeta(opts.dir, id) ?? undefined;
   }
   const res = verifyChain(lines, meta);
+  if (opts.json) {
+    console.log(JSON.stringify(res, null, 2));
+    return res.ok ? 0 : 1;
+  }
   if (res.ok) {
     console.log(
       `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
@@ -943,13 +1000,16 @@ function cmdDiff(opts: Opts): number {
       // about, and the same thing `agit merge` reads.
       forkSide = { tree: treeOnDisk(join(resolve(first), "tree")), label: "fork" };
     }
-    for (const line of renderDiff(
-      diffSessions({
-        a: { events: parent, label: info.sourceSession.slice(0, 8) },
-        b: forkSide,
-        from: { seq: info.atSeq, hash: info.atHash },
-      }),
-    )) {
+    const diffResult = diffSessions({
+      a: { events: parent, label: info.sourceSession.slice(0, 8) },
+      b: forkSide,
+      from: { seq: info.atSeq, hash: info.atHash },
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(diffResult, null, 2));
+      return 0;
+    }
+    for (const line of renderDiff(diffResult)) {
       console.log(line);
     }
     return 0;
@@ -967,12 +1027,15 @@ function cmdDiff(opts: Opts): number {
     console.error("those are the same session");
     return 2;
   }
-  for (const line of renderDiff(
-    diffSessions({
-      a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
-      b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
-    }),
-  )) {
+  const diffResult = diffSessions({
+    a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
+    b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
+  });
+  if (opts.json) {
+    console.log(JSON.stringify(diffResult, null, 2));
+    return 0;
+  }
+  for (const line of renderDiff(diffResult)) {
     console.log(line);
   }
   return 0;
@@ -1071,7 +1134,11 @@ function cmdGrep(opts: Opts): number {
 
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    if (opts.json) {
+      // Nothing printed to stdout on empty list when searching
+    } else {
+      console.log("no sessions imported yet (agit import <file>)");
+    }
     return 0;
   }
   const idWidth = 8;
@@ -1090,12 +1157,18 @@ function cmdGrep(opts: Opts): number {
       type: opts.grepType,
       path: opts.grepPath,
     })) {
-      console.log(renderHit(hit, idWidth));
+      if (opts.json) {
+        console.log(JSON.stringify(hit));
+      } else {
+        console.log(renderHit(hit, idWidth));
+      }
       total++;
     }
   }
   if (total === 0) {
-    console.error(`no matches in ${searched} session${searched === 1 ? "" : "s"}`);
+    if (!opts.json) {
+      console.error(`no matches in ${searched} session${searched === 1 ? "" : "s"}`);
+    }
     return 1;
   }
   return 0;
