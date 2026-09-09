@@ -26,8 +26,11 @@ let bundle: string;
 let originStore: string;
 
 beforeAll(() => {
-  // These tests drive the real CLI, so they need the build to exist.
-  if (!existsSync(CLI)) execFileSync("npm", ["run", "build"], { cwd: ROOT, shell: true, stdio: "ignore" });
+  // These tests drive the real CLI, so dist must match src. Building only
+  // when dist is MISSING silently tests stale code: edit src, run vitest, and
+  // a broken change looks green (or a fixed one looks broken) because the
+  // binary under test is the old one. CI hides this by always building first.
+  execFileSync("npm", ["run", "build"], { cwd: ROOT, shell: true, stdio: "ignore" });
   const scratch = mkdtempSync(join(tmpdir(), "agit-adopt-"));
   originStore = join(scratch, "origin");
   bundle = join(scratch, "bundle");
