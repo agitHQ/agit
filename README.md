@@ -159,9 +159,12 @@ Said plainly:
 - **No TLS in the relay.** It binds loopback by default; exposing it to a
   network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
 - **Merge is file-level and needs git.** Three-way content merge only:
-  deletions in a fork are invisible (the fork tree records what the log
-  could reconstruct, so absence means untouched, not deleted), renames are
-  two files, and `git merge-file` must be on PATH. Fork/pr context seeding
+  renames are two files, and `git merge-file` must be on PATH. A file absent
+  from the fork tree still counts as untouched rather than deleted — the tree
+  records only what the log could reconstruct — but `agit merge --session
+  <id>` reads the fork's own imported session and honours the `file.delete`
+  events it recorded after the fork point, deleting only where the removed
+  content matches both the fork point and what the target holds today. Fork/pr context seeding
   is a summary by design; you cannot inject history into a running agent.
 - **Redaction is a seatbelt, not a guarantee.** Session logs contain whatever
   the agent saw. Before sharing one anywhere, read it.

@@ -12,9 +12,13 @@
  * Trivial cases resolve without git (unchanged / only-one-side-changed);
  * real three-way content merges shell out to `git merge-file`, the canonical
  * implementation. Conflicts leave standard markers in the target file and
- * are reported, never hidden. Deletions are out of scope: the fork tree
- * only records files the log could reconstruct, so a file absent from the
- * fork is "untouched", not "deleted".
+ * are reported, never hidden.
+ *
+ * Absence from the fork tree still means "untouched", never "deleted" — the
+ * tree only records what the log could reconstruct. A deletion is only ever
+ * honoured when the fork's own session says so: pass `--session <id>` and
+ * every `file.delete` after the fork point is considered, against both the
+ * base it claims to remove and what the target holds today (#88).
  *
  * The merge is recorded in the fork directory itself (merge.json): when,
  * into where, per-file outcomes, and the human-written summary of what the
@@ -34,7 +38,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type { AgitEvent } from "./format/events.js";
+import type { AgitEvent, Json } from "./format/events.js";
+import { sha256Hex } from "./format/hash.js";
 import { reconstructTree, treeRelativePath } from "./fork.js";
 
 export type MergeOutcome =
@@ -44,7 +49,9 @@ export type MergeOutcome =
   | "identical" // ours == fork (both changed the same way)
   | "added" // new in the fork, absent in target: copied in
   | "clean-merge" // three-way merge succeeded
-  | "conflict"; // markers written, human finishes the job
+  | "conflict" // markers written, human finishes the job
+  | "deleted" // the fork's session deleted it and the target had not moved on
+  | "kept-ours-deleted"; // the fork deleted it, but the target changed it since
 
 export interface MergeFileResult {
   rel: string;
@@ -93,12 +100,48 @@ export function baseTreeAt(sourceEvents: AgitEvent[], atSeq: number): Map<string
   return map;
 }
 
+/**
+ * Deletions the fork's own session recorded after the fork point.
+ *
+ * A `file.delete` carries the hash of the content it removed, so a deletion
+ * can be checked twice before anything is removed from the target: the
+ * removed content must be what the base tree actually held at the fork point,
+ * and the target must still hold that same content today. Either check
+ * failing means the deletion is reported, not performed.
+ *
+ * Renames land here as a delete plus a create, so they merge as a deletion of
+ * the old path and an addition of the new one, with no special case.
+ */
+function deletionsAfter(forkEvents: AgitEvent[], atSeq: number, cwd: string | null): Map<string, string> {
+  const out = new Map<string, string>(); // tree-relative path -> claimed beforeHash
+  for (const e of forkEvents) {
+    if (e.seq <= atSeq) continue;
+    if (e.type === "file.delete") {
+      const p = e.payload as { path?: Json; beforeHash?: Json };
+      if (typeof p.path !== "string" || typeof p.beforeHash !== "string") continue;
+      out.set(treeRelativePath(p.path, cwd), p.beforeHash);
+      continue;
+    }
+    // A later edit or re-create of the same path retracts the deletion.
+    if (e.type === "file.diff") {
+      const p = e.payload as { path?: Json };
+      if (typeof p.path === "string") out.delete(treeRelativePath(p.path, cwd));
+    }
+  }
+  return out;
+}
+
 export function mergeFork(opts: {
   forkDir: string;
   intoDir: string;
   sourceEvents: AgitEvent[];
   summary?: string;
-}): { results: MergeFileResult[]; conflicts: number } {
+  /**
+   * The fork's own session, once imported. Its `file.delete` events after the
+   * fork point are the only thing that can make a merge remove a file (#88).
+   */
+  forkEvents?: AgitEvent[];
+}): { results: MergeFileResult[]; conflicts: number; deleted: number } {
   const info = readForkInfo(opts.forkDir);
   if (opts.sourceEvents[info.atSeq]?.hash !== info.atHash) {
     throw new Error(
@@ -112,7 +155,56 @@ export function mergeFork(opts: {
 
   const results: MergeFileResult[] = [];
   let conflicts = 0;
+  let deleted = 0;
+
+  // Deletions first, so a path the fork removed is not also content-merged
+  // from a stale tree entry.
+  const cwd =
+    typeof (opts.sourceEvents[0]!.payload as { cwd?: unknown }).cwd === "string"
+      ? ((opts.sourceEvents[0]!.payload as { cwd?: string }).cwd as string)
+      : null;
+  const pendingDeletes = opts.forkEvents ? deletionsAfter(opts.forkEvents, info.atSeq, cwd) : new Map();
+  // The fork tree is the state AT the fork point, so it still holds every file
+  // the fork later deleted -- its presence there says nothing. A retraction is
+  // a later file.diff in the fork's own session, which deletionsAfter already
+  // drops. Paths removed here are skipped by the content pass below, so a
+  // deleted file is not immediately re-added from the fork-point tree.
+  const removed = new Set<string>();
+  for (const [rel, claimedHash] of pendingDeletes) {
+    const target = resolve(intoRoot, rel);
+    if (!target.startsWith(intoRoot + sep)) throw new Error(`refusing path escape: ${rel}`);
+    const baseContent = base.get(rel);
+    // Nothing to check the deletion against: the base tree never held this
+    // path, so agit cannot say the fork removed the same thing the target has.
+    if (baseContent === undefined) continue;
+    if (sha256Hex(baseContent) !== claimedHash) {
+      // The fork removed content that is not what the fork point held, so the
+      // file had already drifted. Report it; do not delete on a mismatch.
+      results.push({ rel, outcome: "kept-ours-deleted" });
+      removed.add(rel);
+      conflicts++;
+      continue;
+    }
+    if (!existsSync(target)) {
+      results.push({ rel, outcome: "unchanged" }); // already gone in the target
+      continue;
+    }
+    if (readFileSync(target, "utf8") !== baseContent) {
+      // The target moved on since the fork point; a deletion would throw that
+      // work away silently. Leave the file and say so.
+      results.push({ rel, outcome: "kept-ours-deleted" });
+      removed.add(rel);
+      conflicts++;
+      continue;
+    }
+    rmSync(target, { force: true });
+    results.push({ rel, outcome: "deleted" });
+    removed.add(rel);
+    deleted++;
+  }
+
   for (const rel of listTreeFiles(treeRoot)) {
+    if (removed.has(rel)) continue; // just deleted; do not re-add it from the tree
     const target = resolve(intoRoot, rel);
     if (!target.startsWith(intoRoot + sep)) throw new Error(`refusing path escape: ${rel}`);
     const theirs = readFileSync(join(treeRoot, rel), "utf8");
@@ -153,13 +245,14 @@ export function mergeFork(opts: {
         summary: opts.summary ?? null,
         results,
         conflicts,
+        deleted,
       },
       null,
       2,
     ) + "\n",
     "utf8",
   );
-  return { results, conflicts };
+  return { results, conflicts, deleted };
 }
 
 /** Ordinary git three-way merge on one file. Markers labeled ours/base/fork. */
