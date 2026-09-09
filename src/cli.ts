@@ -14,6 +14,7 @@ import { SCHEMA_VERSION, type AgitEvent, type SessionMeta } from "./format/event
 import { writeFork } from "./fork.js";
 import { renderSessionHtml } from "./html.js";
 import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
+import { buildMatcher, grepEvents, GrepPatternError, renderHit } from "./grep.js";
 import { mergeFork, readForkInfo } from "./merge.js";
 import { redactDeep, type RedactionCounts } from "./redact.js";
 import { startRelay } from "./relay/relay.js";
@@ -60,6 +61,8 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
+  agit grep <pattern> [--type T]       search every imported session; --path
+        [--path] [--regex] [-i|-s]     matches file.diff paths only
   agit export <id> [--json]            write the event log to stdout — JSONL, or a
                                        JSON array with --json — for other tools
   agit export-html <id> [--out FILE]   write a self-contained, offline HTML session viewer
@@ -82,6 +85,10 @@ options:
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
+  --type <t>       grep: only this event type (tool.call, file.diff, ...)
+  --path           grep: match file.diff paths instead of rendered lines
+  --regex          grep: treat the pattern as a regular expression
+  -s               grep: case-sensitive (default is insensitive)
   --relay <url>    relay to share through (default: $AGIT_RELAY or http://127.0.0.1:7717)
   --ttl <hours>    how long the share link lives (default 24h, max 168h)
   --static         share the log as it is now; do not tail for growth
@@ -98,6 +105,10 @@ interface Opts {
   state: boolean;
   byModel: boolean;
   json: boolean;
+  grepType?: string;
+  grepPath: boolean;
+  grepRegex: boolean;
+  caseSensitive: boolean;
   out?: string;
   into?: string;
   summary?: string;
@@ -118,6 +129,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     state: false,
     byModel: false,
     json: false,
+    grepPath: false,
+    grepRegex: false,
+    caseSensitive: false,
     relay: DEFAULT_RELAY,
     static: false,
     resume: false,
@@ -132,6 +146,11 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--timeline") opts.timeline = true;
     else if (a === "--state") opts.state = true;
     else if (a === "--by-model") opts.byModel = true;
+    else if (a === "--type") opts.grepType = argv[++i];
+    else if (a === "--path") opts.grepPath = true;
+    else if (a === "--regex") opts.grepRegex = true;
+    else if (a === "-s") opts.caseSensitive = true;
+    else if (a === "-i") opts.caseSensitive = false;
     else if (a === "--out") opts.out = argv[++i];
     else if (a === "--into") opts.into = argv[++i];
     else if (a === "--summary") opts.summary = argv[++i];
@@ -164,6 +183,8 @@ async function main(): Promise<number> {
       return cmdVerify(opts);
     case "replay":
       return cmdReplay(opts);
+    case "grep":
+      return cmdGrep(opts);
     case "export":
       return cmdExport(opts);
     case "export-html":
@@ -814,6 +835,63 @@ function cmdPr(opts: Opts): number {
 }
 
 /** The format for everyone else: the log to stdout, no CLI linkage required. */
+/**
+ * Search every imported session at once.
+ *
+ * Output is one flat row per hit rather than grouped by session, so the
+ * result can be piped into the same tools the user would have reached for
+ * anyway. Sessions that fail to parse are reported to stderr and skipped:
+ * one corrupt store entry must not hide every other session's matches.
+ */
+function cmdGrep(opts: Opts): number {
+  const pattern = opts.args[0];
+  if (pattern === undefined || pattern === "") {
+    console.error("usage: agit grep <pattern> [--type <event-type>] [--path] [--regex] [-s]");
+    return 2;
+  }
+  let matches: (s: string) => boolean;
+  try {
+    matches = buildMatcher(pattern, {
+      regex: opts.grepRegex,
+      caseSensitive: opts.caseSensitive,
+    });
+  } catch (err) {
+    console.error(err instanceof GrepPatternError ? err.message : String(err));
+    return 2;
+  }
+
+  const ids = listSessionIds(opts.dir);
+  if (ids.length === 0) {
+    console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+  const idWidth = 8;
+  let total = 0;
+  let searched = 0;
+  for (const id of ids) {
+    let events: AgitEvent[];
+    try {
+      events = readSessionEvents(opts.dir, id);
+    } catch {
+      console.error(`skipping ${id.slice(0, idWidth)}: unreadable (agit verify it)`);
+      continue;
+    }
+    searched++;
+    for (const hit of grepEvents(id, events, matches, {
+      type: opts.grepType,
+      path: opts.grepPath,
+    })) {
+      console.log(renderHit(hit, idWidth));
+      total++;
+    }
+  }
+  if (total === 0) {
+    console.error(`no matches in ${searched} session${searched === 1 ? "" : "s"}`);
+    return 1;
+  }
+  return 0;
+}
+
 function cmdExport(opts: Opts): number {
   const id = requireId(opts);
   if (opts.json) {
