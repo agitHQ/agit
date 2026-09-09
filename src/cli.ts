@@ -13,6 +13,7 @@ import { verifyChain } from "./format/verify.js";
 import { SCHEMA_VERSION, type AgitEvent, type SessionMeta } from "./format/events.js";
 import { writeFork } from "./fork.js";
 import { renderSessionHtml } from "./html.js";
+import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
 import { mergeFork, readForkInfo } from "./merge.js";
 import { redactDeep, type RedactionCounts } from "./redact.js";
 import { startRelay } from "./relay/relay.js";
@@ -64,6 +65,8 @@ usage:
   agit export-html <id> [--out FILE]   write a self-contained, offline HTML session viewer
   agit fork <id> --at N [--out DIR]    branch at event N: reconstruct the file tree
                                        (hash-verified) and write a context seed
+  agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
+                                       its parent from the fork point
   agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back
                                        (base = fork point), via git merge-file
   agit pr <id> [--at N] [--out DIR]    handoff bundle for a colleague: log +
@@ -167,6 +170,8 @@ async function main(): Promise<number> {
       return cmdExportHtml(opts);
     case "fork":
       return cmdFork(opts);
+    case "diff":
+      return cmdDiff(opts);
     case "merge":
       return cmdMerge(opts);
     case "pr":
@@ -653,6 +658,89 @@ function cmdFork(opts: Opts): number {
   );
   console.log(`  parentage   ${join(outDir, "fork.json")}`);
   console.log("  (the tree reflects structured edits only; shell-driven changes were invisible to the log)");
+  return 0;
+}
+
+/**
+ * Compare two sessions, or a fork against the parent it came from.
+ *
+ * A fork directory is the interesting case and needs no ids: fork.json names
+ * the source session and the exact event it branched at, so both sides are
+ * narrowed to the work done after that point — the comparison is about the
+ * two approaches rather than the history they share.
+ */
+function cmdDiff(opts: Opts): number {
+  const first = opts.args[0];
+  if (!first) {
+    console.error("usage: agit diff <session-a> <session-b>   |   agit diff <fork-dir>");
+    return 2;
+  }
+
+  // Form 1: a fork directory, compared against its own parent.
+  const forkJson = join(resolve(first), "fork.json");
+  if (existsSync(forkJson)) {
+    const info = readForkInfo(resolve(first));
+    let parent: AgitEvent[];
+    try {
+      parent = readSessionEvents(opts.dir, resolveSessionId(opts.dir, info.sourceSession));
+    } catch {
+      console.error(
+        `source session ${info.sourceSession} is not in this store — import it to compare against the fork.`,
+      );
+      return 1;
+    }
+    if (parent[info.atSeq]?.hash !== info.atHash) {
+      console.error(
+        `fork.json says event ${info.atSeq} is ${info.atHash.slice(0, 12)}, the stored session disagrees`,
+      );
+      return 1;
+    }
+    // The fork's own session may or may not have been imported yet. When it
+    // has not, compare the fork's written tree against the parent's later
+    // work by treating the fork point as the fork side's end.
+    const forkIdArg = opts.args[1];
+    let forkSide: { events?: AgitEvent[]; label: string; tree?: Map<string, string> };
+    if (forkIdArg) {
+      const id = resolveSessionId(opts.dir, forkIdArg);
+      forkSide = { events: readSessionEvents(opts.dir, id), label: id.slice(0, 8) };
+    } else {
+      // No session named for the fork, so compare its working tree as it
+      // stands on disk — what someone who has been working in it cares
+      // about, and the same thing `agit merge` reads.
+      forkSide = { tree: treeOnDisk(join(resolve(first), "tree")), label: "fork" };
+    }
+    for (const line of renderDiff(
+      diffSessions({
+        a: { events: parent, label: info.sourceSession.slice(0, 8) },
+        b: forkSide,
+        from: { seq: info.atSeq, hash: info.atHash },
+      }),
+    )) {
+      console.log(line);
+    }
+    return 0;
+  }
+
+  // Form 2: two session ids.
+  const secondArg = opts.args[1];
+  if (!secondArg) {
+    console.error("usage: agit diff <session-a> <session-b>   |   agit diff <fork-dir>");
+    return 2;
+  }
+  const idA = resolveSessionId(opts.dir, first);
+  const idB = resolveSessionId(opts.dir, secondArg);
+  if (idA === idB) {
+    console.error("those are the same session");
+    return 2;
+  }
+  for (const line of renderDiff(
+    diffSessions({
+      a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
+      b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
+    }),
+  )) {
+    console.log(line);
+  }
   return 0;
 }
 

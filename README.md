@@ -68,7 +68,13 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   the task, last exchanges, file state) — not a transplant of the agent's
   mind. `fork.json` records the source session and fork-point hash, so
   provenance is checkable with `agit verify`.
-- **`agit merge <fork-dir>`** — bring a fork's files back: ordinary git
+- **`agit diff <a> <b>`** — what two sessions did differently: files each
+  side touched, which ones converged on identical content, which diverged
+  (with both hashes), and the work each spent getting there. `agit diff
+  <fork-dir>` compares a fork against the parent it came from, starting at
+  the fork point recorded in `fork.json`. Comparison is by reconstructed
+  content, so it inherits replay's blind spot and says so.
+- **`agit merge <fork-dir>` — bring a fork's files back: ordinary git
   three-way merge per file with the fork point as base (`git merge-file`
   does the merging). Trivial cases fast-forward, real conflicts get
   standard markers and a nonzero exit, and the merge — outcomes plus your
