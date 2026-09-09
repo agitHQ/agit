@@ -18,6 +18,16 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit import --all` and `--latest`** (#60). Discovery of the supported
+  runtimes' own log directories — Claude Code, Codex, OpenClaw — importing
+  what is new and reporting what grew (`updated 22 → 40 events`). A
+  directory listing plus the ordinary import: no daemon, no hooks, no
+  watcher, and retroactive import stays the default. `--since 7d` bounds
+  the scan. "New" is exact, not heuristic: each stored session's `meta.json`
+  records the sha256 of its source, so a second `agit import <file>` now
+  says `unchanged` instead of silently re-importing, and a missing file is
+  named instead of surfacing as a raw ENOENT.
+
 - **`agit import` adopts agit bundles**, closing the receiving half of
   `agit pr` (#28): hand someone a bundle directory or a bare `events.jsonl`
   and they can replay, fork and verify it like any other session. The log

@@ -45,6 +45,12 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`) and
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`) — the
   same event log, the same verbs, whichever agent produced the session.
+  `agit import --all` finds every session those runtimes have written on
+  this machine (`~/.claude/projects`, `~/.codex/sessions`,
+  `~/.openclaw/agents/*/sessions`) and imports what is new; `--latest`
+  takes just the most recent one; `--since 7d` bounds the scan. A directory
+  listing plus the ordinary import — no daemon, no hooks — and last month's
+  sessions are found the same way as today's.
   Deterministic: the same input always produces byte-identical output.
   Credential-looking strings are redacted on the way in (see
   [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
