@@ -92,7 +92,8 @@ usage:
                                        is still running; viewer messages land here
   agit share --resume <share-id>       resume a live share after a crash (relay
                                        keeps the buffer; only the tail is pushed)
-  agit relay                           run a relay (self-hosted, in-memory)
+  agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
+                                       serves HTTPS when given a cert and key
 
 options:
   --dir <path>     where .agit/ lives (default: current directory)
@@ -110,6 +111,9 @@ options:
   --port <n>       relay: port to listen on (default 7717)
   --host <addr>    relay: address to bind (default 127.0.0.1; 0.0.0.0 exposes it)
   --trusted-proxy <addr>  relay: trust X-Forwarded-For from this proxy (repeatable)
+  --cert <pem>     relay: TLS certificate; with --key, serve HTTPS
+  --key <pem>      relay: TLS private key
+  --insecure       relay: allow binding beyond loopback without TLS
 
 <id> accepts any unique prefix. See SPEC.md for the format, PROTOCOL.md for the relay.`;
 
@@ -137,6 +141,9 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  cert?: string;
+  key?: string;
+  insecure: boolean;
   args: string[];
 }
 
@@ -156,6 +163,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     static: false,
     resume: false,
     trustedProxies: [],
+    insecure: false,
     args: [],
   };
   const rest: string[] = [];
@@ -191,6 +199,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--cert") opts.cert = argv[++i];
+    else if (a === "--key") opts.key = argv[++i];
+    else if (a === "--insecure") opts.insecure = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -1185,10 +1196,47 @@ function cmdExportHtml(opts: Opts): number {
   return 0;
 }
 
+/** Loopback needs no transport security; anything else carries share traffic over a network. */
+function isLoopback(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+}
+
 async function cmdRelay(opts: Opts): Promise<number> {
+  const host = opts.host ?? "127.0.0.1";
+
+  if ((opts.cert === undefined) !== (opts.key === undefined)) {
+    console.error("--cert and --key go together: a relay is HTTPS or it is HTTP, not half of one");
+    return 2;
+  }
+  let tls: { cert: string; key: string } | undefined;
+  if (opts.cert !== undefined && opts.key !== undefined) {
+    try {
+      tls = { cert: readFileSync(opts.cert, "utf8"), key: readFileSync(opts.key, "utf8") };
+    } catch (err) {
+      console.error(`cannot read the TLS material: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  // Exposing a plaintext relay should be a deliberate act, not a default. The
+  // link is the only secret a viewer holds, and without TLS it crosses the
+  // network in the clear along with every event the share carries.
+  if (tls === undefined && !isLoopback(host) && !opts.insecure) {
+    console.error(
+      `refusing to bind ${host} without TLS: share links and every event would cross the network in the clear.\n` +
+        "Pass --cert and --key to serve HTTPS, put a TLS proxy in front and keep the relay on loopback,\n" +
+        "or pass --insecure if the network is genuinely trusted.",
+    );
+    return 2;
+  }
+
   let handle;
   try {
-    handle = await startRelay({ port: opts.port, host: opts.host, trustedProxies: opts.trustedProxies });
+    handle = await startRelay({
+      port: opts.port,
+      host: opts.host,
+      trustedProxies: opts.trustedProxies,
+      tls,
+    });
   } catch (err) {
     if ((err as { code?: string }).code === "EADDRINUSE") {
       console.error(
@@ -1198,13 +1246,17 @@ async function cmdRelay(opts: Opts): Promise<number> {
     }
     throw err;
   }
-  const host = opts.host ?? "127.0.0.1";
-  console.log(`agit relay listening on http://${host}:${handle.port}`);
+  console.log(`agit relay listening on ${handle.scheme}://${host}:${handle.port}`);
   console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
-  if (host !== "127.0.0.1" && host !== "localhost") {
+  if (!isLoopback(host)) {
     console.log(
-      "NOTE: bound beyond loopback — anyone who can reach this port can view shares they have links for. Prefer a TLS reverse proxy or tunnel.",
+      handle.scheme === "https"
+        ? "NOTE: bound beyond loopback over TLS — anyone who can reach this port can view shares they have links for."
+        : "NOTE: bound beyond loopback WITHOUT TLS (--insecure) — share links and events are readable by anyone on the path.",
     );
+  }
+  if (handle.scheme === "https") {
+    console.log(`  share against it with: agit share <id> --relay https://${host}:${handle.port}`);
   }
   await waitForSigint();
   await handle.close();
