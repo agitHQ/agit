@@ -116,6 +116,74 @@ function num(v: Json | undefined): number {
   return typeof v === "number" ? v : 0;
 }
 
+export interface ModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  apiMessages: number;
+  /** Distinct paths whose edits are attributed to this model. */
+  files: Set<string>;
+}
+
+/**
+ * Split usage by model, and attribute file edits to one.
+ *
+ * Tokens are exact: every cost event names its own model. File attribution
+ * is a stated rule rather than recorded fact — a file.diff carries no model —
+ * so an edit is credited to the nearest preceding event that names one (the
+ * assistant message that called the tool, or the cost of that exchange).
+ * Edits before any such event are credited to "(unattributed)" rather than
+ * guessed at, and callers are expected to print the rule alongside the table.
+ */
+export function usageByModel(events: AgitEvent[], at?: number): ModelUsage[] {
+  const byModel = new Map<string, ModelUsage>();
+  const UNATTRIBUTED = "(unattributed)";
+  const bucket = (model: string): ModelUsage => {
+    let m = byModel.get(model);
+    if (!m) {
+      m = {
+        model,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        apiMessages: 0,
+        files: new Set(),
+      };
+      byModel.set(model, m);
+    }
+    return m;
+  };
+
+  let current: string | null = null;
+  for (const e of events) {
+    if (at !== undefined && e.seq > at) break;
+    const p = e.payload as { model?: Json; usage?: { [k: string]: Json }; path?: Json };
+    if (typeof p.model === "string" && p.model !== "") current = p.model;
+
+    if (e.type === "cost") {
+      const m = bucket(typeof p.model === "string" && p.model !== "" ? p.model : UNATTRIBUTED);
+      const u = p.usage ?? {};
+      m.inputTokens += num(u.inputTokens);
+      m.outputTokens += num(u.outputTokens);
+      m.cacheReadInputTokens += num(u.cacheReadInputTokens);
+      m.cacheCreationInputTokens += num(u.cacheCreationInputTokens);
+      m.apiMessages++;
+      continue;
+    }
+    if (e.type === "file.diff" && typeof p.path === "string") {
+      bucket(current ?? UNATTRIBUTED).files.add(p.path);
+    }
+  }
+
+  // Busiest first by output tokens, then by name so ties stay deterministic.
+  return [...byModel.values()].sort(
+    (a, b) => b.outputTokens - a.outputTokens || a.model.localeCompare(b.model),
+  );
+}
+
 const str = (v: Json | undefined): string => (typeof v === "string" ? v : "");
 
 /** One-line rendering for timelines. */

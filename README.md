@@ -50,7 +50,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
 - **`agit ls`** — list imported sessions: start, duration, events, files touched.
 - **`agit show <id>`** — one-session summary: model, tools, token totals,
-  per-file diffstat.
+  per-file diffstat. `--by-model` splits it: what each model cost and how
+  many files its edits touched. Tokens are exact; file attribution credits
+  an edit to the model named by the nearest preceding event, and says so.
 - **`agit verify <id>`** — validate the hash chain; reports the first broken
   link, and detects truncation via `meta.json`.
 - **`agit replay <id>`** — step through events (`n`/`p`/`g N`), inspect any

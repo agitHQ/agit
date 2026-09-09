@@ -40,7 +40,7 @@ import {
   writeSession,
   writeShareState,
 } from "./store.js";
-import { clipLine, fileStateAt, timelineLines, usageTotals } from "./state.js";
+import { clipLine, fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
@@ -51,7 +51,8 @@ usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                                        adopt an agit log or pr bundle as-is
   agit ls                              list imported sessions
-  agit show <id>                       summarize one session
+  agit show <id> [--by-model]          summarize one session; --by-model splits
+                                       cost and file edits per model
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
                                        session, or any log file (pr bundles,
                                        downloaded share logs)
@@ -92,6 +93,7 @@ interface Opts {
   at?: number;
   timeline: boolean;
   state: boolean;
+  byModel: boolean;
   json: boolean;
   out?: string;
   into?: string;
@@ -111,6 +113,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     dir: process.cwd(),
     timeline: false,
     state: false,
+    byModel: false,
     json: false,
     relay: DEFAULT_RELAY,
     static: false,
@@ -125,6 +128,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--at") opts.at = Number(argv[++i]);
     else if (a === "--timeline") opts.timeline = true;
     else if (a === "--state") opts.state = true;
+    else if (a === "--by-model") opts.byModel = true;
     else if (a === "--out") opts.out = argv[++i];
     else if (a === "--into") opts.into = argv[++i];
     else if (a === "--summary") opts.summary = argv[++i];
@@ -466,6 +470,11 @@ function cmdShow(opts: Opts): number {
     );
   }
 
+  if (opts.byModel) {
+    printByModel(events);
+    return 0;
+  }
+
   const files = fileStateAt(events);
   if (files.size > 0) {
     console.log(
@@ -489,6 +498,51 @@ function cmdShow(opts: Opts): number {
     );
   }
   return 0;
+}
+
+/**
+ * What each model cost, and what it changed.
+ *
+ * Token columns are exact — every cost event names its own model. The files
+ * column is an attribution, not a recorded fact: a file.diff carries no model
+ * of its own, so an edit is credited to the nearest preceding event that
+ * names one. The rule is printed with the table so nobody has to guess how
+ * the column was derived.
+ */
+function printByModel(events: AgitEvent[]): void {
+  const rows = usageByModel(events);
+  if (rows.length === 0) {
+    console.log("\nno cost events in this session — nothing to attribute");
+    return;
+  }
+  const table = rows.map((r) => ({
+    model: r.model,
+    calls: String(r.apiMessages),
+    in: r.inputTokens.toLocaleString("en-US"),
+    out: r.outputTokens.toLocaleString("en-US"),
+    cacheRead: r.cacheReadInputTokens.toLocaleString("en-US"),
+    files: String(r.files.size),
+  }));
+  const cols = ["model", "calls", "in", "out", "cacheRead", "files"] as const;
+  const head = {
+    model: "MODEL",
+    calls: "CALLS",
+    in: "IN",
+    out: "OUT",
+    cacheRead: "CACHE READ",
+    files: "FILES",
+  };
+  const widths = cols.map((c) => Math.max(head[c].length, ...table.map((r) => r[c].length)));
+  const line = (r: Record<string, string>): string =>
+    cols.map((c, i) => (c === "model" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
+
+  console.log("");
+  console.log("  " + line(head));
+  for (const r of table) console.log("  " + line(r));
+  console.log(
+    "\n  files = edits credited to the model named by the nearest preceding event;" +
+      "\n  tokens are exact, and both are lower bounds wherever the log is (SPEC §5.7).",
+  );
 }
 
 function cmdVerify(opts: Opts): number {
@@ -693,7 +747,9 @@ function cmdExportHtml(opts: Opts): number {
   );
 
   if (!check.ok) {
-    console.error(`refusing to export an unverifiable session: ${check.firstBroken?.reason ?? "invalid chain"}`);
+    console.error(
+      `refusing to export an unverifiable session: ${check.firstBroken?.reason ?? "invalid chain"}`,
+    );
     return 1;
   }
 
