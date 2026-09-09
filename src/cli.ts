@@ -95,6 +95,8 @@ usage:
   agit relay                           run a relay (self-hosted, in-memory)
 
 options:
+  --json           ls/show/verify/grep/diff/export: machine-readable output on
+                   stdout (one object per line for grep). Exit codes unchanged.
   --dir <path>     where .agit/ lives (default: current directory)
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
@@ -637,6 +639,18 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   return 0;
 }
 
+/**
+ * One JSON document on stdout, for the read verbs' --json mode.
+ *
+ * Sets are not JSON, so callers hand this plain arrays; every other structure
+ * here is the one the code already builds, with the field names it already
+ * uses. Diagnostics stay on stderr and exit codes are unchanged, so a script
+ * can read stdout and still branch on the status.
+ */
+function emitJson(value: unknown): void {
+  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+}
+
 function cmdLs(opts: Opts): number {
   if (!existsSync(opts.dir)) {
     console.error(`no such directory: ${opts.dir}`);
@@ -644,7 +658,15 @@ function cmdLs(opts: Opts): number {
   }
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
+    if (opts.json) {
+      emitJson({ sessions: [] });
+      return 0;
+    }
     console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+  if (opts.json) {
+    emitJson({ sessions: ids.map((id) => sessionSummaryForLs(opts.dir, id)) });
     return 0;
   }
   const rows = ids.map((id) => {
@@ -684,6 +706,35 @@ function cmdLs(opts: Opts): number {
   return 0;
 }
 
+/**
+ * One session's row for `ls --json`: full ids (a script does not want the
+ * eight-character display prefix) and a machine duration. A session the store
+ * cannot parse reports `readable: false` rather than vanishing from the list,
+ * which is the same choice the table makes.
+ */
+function sessionSummaryForLs(dir: string, id: string): Record<string, unknown> {
+  let events: AgitEvent[];
+  try {
+    events = readSessionEvents(dir, id);
+    if (events.length === 0) throw new Error("empty log");
+  } catch {
+    return { id, readable: false };
+  }
+  const first = events[0]!;
+  const last = events[events.length - 1]!;
+  const runtime = (first.payload as { runtime?: unknown }).runtime;
+  return {
+    id,
+    readable: true,
+    started: first.ts,
+    ended: last.ts,
+    durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+    events: events.length,
+    files: fileStateAt(events).size,
+    runtime: typeof runtime === "string" ? runtime : null,
+  };
+}
+
 function cmdShow(opts: Opts): number {
   const id = requireId(opts);
   const events = readSessionEvents(opts.dir, id);
@@ -691,6 +742,11 @@ function cmdShow(opts: Opts): number {
   const first = events[0]!;
   const last = events[events.length - 1]!;
   const start = first.payload as { [k: string]: unknown };
+
+  if (opts.json) {
+    emitJson(showDocument(id, events, meta, opts.byModel));
+    return 0;
+  }
 
   console.log(`session ${id}`);
   console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
@@ -758,6 +814,86 @@ function cmdShow(opts: Opts): number {
     );
   }
   return 0;
+}
+
+/**
+ * Everything `show` prints, as one document.
+ *
+ * Same numbers, same derivations -- including the by-model attribution rule,
+ * which is a stated convention rather than a recorded fact, so the JSON says
+ * so in `filesAttribution` instead of leaving a consumer to guess.
+ */
+function showDocument(
+  id: string,
+  events: AgitEvent[],
+  meta: SessionMeta | null,
+  byModel: boolean,
+): Record<string, unknown> {
+  const first = events[0]!;
+  const last = events[events.length - 1]!;
+  const start = first.payload as { [k: string]: unknown };
+
+  const byType: Record<string, number> = {};
+  const tools: Record<string, number> = {};
+  for (const e of events) {
+    byType[e.type] = (byType[e.type] ?? 0) + 1;
+    if (e.type === "tool.call") {
+      const name = (e.payload as { name?: unknown }).name;
+      if (typeof name === "string") tools[name] = (tools[name] ?? 0) + 1;
+    }
+  }
+
+  const u = usageTotals(events);
+  const doc: Record<string, unknown> = {
+    session: id,
+    runtime: {
+      name: typeof start.runtime === "string" ? start.runtime : null,
+      version: typeof start.runtimeVersion === "string" ? start.runtimeVersion : null,
+      cwd: typeof start.cwd === "string" ? start.cwd : null,
+      gitBranch: typeof start.gitBranch === "string" && start.gitBranch ? start.gitBranch : null,
+    },
+    started: first.ts,
+    ended: last.ts,
+    durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+    imported: meta ? { at: meta.importedAt, adapter: meta.adapter } : null,
+    events: { total: events.length, byType },
+    tools,
+    usage: {
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
+      cacheReadInputTokens: u.cacheReadInputTokens,
+      cacheCreationInputTokens: u.cacheCreationInputTokens,
+      apiMessages: u.apiMessages,
+      models: [...u.models],
+    },
+    files: [...fileStateAt(events).values()].map((f) => ({
+      path: f.path,
+      kind: f.deletedAtSeq !== undefined ? "delete" : f.kind,
+      added: f.added,
+      removed: f.removed,
+      edits: f.edits,
+      afterHash: f.afterHash,
+      lastSeq: f.lastSeq,
+      deletedAtSeq: f.deletedAtSeq ?? null,
+      divergedAtSeq: f.divergedAtSeq ?? null,
+    })),
+    redactions: meta ? meta.redactions : null,
+  };
+
+  if (byModel) {
+    doc.byModel = usageByModel(events).map((r) => ({
+      model: r.model,
+      apiMessages: r.apiMessages,
+      inputTokens: r.inputTokens,
+      outputTokens: r.outputTokens,
+      cacheReadInputTokens: r.cacheReadInputTokens,
+      cacheCreationInputTokens: r.cacheCreationInputTokens,
+      files: [...r.files],
+    }));
+    doc.filesAttribution =
+      "edits credited to the model named by the nearest preceding event; tokens are exact";
+  }
+  return doc;
 }
 
 /**
@@ -832,6 +968,17 @@ function cmdVerify(opts: Opts): number {
     meta = readSessionMeta(opts.dir, id) ?? undefined;
   }
   const res = verifyChain(lines, meta);
+  if (opts.json) {
+    // metaChecked distinguishes "chain intact and complete" from "chain
+    // intact as far as it goes" -- without meta.json, truncation is invisible.
+    emitJson({
+      ok: res.ok,
+      events: res.events,
+      metaChecked: meta !== undefined,
+      firstBroken: res.firstBroken ?? null,
+    });
+    return res.ok ? 0 : 1;
+  }
   if (res.ok) {
     console.log(
       `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
@@ -970,15 +1117,16 @@ function cmdDiff(opts: Opts): number {
       // about, and the same thing `agit merge` reads.
       forkSide = { tree: treeOnDisk(join(resolve(first), "tree")), label: "fork" };
     }
-    for (const line of renderDiff(
-      diffSessions({
-        a: { events: parent, label: info.sourceSession.slice(0, 8) },
-        b: forkSide,
-        from: { seq: info.atSeq, hash: info.atHash },
-      }),
-    )) {
-      console.log(line);
+    const forkDiff = diffSessions({
+      a: { events: parent, label: info.sourceSession.slice(0, 8) },
+      b: forkSide,
+      from: { seq: info.atSeq, hash: info.atHash },
+    });
+    if (opts.json) {
+      emitJson(forkDiff);
+      return 0;
     }
+    for (const line of renderDiff(forkDiff)) console.log(line);
     return 0;
   }
 
@@ -994,14 +1142,15 @@ function cmdDiff(opts: Opts): number {
     console.error("those are the same session");
     return 2;
   }
-  for (const line of renderDiff(
-    diffSessions({
-      a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
-      b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
-    }),
-  )) {
-    console.log(line);
+  const sessionDiff = diffSessions({
+    a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
+    b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
+  });
+  if (opts.json) {
+    emitJson(sessionDiff);
+    return 0;
   }
+  for (const line of renderDiff(sessionDiff)) console.log(line);
   return 0;
 }
 
@@ -1108,7 +1257,7 @@ function cmdGrep(opts: Opts): number {
 
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    if (!opts.json) console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
   const idWidth = 8;
@@ -1127,7 +1276,10 @@ function cmdGrep(opts: Opts): number {
       type: opts.grepType,
       path: opts.grepPath,
     })) {
-      console.log(renderHit(hit, idWidth));
+      // One object per line: grep output is a stream, and a consumer should be
+      // able to read hits as they arrive rather than wait for a closing bracket.
+      if (opts.json) process.stdout.write(JSON.stringify(hit) + "\n");
+      else console.log(renderHit(hit, idWidth));
       total++;
     }
   }

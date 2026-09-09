@@ -66,6 +66,11 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   flat row per hit for piping onward.
 - **`agit verify <id>`** — validate the hash chain; reports the first broken
   link, and detects truncation via `meta.json`.
+- **`--json`** — every read verb (`ls`, `show`, `show --by-model`, `verify`,
+  `grep`, `diff`, `export`) can emit machine-readable output instead of a
+  table: one document on stdout, or one object per line for `grep`, whose
+  hits are a stream. Exit codes are unchanged, so a script can read stdout
+  and still branch on the status.
 - **`agit replay <id>`** — step through events (`n`/`p`/`g N`), inspect any
   event, and show cumulative file state at any point (`s`, or `--at N
   --state` non-interactively). `--at N` jumps straight to event N;
