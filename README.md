@@ -140,8 +140,12 @@ Said plainly:
   session is skipped and counted, never hashed on a guess.
 - **OpenClaw has the same window**: `apply_patch` records the patch, not
   the file, so an update is verifiable only for a file the session created.
-- **Codex renames are skipped** — no event type says so. Deletions are
-  recorded (`file.delete`) whenever Codex logged the file's content.
+- **Codex renames are recorded as a delete plus a create** — schema v2 gives
+  a rename an honest encoding, so the log says what the filesystem saw: the
+  old path gone, the new one created with the updated content. A rename
+  whose base predates the session is still skipped and counted, because
+  neither path has content agit could hash. Deletions are recorded
+  (`file.delete`) whenever Codex logged the file's content.
 - **Codex reasoning arrives encrypted** and is dropped, counted.
 - **`file.diff` coverage is partial.** Diffs come from structured edit tools
   (`Edit`/`Write`). Files changed through shell commands leave no diff event;
