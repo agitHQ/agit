@@ -5,6 +5,17 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## Unreleased
 
+### Fixed
+
+- **`share` and `export` no longer publish a chain that does not verify**
+  (#54). Every verb that publishes or hands off a stored session — `share`,
+  `export`, `export-html`, `fork`, `pr` — now goes through one gate that
+  refuses outright and names the failing check and the event it failed at:
+  `refusing to share: chain verification failed — event 1: hash does not
+  recompute`. The gate reads `meta.json` too, so a truncated log is caught
+  everywhere, not only by `verify`. Live shares are unaffected: they build
+  their chain as they tail the native log.
+
 ### Added
 
 - **`agit import` adopts agit bundles**, closing the receiving half of

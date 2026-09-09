@@ -99,7 +99,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   import — viewers can download `events.jsonl` and `agit verify` what they
   watched. If the sharing CLI dies, `agit share --resume <share-id>`
   reattaches to the same link and pushes only the missing tail. Links
-  expire (24h default) and sharing is opt-in per session, always.
+  expire (24h default) and sharing is opt-in per session, always. A stored
+  session whose chain does not verify is refused — `share`, `export`, `fork`
+  and `pr` all name the failing event rather than publishing it.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.

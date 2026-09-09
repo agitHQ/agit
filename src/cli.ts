@@ -241,6 +241,27 @@ function looksLikeAgitLog(lines: string[]): boolean {
   );
 }
 
+/**
+ * The gate every verb that publishes or hands off a stored session goes
+ * through. A chain that does not recompute is refused outright, and the
+ * refusal says which check failed and at which event. Verification is the
+ * claim this tool makes; a silent pass-through here would be the one bug
+ * that undoes all of it.
+ */
+function refuseUnlessVerified(opts: Opts, id: string, verb: string, consequence: string): boolean {
+  const meta = readSessionMeta(opts.dir, id);
+  const check = verifyChain(readSessionLines(opts.dir, id), meta ?? undefined);
+  if (check.ok) return true;
+  const why = check.firstBroken
+    ? `event ${check.firstBroken.seq}: ${check.firstBroken.reason}`
+    : "chain does not verify";
+  console.error(`refusing to ${verb}: chain verification failed — ${why}`);
+  console.error(
+    `  ${check.events} event${check.events === 1 ? "" : "s"} verified before the break; ${consequence}. Run: agit verify ${id.slice(0, 8)}`,
+  );
+  return false;
+}
+
 function cmdImport(opts: Opts): number {
   const src = opts.args[0];
   if (!src) {
@@ -647,14 +668,7 @@ function cmdFork(opts: Opts): number {
     return 2;
   }
   // Never fork an unverified prefix: the fork point hash is a provenance claim.
-  const check = verifyChain(readSessionLines(opts.dir, id));
-  if (!check.ok) {
-    const why = check.firstBroken
-      ? `event ${check.firstBroken.seq}: ${check.firstBroken.reason}`
-      : "broken chain";
-    console.error(`refusing to fork: chain verification failed — ${why}`);
-    return 1;
-  }
+  if (!refuseUnlessVerified(opts, id, "fork", "nothing was written")) return 1;
 
   const outDir = resolve(opts.out ?? `agit-fork-${id.slice(0, 8)}-at${opts.at}`);
   if (existsSync(outDir)) {
@@ -805,11 +819,7 @@ function cmdPr(opts: Opts): number {
     console.error(`--at ${String(opts.at)} is outside this session (0..${events.length - 1})`);
     return 2;
   }
-  const check = verifyChain(readSessionLines(opts.dir, id));
-  if (!check.ok) {
-    console.error("refusing to hand off an unverifiable session (agit verify it first)");
-    return 1;
-  }
+  if (!refuseUnlessVerified(opts, id, "hand off", "nothing was written")) return 1;
   const outDir = resolve(opts.out ?? `agit-pr-${id.slice(0, 8)}`);
   if (existsSync(outDir)) {
     console.error(`refusing to write into existing ${outDir} — pass a fresh --out`);
@@ -894,6 +904,7 @@ function cmdGrep(opts: Opts): number {
 
 function cmdExport(opts: Opts): number {
   const id = requireId(opts);
+  if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
   if (opts.json) {
     process.stdout.write(JSON.stringify(readSessionEvents(opts.dir, id), null, 2) + "\n");
   } else {
@@ -905,19 +916,8 @@ function cmdExport(opts: Opts): number {
 
 function cmdExportHtml(opts: Opts): number {
   const id = requireId(opts);
-  const lines = readSessionLines(opts.dir, id);
   const meta = readSessionMeta(opts.dir, id);
-  const check = verifyChain(
-    lines,
-    meta ? { eventCount: meta.eventCount, headHash: meta.headHash } : undefined,
-  );
-
-  if (!check.ok) {
-    console.error(
-      `refusing to export an unverifiable session: ${check.firstBroken?.reason ?? "invalid chain"}`,
-    );
-    return 1;
-  }
+  if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
 
   const events = readSessionEvents(opts.dir, id);
   const outPath = resolve(opts.out ?? `agit-${id.slice(0, 8)}.html`);
@@ -986,6 +986,9 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!opts.static && meta && existsSync(meta.source.path)) {
       nativePath = meta.source.path;
     } else {
+      // This is the path that publishes the stored chain itself, so it is
+      // the one that must never publish a chain that does not verify.
+      if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
   }
