@@ -91,6 +91,8 @@ usage:
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
                                        its parent from the fork point
   agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back
+                       [--session <id>] (base = fork point), via git merge-file;
+                                       --session honours the fork's deletions
                                        (base = fork point). Uses git merge-file
                                        when present, a built-in merge otherwise
   agit pr <id> [--at N] [--out DIR]    handoff bundle for a colleague: log +
@@ -107,6 +109,8 @@ options:
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
+  --session <id>   merge: the fork's own imported session, so deletions it
+                   recorded after the fork point are honoured
   --no-git         merge: use the built-in three-way merge, not git merge-file
   --since <dur>    import --all: only logs modified within 7d / 24h / 30m
   --yes, -y        rm: confirm the deletion (there is no interactive prompt)
@@ -161,6 +165,7 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  session?: string;
   noGit: boolean;
   cert?: string;
   key?: string;
@@ -235,6 +240,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--session") opts.session = argv[++i];
     else if (a === "--no-git") opts.noGit = true;
     else if (a === "--cert") opts.cert = argv[++i];
     else if (a === "--key") opts.key = argv[++i];
@@ -1421,16 +1427,36 @@ function cmdMerge(opts: Opts): number {
     return 1;
   }
   const intoDir = resolve(opts.into ?? ".");
-  const { results, conflicts, engines } = mergeFork({
+  // The fork's own session, when the user names it: only its file.delete
+  // events can make a merge remove anything.
+  let forkEvents: AgitEvent[] | undefined;
+  if (opts.session !== undefined) {
+    try {
+      forkEvents = readSessionEvents(opts.dir, resolveSessionId(opts.dir, opts.session));
+    } catch (err) {
+      console.error(`--session ${opts.session}: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  const { results, conflicts, deleted, engines } = mergeFork({
     forkDir,
     intoDir,
     sourceEvents: events,
     summary: opts.summary,
+    forkEvents,
     noGit: opts.noGit,
   });
 
   console.log(`merging fork of ${info.sourceSession} (at event ${info.atSeq}) into ${intoDir}`);
-  for (const r of results) console.log(`  ${r.outcome.padEnd(12)} ${r.rel}`);
+  for (const r of results) console.log(`  ${r.outcome.padEnd(18)} ${r.rel}`);
+  if (deleted > 0) {
+    console.log(
+      `${deleted} file${deleted === 1 ? "" : "s"} deleted, as ${opts.session} recorded after the fork point.`,
+    );
+  }
+  if (forkEvents === undefined) {
+    console.log("  (no --session: a file absent from the fork tree counts as untouched, never deleted)");
+  }
   if (engines.includes("builtin")) {
     // Say which engine ran: the results are a merge someone will act on, and
     // git's are what their expectations are calibrated against.
@@ -1442,7 +1468,7 @@ function cmdMerge(opts: Opts): number {
   }
   console.log(
     conflicts > 0
-      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files; finish by hand.`
+      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files, and files the fork deleted but the target had changed were left in place; finish by hand.`
       : "clean: no conflicts.",
   );
   console.log(`recorded in ${join(forkDir, "merge.json")}`);

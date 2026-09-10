@@ -7,6 +7,13 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit merge --session <id>` honours deletions** (#88). Schema v2 gave the
+  log `file.delete`; a fork's own session now tells `merge` which files it
+  removed after the fork point, so a deletion survives the round trip instead
+  of reading as "untouched". Each one is checked against the fork point's
+  content hash before anything is removed, a path the target changed since
+  the fork is kept and reported as a conflict rather than deleted, and
+  without `--session` the old rule stands: absence means untouched.
 - **`agit merge` no longer needs git on PATH** (#89). A built-in line-based
   three-way merge takes over when `git merge-file` is missing, and `--no-git`
   forces it. git is still preferred where present, because its output is what

@@ -180,6 +180,16 @@ Said plainly:
   inject input into a live interactive session, and agit does not pretend
   otherwise; if a runtime ever offers a real path, it gets wired
   per-adapter, opt-in.
+- **No TLS in the relay.** It binds loopback by default; exposing it to a
+  network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
+- **Merge is file-level and needs git.** Three-way content merge only:
+  renames are two files, and `git merge-file` must be on PATH. A file absent
+  from the fork tree still counts as untouched rather than deleted — the tree
+  records only what the log could reconstruct — but `agit merge --session
+  <id>` reads the fork's own imported session and honours the `file.delete`
+  events it recorded after the fork point, deleting only where the removed
+  content matches both the fork point and what the target holds today. Fork/pr context seeding
+  is a summary by design; you cannot inject history into a running agent.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
   HTTP on loopback, and binding beyond loopback without TLS is refused
