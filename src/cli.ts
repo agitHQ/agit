@@ -50,6 +50,8 @@ import {
   getShareHead,
   openInbox,
   pushEvents,
+  fetchShareLog,
+  parseShareRef,
   SessionFollower,
   StabilityError,
   type ShareInfo,
@@ -97,7 +99,6 @@ usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                        [--base REF]    adopt an agit log or pr bundle as-is;
                                        --base seeds pre-session file content
-                                       adopt an agit log or pr bundle as-is
   agit import <session> --no-redact    skip credential scanning; share/pr later
                                        refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
@@ -156,6 +157,10 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
+  agit relay --store <dir>             persist shares, so a restart keeps them
+  agit push <id> [--relay <url>]       publish a session to a relay and exit
+  agit pull <link | share-id>          adopt a published session over HTTP,
+                                       verifying the chain before storing
   agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
   agit export <id> --atif              an ATIF trajectory (Harbor / OpenHands)
   agit sign <id> --key <file>          sign this head with an ed25519 key, so
@@ -185,6 +190,9 @@ options:
   --session <id>   merge: the fork's own imported session, so deletions it
                    recorded after the fork point are honoured
   --no-git         merge: use the built-in three-way merge, not git merge-file
+  --detach         share --static: print the link and exit, holding nothing open
+  --store <dir>    relay: where to persist shares (default: memory only)
+  --force          push: publish again even if this session was pushed before
   --since <dur>    import --all / stats: window of 7d / 24h / 30m
   --yes, -y        rm: confirm the deletion (there is no interactive prompt)
   --by <group>     stats: day (default), model, runtime or project
@@ -255,6 +263,9 @@ interface Opts {
   key?: string;
   otel?: boolean;
   atif?: boolean;
+  detach?: boolean;
+  force?: boolean;
+  store?: string;
   insecure: boolean;
   args: string[];
 }
@@ -342,6 +353,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--cert") opts.cert = argv[++i];
     else if (a === "--key") opts.key = argv[++i];
     else if (a === "--insecure") opts.insecure = true;
+    else if (a === "--detach") opts.detach = true;
+    else if (a === "--force") opts.force = true;
+    else if (a === "--store") opts.store = argv[++i];
     else if (a === "--otel") opts.otel = true;
     else if (a === "--atif") opts.atif = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
@@ -401,6 +415,10 @@ async function main(): Promise<number> {
       return cmdPr(opts);
     case "share":
       return cmdShare(opts);
+    case "push":
+      return cmdPush(opts);
+    case "pull":
+      return cmdPull(opts);
     case "relay":
       return cmdRelay(opts);
     case "mcp":
@@ -2457,6 +2475,7 @@ async function cmdRelay(opts: Opts): Promise<number> {
       host: opts.host,
       trustedProxies: opts.trustedProxies,
       tls,
+      ...(opts.store !== undefined ? { store: resolve(opts.store) } : {}),
     });
   } catch (err) {
     if ((err as { code?: string }).code === "EADDRINUSE") {
@@ -2482,6 +2501,137 @@ async function cmdRelay(opts: Opts): Promise<number> {
   await waitForSigint();
   await handle.close();
   return 0;
+}
+
+/**
+ * `agit push <id>` (#72) — publish a stored session to a relay and exit.
+ *
+ * `pr` + `adopt` is the manual version of this. A remote is just a relay
+ * someone else runs, so push is a static share that ends immediately: the
+ * whole verified chain, published once, no process left holding it open.
+ *
+ * The share is ended rather than left live because there is nothing more
+ * coming. An ended share still serves its log until the TTL expires, which is
+ * what `agit pull` reads.
+ */
+async function cmdPush(opts: Opts): Promise<number> {
+  const target = opts.args[0];
+  if (target === undefined) {
+    console.error("usage: agit push <session-id> [--relay <url>]");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, target);
+  // Publishing verbs share one bar: never publish a chain agit cannot vouch
+  // for, and never publish a log nobody scanned without being told to.
+  if (!refuseUnlessVerified(opts, id, "push", "nothing was published")) return 1;
+  if (!refuseUnredacted(opts, id, "push")) return 1;
+
+  const previous = readRemote(opts.dir, id);
+  if (previous !== null && !opts.force) {
+    console.log(`${id} was already pushed to:
+
+  ${previous.viewUrl}
+`);
+    console.log("that link serves the log until the relay's TTL expires.");
+    console.log("push it again with --force to publish a fresh copy at a new link.");
+    return 0;
+  }
+
+  const events = readSessionEvents(opts.dir, id);
+  const ttlMs =
+    opts.ttlHours !== undefined && Number.isFinite(opts.ttlHours) ? opts.ttlHours * 3600_000 : undefined;
+  const share = await createShare(opts.relay, ttlMs);
+  await pushAll(opts.relay, share, events);
+  await endShare(opts.relay, share);
+  writeRemote(opts.dir, id, { shareId: share.shareId, viewUrl: share.viewUrl, relay: opts.relay });
+
+  console.log(`pushed ${id} — ${events.length} events
+`);
+  console.log(`  ${share.viewUrl}
+`);
+  console.log(
+    `  anyone with the link can read it until ${new Date(Date.now() + share.ttlMs).toLocaleString()}.`,
+  );
+  console.log(`  pull it elsewhere with:  agit pull ${share.viewUrl}`);
+  return 0;
+}
+
+/**
+ * `agit pull <share-link | share-id>` (#72) — adopt a published log over HTTP.
+ *
+ * This is `adopt` with a download in front of it, and deliberately the same
+ * code path: the chain is verified before anything is stored, a broken log is
+ * refused, and the events land byte for byte so their hashes stay the ones
+ * the origin published. Nothing here trusts the relay — a relay that altered
+ * a single byte produces a log that fails verification, which is the whole
+ * reason the chain exists.
+ */
+async function cmdPull(opts: Opts): Promise<number> {
+  const ref = opts.args[0];
+  if (ref === undefined) {
+    console.error("usage: agit pull <share-link | share-id> [--relay <url>]");
+    return 2;
+  }
+  let where: { relay: string; shareId: string };
+  try {
+    where = parseShareRef(ref, opts.relay);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+
+  let lines: string[];
+  try {
+    lines = await fetchShareLog(where.relay, where.shareId);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+  if (lines.length === 0) {
+    console.error("that share has no events yet — nothing to pull");
+    return 1;
+  }
+
+  console.log(`pulled ${lines.length} events from ${where.relay}`);
+  // A path that does not exist: adoptBundle only uses it to look for a
+  // sibling meta.json, and a downloaded share has none. The origin's meta is
+  // not published with the log, so the adopted session carries none either —
+  // which is honest, rather than inventing one here.
+  const fakePath = join(opts.dir, `${where.shareId}.pulled.jsonl`);
+  return adoptBundle(opts, fakePath, lines.join("\n") + "\n");
+}
+
+/** Where a session was last pushed, so pushing twice does not scatter links. */
+interface RemoteRecord {
+  shareId: string;
+  viewUrl: string;
+  relay: string;
+}
+
+function remotesPath(dir: string): string {
+  return join(agitDir(dir), "remotes.json");
+}
+
+function readRemote(dir: string, id: string): RemoteRecord | null {
+  try {
+    const all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
+    return all[id] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
+  let all: Record<string, RemoteRecord> = {};
+  try {
+    all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
+  } catch {
+    /* first push */
+  }
+  all[id] = rec;
+  // Sorted: this file is read by humans and diffed by git often enough.
+  const sorted = Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b)));
+  writeFileSync(remotesPath(dir), JSON.stringify(sorted, null, 2) + "\n", "utf8");
 }
 
 async function cmdShare(opts: Opts): Promise<number> {
@@ -2516,7 +2666,6 @@ async function cmdShare(opts: Opts): Promise<number> {
       // the one that must never publish a chain that does not verify — or
       // one that was imported with --no-redact and never scanned.
       if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
-      if (!refuseUnredacted(opts, id, "share")) return 1;
       if (!refuseUnredacted(opts, id, "share")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
@@ -2562,10 +2711,26 @@ async function cmdShare(opts: Opts): Promise<number> {
       : "  Ctrl+C ends the share.\n",
   );
 
+  // A live share is a tail: detaching would end it the moment the process
+  // exits, so it is refused rather than silently producing a one-event link.
+  if (opts.detach && nativePath !== null) {
+    console.error("--detach cannot follow a live session: nothing would be left tailing the log.");
+    console.error("Pass --static to publish what exists now and exit, or drop --detach to keep following.");
+    await endShare(opts.relay, share);
+    return 2;
+  }
+
   const inbox = openShareInbox(opts.relay, share);
   try {
     if (staticEvents) {
       await pushAll(opts.relay, share, staticEvents);
+      if (opts.detach) {
+        // Print the link and go (#72). CI and scripts want the URL, not a
+        // process that lives forever to keep a viewer count updated.
+        console.log(`pushed ${staticEvents.length} events (static, detached).`);
+        console.log("the relay serves this link until its TTL expires; nothing is holding it open here.");
+        return 0;
+      }
       console.log(`pushed ${staticEvents.length} events (static). Holding the share open…`);
       await waitForSigint();
       return 0;

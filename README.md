@@ -180,6 +180,23 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+- **`agit push <id>` / `agit pull <link>`** — a remote is just a relay
+  someone else runs. `push` publishes a verified session and exits, printing
+  a link; `pull` adopts it somewhere else over HTTP. Pulling is the same code
+  path as adopting a `pr` bundle, so **the relay is never trusted**: the chain
+  is verified before anything is stored, the events land byte for byte with
+  the hashes the origin published, and a relay that alters a single byte
+  serves a log that fails verification. Pushing twice reuses the same link
+  unless you pass `--force`, and pushing a session that does not verify is
+  refused, like every other publishing verb.
+
+  `agit relay --store <dir>` gives the relay a disk, so a restart keeps every
+  link working instead of dropping it — two flat files per share, no database
+  and no dependency. Without it the relay is memory-only, which is still the
+  default. **That directory holds writer tokens**, so treat it as a credential
+  store; it is created `0700` with `0600` files, and on Windows those modes
+  are advisory. `agit share --static --detach` prints the link and exits, for
+  CI and scripts that want a URL rather than a process.
 - **`agit export <id> --otel | --atif`** — feed the tools you already run,
   with a log that verifies. `--otel` emits OTLP/JSON spans following the
   OpenTelemetry GenAI semantic conventions: an `invoke_agent` root, `chat`
