@@ -208,12 +208,99 @@ describe("ATIF export (#69)", () => {
     expect(edits[0]!.afterHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("uses FinalMetrics' own field names, which are not the per-step ones", () => {
+    // Every ATIF model sets extra: "forbid", so `prompt_tokens` here (the
+    // per-step name) is a rejected document, not an ignored field.
+    const t = toAtif(readSessionEvents(store, SESSION), readSessionMeta(store, SESSION));
+    const m = t.final_metrics as Record<string, unknown>;
+    expect(m.total_prompt_tokens).toBe(142);
+    expect(m.total_completion_tokens).toBe(1055);
+    expect(m.total_cached_tokens).toBe(160500);
+    expect(m.prompt_tokens).toBeUndefined();
+    expect(m.completion_tokens).toBeUndefined();
+    // Anything the schema does not define belongs in extra.
+    expect(
+      Object.keys(m).every((k) =>
+        [
+          "total_steps",
+          "total_prompt_tokens",
+          "total_completion_tokens",
+          "total_cached_tokens",
+          "total_cost_usd",
+          "extra",
+        ].includes(k),
+      ),
+    ).toBe(true);
+  });
+
+  it("emits only keys ATIF defines, since unknown ones are rejected outright", () => {
+    const t = toAtif(readSessionEvents(store, SESSION), readSessionMeta(store, SESSION));
+    const top = [
+      "schema_version",
+      "session_id",
+      "trajectory_id",
+      "agent",
+      "steps",
+      "notes",
+      "final_metrics",
+      "continued_trajectory_ref",
+      "extra",
+      "subagent_trajectories",
+    ];
+    expect(Object.keys(t).every((k) => top.includes(k))).toBe(true);
+
+    const agent = t.agent as Record<string, unknown>;
+    // `version` is required, not optional — omitting it fails validation.
+    expect(agent.version).toBeTruthy();
+    expect(
+      Object.keys(agent).every((k) =>
+        ["name", "version", "model_name", "tool_definitions", "extra"].includes(k),
+      ),
+    ).toBe(true);
+
+    const stepKeys = [
+      "step_id",
+      "timestamp",
+      "source",
+      "model_name",
+      "reasoning_effort",
+      "message",
+      "reasoning_content",
+      "tool_calls",
+      "observation",
+      "metrics",
+      "is_copied_context",
+      "llm_call_count",
+      "extra",
+    ];
+    for (const s of t.steps as Record<string, unknown>[]) {
+      expect(Object.keys(s).every((k) => stepKeys.includes(k))).toBe(true);
+    }
+  });
+
+  it("gives a runtime with no reported version one anyway", () => {
+    const events = readSessionEvents(store, SESSION).map((e) =>
+      e.type === "session.start" ? { ...e, payload: { ...(e.payload as object), runtimeVersion: null } } : e,
+    );
+    expect((toAtif(events, null).agent as { version: string }).version).toBe("unknown");
+  });
+
+  it("keeps agent-only fields off user steps", () => {
+    // The schema allows model_name, reasoning_content, tool_calls and metrics
+    // only when source is "agent".
+    const t = toAtif(readSessionEvents(store, SESSION), readSessionMeta(store, SESSION));
+    for (const s of t.steps as Record<string, unknown>[]) {
+      if (s.source === "agent") continue;
+      for (const k of ["model_name", "reasoning_effort", "reasoning_content", "tool_calls", "metrics"]) {
+        expect(s[k], `${String(s.source)} step carried ${k}`).toBeUndefined();
+      }
+    }
+  });
+
   it("totals usage, and says the file list is a floor", () => {
     const t = toAtif(readSessionEvents(store, SESSION), readSessionMeta(store, SESSION));
     const m = t.final_metrics as Record<string, number>;
     expect(m.total_steps).toBe((t.steps as unknown[]).length);
-    expect(m.prompt_tokens).toBe(142);
-    expect(m.completion_tokens).toBe(1055);
     const extra = t.extra as Record<string, unknown>;
     expect(extra.agitHeadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(extra.agitFilesAreLowerBound).toContain("SPEC 5.7");

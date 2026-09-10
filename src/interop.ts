@@ -299,8 +299,15 @@ interface AtifStep {
 }
 
 /**
- * Harbor's Agent Trajectory Interchange Format — the shape the OpenHands and
- * SWE-rebench trajectory datasets use for evals and fine-tuning.
+ * Harbor's Agent Trajectory Interchange Format, as specified in that
+ * project's RFC 0001 and implemented by its Pydantic models.
+ *
+ * **Every ATIF model sets `extra: "forbid"`.** An unknown key is a rejected
+ * document rather than a field quietly ignored, so anything agit wants to add
+ * goes in an `extra` dict and the field names below have to be exact. Two
+ * that are easy to get wrong: `Agent.version` is required, and `FinalMetrics`
+ * uses `total_prompt_tokens` rather than the `prompt_tokens` that per-step
+ * `Metrics` uses.
  *
  * The mapping is not one-to-one and the places it is not are worth naming:
  *
@@ -461,13 +468,23 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
     trajectory_id: sessionId,
     agent: {
       name: runtime,
-      ...(runtimeVersion !== null ? { version: runtimeVersion } : {}),
+      // `version` is required, not optional. A runtime that does not report
+      // one still needs the field, and saying "unknown" is honest where
+      // omitting it would simply fail validation.
+      version: runtimeVersion ?? "unknown",
       ...(models.size > 0 ? { model_name: [...models].sort()[0] } : {}),
     },
     steps,
+    // FinalMetrics does NOT reuse the per-step Metrics names: it is
+    // total_prompt_tokens, not prompt_tokens. Every ATIF model sets
+    // `extra: "forbid"`, so a near-miss name is a rejected document, not a
+    // field quietly ignored.
     final_metrics: {
       total_steps: steps.length,
-      ...totals,
+      total_prompt_tokens: totals.prompt_tokens,
+      total_completion_tokens: totals.completion_tokens,
+      total_cached_tokens: totals.cached_tokens,
+      extra: { llmCalls: totals.llm_calls },
     },
     extra: {
       // Provenance an ordinary trajectory cannot carry: this one came from a

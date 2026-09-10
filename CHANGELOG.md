@@ -12,8 +12,11 @@ Notable changes to agit. The event format itself is versioned separately
   spans following the OpenTelemetry GenAI semantic conventions — an
   `invoke_agent` root, `chat` children carrying token counts, `execute_tool`
   children — and `--atif` emits a Harbor Agent Trajectory Interchange Format
-  document (ATIF-v1.8), the shape the OpenHands and SWE-rebench trajectory
-  datasets use. Both are pure views over stored events; SPEC is unchanged.
+  document (ATIF-v1.8), the format Harbor uses for evals and fine-tuning and
+  the one its OpenHands adapter converts OpenHands event logs into. Both are
+  pure views over stored events; SPEC is unchanged. Every ATIF model forbids
+  unknown keys, so the field names are exact and agit's own additions sit in
+  each object's `extra`.
   Span ids are the first eight bytes of the event hash they came from, so a
   trace points back at a line of a log that can be verified, with the full
   hash alongside as an attribute. Output is deterministic, and an unverified
