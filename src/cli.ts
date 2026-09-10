@@ -49,7 +49,13 @@ import {
 } from "./share.js";
 import {
   agitDir,
+  addTag,
   assertSafeSessionId,
+  minimalPrefixes,
+  readNotes,
+  removeSession,
+  removeTag,
+  setNote,
   deleteShareState,
   listSessionIds,
   readSessionEvents,
@@ -58,11 +64,21 @@ import {
   resolveSessionId,
   resolveShareState,
   sessionDir,
+  type SessionNotes,
   type ShareState,
   writeSession,
   writeShareState,
 } from "./store.js";
 import { clipLine, fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
+import {
+  computeStats,
+  GROUP_BY,
+  isGroupBy,
+  parsePriceTable,
+  PriceTableError,
+  type PriceTable,
+  type StatsRow,
+} from "./stats.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
@@ -72,10 +88,22 @@ const USAGE = `agit — git for running agents
 usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                                        adopt an agit log or pr bundle as-is
+  agit import <session> --no-redact    skip credential scanning; share/pr later
+                                       refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
   agit import --latest                 import the most recently written session
+  agit ls [--tag T] [--runtime R]       list imported sessions; --sort orders by
+         [--project P] [--sort KEY]     started (default), events, files or id
+  agit tag <id> <tag>                  tag a session (--remove <tag> to drop one)
+  agit note <id> "<text>"              attach a note (--clear to remove it)
+  agit rm <id> [--yes]                 delete a session from the store
+  agit gc --older-than 90d             delete sessions older than a cutoff;
+         [--keep-tagged] [--yes]       --keep-tagged spares anything tagged
   agit ls                              list imported sessions
+  agit rm <id> --yes                   permanently delete a session from the store
+  agit stats [--by model|runtime]      usage across every imported session —
+             [--json]                 tokens and API calls, grouped
   agit show <id> [--by-model]          summarize one session; --by-model splits
                                        cost and file edits per model
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
@@ -86,6 +114,9 @@ usage:
   agit replay <id> --timeline          print the whole timeline, one line per event
   agit redact --check <session.jsonl>  dry run: what redaction would remove,
                                        masked, with a re-scan afterwards
+  agit stats [--by day|model|runtime|project]
+                                       store-wide usage across every session;
+                                       --since narrows, --price <file> costs it
   agit grep <pattern>                  search every imported session; --type
                                        narrows to one event type, --path matches
                                        file paths only, --regex, -s case-sensitive
@@ -98,24 +129,47 @@ usage:
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
                                        its parent from the fork point
   agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back
-                                       (base = fork point), via git merge-file
+                       [--session <id>] (base = fork point), via git merge-file;
+                                       --session honours the fork's deletions
+                                       (base = fork point). Uses git merge-file
+                                       when present, a built-in merge otherwise
   agit pr <id> [--at N] [--out DIR]    handoff bundle for a colleague: log +
                                        meta + verified tree + context seed
   agit share <id | native.jsonl>       share a session through a relay — live if it
                                        is still running; viewer messages land here
   agit share --resume <share-id>       resume a live share after a crash (relay
                                        keeps the buffer; only the tail is pushed)
-  agit relay                           run a relay (self-hosted, in-memory)
+  agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
+                                       serves HTTPS when given a cert and key
 
 options:
   --redact-patterns <file>  extra patterns + allowlist (default: .agit/redact.json)
   --no-redact      import: store the log unredacted (local-only stores)
   --allow-unredacted  share/pr: publish an unredacted session anyway
   --dir <path>     where .agit/ lives (default: current directory)
+  --tag <t>        ls/grep: only sessions carrying this tag
+  --runtime <r>    ls: only sessions from this runtime
+  --project <p>    ls: only sessions whose cwd ends in this directory name
+  --sort <key>     ls: started (default), events, files or id
+  --older-than <d> gc: cutoff, e.g. 90d
+  --keep-tagged    gc: never delete a tagged session
+  --yes, -y        rm/gc: skip the confirmation prompt
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
-  --since <dur>    import --all: only logs modified within 7d / 24h / 30m
+  --session <id>   merge: the fork's own imported session, so deletions it
+                   recorded after the fork point are honoured
+  --no-git         merge: use the built-in three-way merge, not git merge-file
+  --since <dur>    import --all / stats: window of 7d / 24h / 30m
+  --yes, -y        rm: confirm the deletion (there is no interactive prompt)
+  --by <group>     stats: day (default), model, runtime or project
+  --price <file>   stats: a local rate table; without it no money is shown
+  --json           ls/show/verify/grep/diff/export: machine-readable output
+                   instead of the human-formatted default (grep: one JSON
+                   object per line, NDJSON; everything else: one document)
+  --no-redact      import: store the session verbatim, skipping credential
+                   scanning (SPEC §8) — meta.json remembers this
+  --allow-unredacted  share/pr: proceed anyway on a --no-redact session
   --type <t>       grep: only this event type (tool.call, file.diff, ...)
   --path           grep: match file.diff paths instead of rendered lines
   --regex          grep: treat the pattern as a regular expression
@@ -126,6 +180,9 @@ options:
   --port <n>       relay: port to listen on (default 7717)
   --host <addr>    relay: address to bind (default 127.0.0.1; 0.0.0.0 exposes it)
   --trusted-proxy <addr>  relay: trust X-Forwarded-For from this proxy (repeatable)
+  --cert <pem>     relay: TLS certificate; with --key, serve HTTPS
+  --key <pem>      relay: TLS private key
+  --insecure       relay: allow binding beyond loopback without TLS
 
 <id> accepts any unique prefix. See SPEC.md for the format, PROTOCOL.md for the relay.`;
 
@@ -139,6 +196,9 @@ interface Opts {
   latest: boolean;
   since?: number;
   json: boolean;
+  yes: boolean;
+  noRedact: boolean;
+  allowUnredacted: boolean;
   grepType?: string;
   grepPath: boolean;
   grepRegex: boolean;
@@ -154,9 +214,20 @@ interface Opts {
   host?: string;
   trustedProxies: string[];
   redactPatterns?: string;
-  noRedact: boolean;
-  allowUnredacted: boolean;
   check: boolean;
+  tag?: string;
+  runtime?: string;
+  project?: string;
+  sort?: string;
+  olderThan?: number;
+  keepTagged: boolean;
+  by?: string;
+  price?: string;
+  session?: string;
+  noGit: boolean;
+  cert?: string;
+  key?: string;
+  insecure: boolean;
   args: string[];
 }
 
@@ -169,6 +240,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     all: false,
     latest: false,
     json: false,
+    yes: false,
+    noRedact: false,
+    allowUnredacted: false,
     grepPath: false,
     grepRegex: false,
     caseSensitive: false,
@@ -176,9 +250,10 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     static: false,
     resume: false,
     trustedProxies: [],
-    noRedact: false,
-    allowUnredacted: false,
     check: false,
+    keepTagged: false,
+    noGit: false,
+    insecure: false,
     args: [],
   };
   const rest: string[] = [];
@@ -207,6 +282,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--into") opts.into = argv[++i];
     else if (a === "--summary") opts.summary = argv[++i];
     else if (a === "--json") opts.json = true;
+    else if (a === "--yes" || a === "-y") opts.yes = true;
+    else if (a === "--no-redact") opts.noRedact = true;
+    else if (a === "--allow-unredacted") opts.allowUnredacted = true;
     else if (a === "--relay") opts.relay = argv[++i] ?? opts.relay;
     else if (a === "--ttl") opts.ttlHours = Number(argv[++i]);
     else if (a === "--static") opts.static = true;
@@ -215,9 +293,26 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
     else if (a === "--redact-patterns") opts.redactPatterns = argv[++i];
-    else if (a === "--no-redact") opts.noRedact = true;
-    else if (a === "--allow-unredacted") opts.allowUnredacted = true;
     else if (a === "--check") opts.check = true;
+    else if (a === "--tag") opts.tag = argv[++i];
+    else if (a === "--runtime") opts.runtime = argv[++i];
+    else if (a === "--project") opts.project = argv[++i];
+    else if (a === "--sort") opts.sort = argv[++i];
+    else if (a === "--keep-tagged") opts.keepTagged = true;
+    else if (a === "--older-than") {
+      const ms = parseSince(argv[++i] ?? "");
+      if (ms === null) {
+        console.error("--older-than takes a duration like 90d, 24h or 30m");
+        process.exit(2);
+      }
+      opts.olderThan = ms;
+    } else if (a === "--by") opts.by = argv[++i];
+    else if (a === "--price") opts.price = argv[++i];
+    else if (a === "--session") opts.session = argv[++i];
+    else if (a === "--no-git") opts.noGit = true;
+    else if (a === "--cert") opts.cert = argv[++i];
+    else if (a === "--key") opts.key = argv[++i];
+    else if (a === "--insecure") opts.insecure = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -231,8 +326,18 @@ async function main(): Promise<number> {
   switch (verb) {
     case "import":
       return cmdImport(opts);
+    case "tag":
+      return cmdTag(opts);
+    case "note":
+      return cmdNote(opts);
+    case "rm":
+      return cmdRm(opts);
+    case "gc":
+      return cmdGc(opts);
     case "ls":
       return cmdLs(opts);
+    case "stats":
+      return cmdStats(opts);
     case "show":
       return cmdShow(opts);
     case "verify":
@@ -341,12 +446,20 @@ function refuseUnlessVerified(opts: Opts, id: string, verb: string, consequence:
   return false;
 }
 
+/** A session already in the store, and the redaction mode it was imported under. */
+interface KnownSource {
+  id: string;
+  noRedact: boolean;
+}
+
 interface ImportOutcome {
   status: "imported" | "updated" | "unchanged" | "unrecognized";
   id?: string;
   adapter?: Adapter;
   events?: number;
   previousEvents?: number;
+  /** True when this re-import flipped --no-redact on or off for an already-stored session. */
+  modeChanged?: boolean;
   records?: number;
   skipped?: Record<string, number>;
   redactions?: RedactionCounts;
@@ -358,11 +471,13 @@ interface ImportOutcome {
  * a log is already in the store. Import is deterministic, so a matching hash
  * means byte-identical output and nothing to do.
  */
-function knownSources(dir: string): Map<string, string> {
-  const known = new Map<string, string>();
+function knownSources(dir: string): Map<string, KnownSource> {
+  const known = new Map<string, KnownSource>();
   for (const id of listSessionIds(dir)) {
     const meta = readSessionMeta(dir, id);
-    if (meta?.source?.sha256) known.set(meta.source.sha256, id);
+    if (meta?.source?.sha256) {
+      known.set(meta.source.sha256, { id, noRedact: meta.redaction?.enabled === false });
+    }
   }
   return known;
 }
@@ -373,12 +488,19 @@ function importNativeLog(
   path: string,
   raw: string,
   lines: string[],
-  known: Map<string, string>,
+  known: Map<string, KnownSource>,
   redactCfg: RedactionConfig,
 ): ImportOutcome {
   const sha256 = sha256Hex(raw);
-  const knownId = known.get(sha256);
-  if (knownId !== undefined) return { status: "unchanged", id: knownId };
+  const hit = known.get(sha256);
+  // The source bytes alone stopped being a complete identity the moment
+  // --no-redact made the stored output depend on a flag too. Re-import when
+  // the requested mode differs from the stored one, so that re-importing
+  // without the flag is the cure for an accidental --no-redact rather than a
+  // no-op that reports success.
+  if (hit !== undefined && hit.noRedact === opts.noRedact) {
+    return { status: "unchanged", id: hit.id };
+  }
 
   const adapter = ADAPTERS.find((a) => a.detect(lines));
   if (!adapter) return { status: "unrecognized" };
@@ -386,11 +508,18 @@ function importNativeLog(
   const converted = adapter.convert(lines);
   const redactions: RedactionCounts = {};
   for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions, redactCfg);
+  if (!opts.noRedact) {
+    for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
+  }
   const events = buildChain(converted.sessionId, converted.drafts);
   // Same id already stored means the source grew (a resumed session) or changed.
   const previous = listSessionIds(opts.dir).includes(converted.sessionId)
     ? readSessionMeta(opts.dir, converted.sessionId)
     : null;
+  // Same bytes, different mode: the user is switching redaction on or off,
+  // which is the one case where "updated N -> N events" would read as a
+  // no-op when it is in fact a full rewrite of the stored payloads.
+  const modeChanged = previous !== null && (previous.redaction?.enabled === false) !== opts.noRedact;
 
   const meta: SessionMeta = {
     agitSchema: SCHEMA_VERSION,
@@ -411,10 +540,11 @@ function importNativeLog(
     headHash: events[events.length - 1]!.hash,
   };
   writeSession(opts.dir, converted.sessionId, toJsonl(events), meta);
-  known.set(sha256, converted.sessionId);
+  known.set(sha256, { id: converted.sessionId, noRedact: opts.noRedact });
   return {
     status: previous ? "updated" : "imported",
     id: converted.sessionId,
+    modeChanged,
     adapter,
     events: events.length,
     previousEvents: previous?.eventCount,
@@ -448,6 +578,13 @@ function printImportReport(opts: Opts, outcome: ImportOutcome): number {
       ? `  events      ${outcome.previousEvents} → ${outcome.events} (from ${outcome.records} native records)`
       : `  events      ${outcome.events} (from ${outcome.records} native records)`,
   );
+  if (outcome.modeChanged === true) {
+    console.log(
+      opts.noRedact
+        ? "  re-imported  redaction was ON for the stored copy; it is now OFF (--no-redact)"
+        : "  re-imported  redaction was OFF (--no-redact) for the stored copy; it is now ON",
+    );
+  }
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
   if (skippedTotal > 0) {
     const detail = Object.entries(skipped)
@@ -783,11 +920,21 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   console.log(`  events      ${res.events}, chain intact${meta ? ", matches meta.json head" : ""}`);
   if (meta) {
     console.log(`  origin      ${meta.adapter.name}@${meta.adapter.version}, imported ${meta.importedAt}`);
-    const redacted = Object.entries(meta.redactions);
-    if (redacted.length > 0) {
+    // The recipient has the least context about how this log was produced,
+    // and adoption is the one moment agit speaks to them. A --no-redact
+    // origin leaves `redactions` empty, so silence here would read as
+    // "scanned, nothing found" — the opposite of what happened.
+    if (meta.redaction?.enabled === false) {
       console.log(
-        `  redactions  ${redacted.map(([k, v]) => `${k}×${v}`).join(", ")} (applied at the origin; agit did not re-scan)`,
+        "  redactions  NONE — the origin imported with --no-redact, so this log was never scanned for credentials (agit did not re-scan either)",
       );
+    } else {
+      const redacted = Object.entries(meta.redactions);
+      if (redacted.length > 0) {
+        console.log(
+          `  redactions  ${redacted.map(([k, v]) => `${k}×${v}`).join(", ")} (applied at the origin; agit did not re-scan)`,
+        );
+      }
     }
   } else {
     console.log("  meta        none in the bundle — truncation is not checkable for this session");
@@ -797,6 +944,150 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   return 0;
 }
 
+async function confirm(question: string, yes: boolean): Promise<boolean> {
+  if (yes) return true;
+  if (!process.stdin.isTTY) {
+    console.error(`${question} — refusing without a terminal to ask; pass --yes to mean it.`);
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+  rl.close();
+  return answer === "y" || answer === "yes";
+}
+
+function cmdTag(opts: Opts): number {
+  const [idArg, tag] = opts.args;
+  if (!idArg || !tag) {
+    console.error("usage: agit tag <id> <tag>   |   agit tag <id> --remove <tag>");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  // `agit tag x --remove y` parses as args [x, --remove?]; keep it explicit.
+  const remove = opts.args.includes("--remove");
+  const value = remove ? opts.args[opts.args.indexOf("--remove") + 1] : tag;
+  if (remove && !value) {
+    console.error("usage: agit tag <id> --remove <tag>");
+    return 2;
+  }
+  const notes = remove ? removeTag(opts.dir, id, value!) : addTag(opts.dir, id, value!);
+  console.log(`${id}: tags ${notes.tags.length > 0 ? notes.tags.join(", ") : "(none)"}`);
+  return 0;
+}
+
+function cmdNote(opts: Opts): number {
+  const idArg = opts.args[0];
+  if (!idArg) {
+    console.error('usage: agit note <id> "<text>"   |   agit note <id> --clear');
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  if (opts.args.includes("--clear")) {
+    setNote(opts.dir, id, null);
+    console.log(`${id}: note cleared`);
+    return 0;
+  }
+  const text = opts.args.slice(1).join(" ").trim();
+  if (text === "") {
+    const current = readNotes(opts.dir, id).note;
+    console.log(current ?? "(no note)");
+    return 0;
+  }
+  setNote(opts.dir, id, text);
+  console.log(`${id}: note saved`);
+  return 0;
+}
+
+async function cmdRm(opts: Opts): Promise<number> {
+  const idArg = opts.args[0];
+  if (!idArg) {
+    console.error("usage: agit rm <id> [--yes]");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, idArg);
+  const events = (() => {
+    try {
+      return readSessionEvents(opts.dir, id);
+    } catch {
+      return [];
+    }
+  })();
+  console.log(`${id}: ${events.length} events${events[0] ? `, started ${events[0].ts}` : ""}`);
+  const notes = readNotes(opts.dir, id);
+  if (notes.tags.length > 0) console.log(`  tagged ${notes.tags.join(", ")}`);
+  if (notes.note) console.log(`  note: ${notes.note}`);
+  // A fork made from this session lives outside the store and keeps only the
+  // session id in fork.json; deleting the log leaves it with no merge base.
+  console.log("  any fork of this session loses its merge base — `agit merge` needs the log.");
+  if (!(await confirm(`delete ${id} permanently?`, opts.yes))) {
+    console.log("nothing deleted.");
+    return 1;
+  }
+  removeSession(opts.dir, id);
+  console.log(`deleted ${id}`);
+  return 0;
+}
+
+async function cmdGc(opts: Opts): Promise<number> {
+  if (opts.olderThan === undefined) {
+    console.error("usage: agit gc --older-than 90d [--keep-tagged] [--yes]");
+    return 2;
+  }
+  const cutoff = Date.now() - opts.olderThan;
+  const doomed: { id: string; last: string; tags: string[] }[] = [];
+  for (const id of listSessionIds(opts.dir)) {
+    let events;
+    try {
+      events = readSessionEvents(opts.dir, id);
+    } catch {
+      continue; // unreadable: leave it alone rather than delete what we cannot read
+    }
+    if (events.length === 0) continue;
+    const last = events[events.length - 1]!.ts;
+    if (Date.parse(last) >= cutoff) continue;
+    const tags = readNotes(opts.dir, id).tags;
+    if (opts.keepTagged && tags.length > 0) continue;
+    doomed.push({ id, last, tags });
+  }
+  if (doomed.length === 0) {
+    console.log("nothing older than the cutoff.");
+    return 0;
+  }
+  console.log(`${doomed.length} session(s) older than the cutoff:`);
+  for (const d of doomed) {
+    console.log(
+      `  ${d.id}  last event ${d.last.slice(0, 16).replace("T", " ")}${d.tags.length > 0 ? `  [${d.tags.join(", ")}]` : ""}`,
+    );
+  }
+  if (!(await confirm(`delete all ${doomed.length} permanently?`, opts.yes))) {
+    console.log("nothing deleted.");
+    return 1;
+  }
+  for (const d of doomed) removeSession(opts.dir, d.id);
+  console.log(`deleted ${doomed.length} session(s)`);
+  return 0;
+}
+
+interface LsRow {
+  /**
+   * Whether the stored log parses back into events — nothing more. `ls` does
+   * not verify the hash chain (`agit verify` does), so a tampered log that
+   * still parses is `readable: true`. Named for what it measures: a field
+   * called `corrupt: false` would read as an integrity claim this never makes.
+   */
+  readable: boolean;
+  /** Why the log could not be read, when readable is false. */
+  reason?: string;
+  id: string;
+  started?: string;
+  durationMs?: number;
+  events?: number;
+  files?: number;
+  runtime?: string;
+  /** Tags attached locally; they annotate a session and never touch its chain. */
+  tags: string[];
+}
+
 function cmdLs(opts: Opts): number {
   if (!existsSync(opts.dir)) {
     console.error(`no such directory: ${opts.dir}`);
@@ -804,46 +1095,136 @@ function cmdLs(opts: Opts): number {
   }
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    if (opts.json) process.stdout.write("[]\n");
+    else console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
-  const rows = ids.map((id) => {
+  const sortBy = opts.sort ?? "started";
+  if (!["started", "events", "files", "id"].includes(sortBy)) {
+    console.error(`unknown --sort ${JSON.stringify(sortBy)}; one of: started, events, files, id`);
+    return 2;
+  }
+  // Show the shortest id prefix that is still unique here, the way git does.
+  const prefixes = minimalPrefixes(ids);
+
+  const built = ids.map((id) => {
     // One corrupt session must not take down the whole listing.
     let events;
     try {
       events = readSessionEvents(opts.dir, id);
       if (events.length === 0) throw new Error("empty log");
-    } catch {
-      return {
-        id: id.slice(0, 8),
-        started: "(corrupt — run `agit verify " + id.slice(0, 8) + "`)",
-        dur: "",
-        events: "",
-        files: "",
-        runtime: "",
+    } catch (err) {
+      const row: LsRow = {
+        id,
+        readable: false,
+        reason: err instanceof Error ? err.message : String(err),
+        tags: [],
       };
+      return { sortKey: 0, runtimeRaw: "", projectRaw: "", tags: [] as string[], row };
     }
     const first = events[0]!;
     const last = events[events.length - 1]!;
-    const files = fileStateAt(events).size;
-    const start = (first.payload as { runtime?: unknown }).runtime;
-    return {
-      id: id.slice(0, 8),
-      started: first.ts.slice(0, 16).replace("T", " "),
-      dur: humanDuration(Date.parse(last.ts) - Date.parse(first.ts)),
-      events: String(events.length),
-      files: String(files),
-      runtime: typeof start === "string" ? start : "?",
+    const start = first.payload as { runtime?: unknown; cwd?: unknown };
+    const runtimeRaw = typeof start.runtime === "string" ? start.runtime : "?";
+    const cwd = typeof start.cwd === "string" ? start.cwd : "";
+    const projectRaw =
+      cwd === ""
+        ? ""
+        : (cwd
+            .replace(/[\\/]+$/, "")
+            .split(/[\\/]/)
+            .pop() ?? "");
+    const tags = readNotes(opts.dir, id).tags;
+    const row: LsRow = {
+      id,
+      readable: true,
+      started: first.ts,
+      durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+      events: events.length,
+      files: fileStateAt(events).size,
+      runtime: runtimeRaw,
+      tags,
     };
+    return { sortKey: Date.parse(first.ts), runtimeRaw, projectRaw, tags, row };
   });
-  const cols = ["id", "started", "dur", "events", "files", "runtime"] as const;
-  const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => r[c].length)));
+
+  // Filters apply to both renderings: a script narrowing by tag wants the same
+  // set a human would see, not the whole store.
+  const filtered = built.filter(
+    (b) =>
+      (opts.tag === undefined || b.tags.includes(opts.tag)) &&
+      (opts.runtime === undefined || b.runtimeRaw === opts.runtime) &&
+      (opts.project === undefined || b.projectRaw === opts.project),
+  );
+  filtered.sort((a, b) => {
+    if (sortBy === "events") return (b.row.events ?? 0) - (a.row.events ?? 0);
+    if (sortBy === "files") return (b.row.files ?? 0) - (a.row.files ?? 0);
+    if (sortBy === "id") return a.row.id.localeCompare(b.row.id);
+    return a.sortKey - b.sortKey;
+  });
+
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        filtered.map((b) => b.row),
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+  if (filtered.length === 0) {
+    console.log("no sessions match those filters.");
+    return 0;
+  }
+
+  const displayRows = filtered.map((b) => {
+    const short = prefixes.get(b.row.id)!;
+    return !b.row.readable
+      ? {
+          id: short,
+          started: "(corrupt — run `agit verify " + short + "`)",
+          dur: "",
+          events: "",
+          files: "",
+          runtime: "",
+          tags: "",
+        }
+      : {
+          id: short,
+          started: b.row.started!.slice(0, 16).replace("T", " "),
+          dur: humanDuration(b.row.durationMs!),
+          events: String(b.row.events),
+          files: String(b.row.files),
+          runtime: b.row.runtime!,
+          tags: b.tags.join(","),
+        };
+  });
+  const anyTags = displayRows.some((r) => r.tags !== "");
+  const cols = (
+    anyTags
+      ? ["id", "started", "dur", "events", "files", "runtime", "tags"]
+      : ["id", "started", "dur", "events", "files", "runtime"]
+  ) as readonly ("id" | "started" | "dur" | "events" | "files" | "runtime" | "tags")[];
+  const widths = cols.map((c) => Math.max(c.length, ...displayRows.map((r) => r[c].length)));
   console.log(cols.map((c, i) => c.toUpperCase().padEnd(widths[i]!)).join("  "));
-  for (const r of rows) console.log(cols.map((c, i) => r[c].padEnd(widths[i]!)).join("  "));
+  for (const r of displayRows) console.log(cols.map((c, i) => r[c].padEnd(widths[i]!)).join("  "));
   console.log("(files = lower bound: structured edits only — shell-driven changes are not tracked)");
   return 0;
 }
 
+/**
+ * Remove a session from the store (issue #71). Requires --yes: there is no
+ * interactive prompt to confirm against, so the flag itself is the
+ * confirmation, the same way `docker rm -f` or `kubectl delete` ask for an
+ * explicit flag rather than a y/n prompt a script can't answer.
+ *
+ * Does not check whether a fork elsewhere in the filesystem still points at
+ * this session (fork.json names its source by id) — forks live in whatever
+ * directory `--out` named, with no central registry agit could scan. That
+ * would need one; it does not exist yet, and this command does not guess
+ * at where forks might be.
+ */
 function cmdShow(opts: Opts): number {
   const id = requireId(opts);
   const events = readSessionEvents(opts.dir, id);
@@ -852,14 +1233,7 @@ function cmdShow(opts: Opts): number {
   const last = events[events.length - 1]!;
   const start = first.payload as { [k: string]: unknown };
 
-  console.log(`session ${id}`);
-  console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
-  if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
-  if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
-  console.log(`  started     ${first.ts}`);
-  console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
-  if (meta)
-    console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+  const notes: SessionNotes = readNotes(opts.dir, id);
 
   const byType = new Map<string, number>();
   const tools = new Map<string, number>();
@@ -870,6 +1244,57 @@ function cmdShow(opts: Opts): number {
       if (typeof name === "string") tools.set(name, (tools.get(name) ?? 0) + 1);
     }
   }
+  const u = usageTotals(events);
+
+  if (opts.json) {
+    if (opts.byModel) {
+      process.stdout.write(JSON.stringify(usageByModelJson(events), null, 2) + "\n");
+      return 0;
+    }
+    process.stdout.write(
+      JSON.stringify(
+        {
+          id,
+          runtime: typeof start.runtime === "string" ? start.runtime : null,
+          runtimeVersion: typeof start.runtimeVersion === "string" ? start.runtimeVersion : null,
+          cwd: typeof start.cwd === "string" ? start.cwd : null,
+          gitBranch: typeof start.gitBranch === "string" ? start.gitBranch : null,
+          startedAt: first.ts,
+          durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+          imported: meta ? { at: meta.importedAt, adapter: meta.adapter } : null,
+          events: events.length,
+          byType: Object.fromEntries(byType),
+          tools: Object.fromEntries(tools),
+          usage: { ...u, models: [...u.models] },
+          files: [...fileStateAt(events).values()],
+          redactions: meta?.redactions ?? {},
+          // {} alone is ambiguous: a --no-redact import (#79) also leaves it
+          // empty, so a consumer gating on redaction needs this to tell
+          // "scanned, found nothing" from "never scanned".
+          redactionSkipped: meta?.redaction?.enabled === false,
+          // Local annotations: they describe a session without touching its
+          // chain, and a script filtering `ls --json` by tag wants them here too.
+          tags: notes.tags,
+          note: notes.note ?? null,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+
+  console.log(`session ${id}`);
+  console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
+  if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
+  if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
+  console.log(`  started     ${first.ts}`);
+  console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
+  if (meta)
+    console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+  if (notes.tags.length > 0) console.log(`  tags        ${notes.tags.join(", ")}`);
+  if (notes.note) console.log(`  note        ${notes.note}`);
+
   console.log(
     `  events      ${events.length}  (${[...byType.entries()].map(([t, n]) => `${t}×${n}`).join(", ")})`,
   );
@@ -882,7 +1307,6 @@ function cmdShow(opts: Opts): number {
     );
   }
 
-  const u = usageTotals(events);
   if (u.apiMessages > 0) {
     console.log(`  models      ${[...u.models].join(", ")}`);
     console.log(
@@ -910,7 +1334,9 @@ function cmdShow(opts: Opts): number {
       );
     }
   }
-  if (meta && Object.keys(meta.redactions).length > 0) {
+  if (meta?.redaction?.enabled === false) {
+    console.log("  redactions  SKIPPED at import (--no-redact) — share/pr need --allow-unredacted");
+  } else if (meta && Object.keys(meta.redactions).length > 0) {
     console.log(
       `  redactions  ${Object.entries(meta.redactions)
         .map(([k, v]) => `${k}×${v}`)
@@ -918,6 +1344,27 @@ function cmdShow(opts: Opts): number {
     );
   }
   return 0;
+}
+
+/** usageByModel's ModelUsage carries a Set — swap it for an array/count so JSON.stringify needs no help. */
+function usageByModelJson(events: AgitEvent[]): {
+  model: string;
+  apiMessages: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  files: string[];
+}[] {
+  return usageByModel(events).map((r) => ({
+    model: r.model,
+    apiMessages: r.apiMessages,
+    inputTokens: r.inputTokens,
+    outputTokens: r.outputTokens,
+    cacheReadInputTokens: r.cacheReadInputTokens,
+    cacheCreationInputTokens: r.cacheCreationInputTokens,
+    files: [...r.files],
+  }));
 }
 
 /**
@@ -992,6 +1439,10 @@ function cmdVerify(opts: Opts): number {
     meta = readSessionMeta(opts.dir, id) ?? undefined;
   }
   const res = verifyChain(lines, meta);
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ ...res, hasMeta: meta !== undefined }, null, 2) + "\n");
+    return res.ok ? 0 : 1;
+  }
   if (res.ok) {
     console.log(
       `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
@@ -1130,15 +1581,14 @@ function cmdDiff(opts: Opts): number {
       // about, and the same thing `agit merge` reads.
       forkSide = { tree: treeOnDisk(join(resolve(first), "tree")), label: "fork" };
     }
-    for (const line of renderDiff(
+    printDiff(
+      opts,
       diffSessions({
         a: { events: parent, label: info.sourceSession.slice(0, 8) },
         b: forkSide,
         from: { seq: info.atSeq, hash: info.atHash },
       }),
-    )) {
-      console.log(line);
-    }
+    );
     return 0;
   }
 
@@ -1154,15 +1604,22 @@ function cmdDiff(opts: Opts): number {
     console.error("those are the same session");
     return 2;
   }
-  for (const line of renderDiff(
+  printDiff(
+    opts,
     diffSessions({
       a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
       b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
     }),
-  )) {
-    console.log(line);
-  }
+  );
   return 0;
+}
+
+function printDiff(opts: Opts, diff: ReturnType<typeof diffSessions>): void {
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
+    return;
+  }
+  for (const line of renderDiff(diff)) console.log(line);
 }
 
 function cmdMerge(opts: Opts): number {
@@ -1184,13 +1641,48 @@ function cmdMerge(opts: Opts): number {
     return 1;
   }
   const intoDir = resolve(opts.into ?? ".");
-  const { results, conflicts } = mergeFork({ forkDir, intoDir, sourceEvents: events, summary: opts.summary });
+  // The fork's own session, when the user names it: only its file.delete
+  // events can make a merge remove anything.
+  let forkEvents: AgitEvent[] | undefined;
+  if (opts.session !== undefined) {
+    try {
+      forkEvents = readSessionEvents(opts.dir, resolveSessionId(opts.dir, opts.session));
+    } catch (err) {
+      console.error(`--session ${opts.session}: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  const { results, conflicts, deleted, engines } = mergeFork({
+    forkDir,
+    intoDir,
+    sourceEvents: events,
+    summary: opts.summary,
+    forkEvents,
+    noGit: opts.noGit,
+  });
 
   console.log(`merging fork of ${info.sourceSession} (at event ${info.atSeq}) into ${intoDir}`);
-  for (const r of results) console.log(`  ${r.outcome.padEnd(12)} ${r.rel}`);
+  for (const r of results) console.log(`  ${r.outcome.padEnd(18)} ${r.rel}`);
+  if (deleted > 0) {
+    console.log(
+      `${deleted} file${deleted === 1 ? "" : "s"} deleted, as ${opts.session} recorded after the fork point.`,
+    );
+  }
+  if (forkEvents === undefined) {
+    console.log("  (no --session: a file absent from the fork tree counts as untouched, never deleted)");
+  }
+  if (engines.includes("builtin")) {
+    // Say which engine ran: the results are a merge someone will act on, and
+    // git's are what their expectations are calibrated against.
+    console.log(
+      opts.noGit
+        ? "  (content merges used agit's built-in three-way merge, as --no-git asked)"
+        : "  (git merge-file was not on PATH; content merges used agit's built-in three-way merge)",
+    );
+  }
   console.log(
     conflicts > 0
-      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files; finish by hand.`
+      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files, and files the fork deleted but the target had changed were left in place; finish by hand.`
       : "clean: no conflicts.",
   );
   console.log(`recorded in ${join(forkDir, "merge.json")}`);
@@ -1231,6 +1723,109 @@ function cmdPr(opts: Opts): number {
   return 0;
 }
 
+/**
+ * Token and API-call totals across the whole store (issue #67).
+ *
+ * A fold over the `cost` events sessions already carry, so nothing new is
+ * recorded. Money is only ever shown against a rate table the user supplies
+ * (`--price`): prices change and vary by account, and a wrong number here
+ * would be worse than no number.
+ */
+function cmdStats(opts: Opts): number {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    return 1;
+  }
+  const by = opts.by ?? "day";
+  if (!isGroupBy(by)) {
+    console.error(`unknown --by ${JSON.stringify(by)}; one of: ${GROUP_BY.join(", ")}`);
+    return 2;
+  }
+  let prices: PriceTable | undefined;
+  if (opts.price !== undefined) {
+    try {
+      prices = parsePriceTable(readFileSync(resolve(opts.price), "utf8"));
+    } catch (err) {
+      console.error(
+        err instanceof PriceTableError
+          ? `--price ${opts.price}: ${err.message}`
+          : `--price ${opts.price}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 2;
+    }
+  }
+
+  const sessions = [];
+  for (const id of listSessionIds(opts.dir)) {
+    try {
+      sessions.push({ id, events: readSessionEvents(opts.dir, id) });
+    } catch {
+      // One corrupt session must not take down the whole report.
+      console.error(`skipping ${id.slice(0, 8)}: unreadable (agit verify it)`);
+    }
+  }
+  if (sessions.length === 0) {
+    if (opts.json) process.stdout.write(JSON.stringify({ by, rows: [], totals: null }, null, 2) + "\n");
+    else console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+
+  const res = computeStats(sessions, { by, sinceMs: opts.since, prices });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ by, since: opts.since ?? null, ...res }, null, 2) + "\n");
+    return 0;
+  }
+
+  const money = (r: StatsRow): string =>
+    prices === undefined ? "" : r.cost === undefined ? "—" : r.cost.toFixed(2);
+  const n = (x: number): string => x.toLocaleString("en-US");
+  const cell = (r: StatsRow): Record<string, string> => ({
+    key: r.key,
+    calls: r.costRecorded ? n(r.apiCalls) : "—",
+    in: r.costRecorded ? n(r.inputTokens) : "—",
+    out: r.costRecorded ? n(r.outputTokens) : "—",
+    cacheRead: r.costRecorded ? n(r.cacheReadInputTokens) : "—",
+    cacheWrite: r.costRecorded ? n(r.cacheCreationInputTokens) : "—",
+    sessions: n(r.sessions),
+    files: n(r.files),
+    ...(prices ? { cost: money(r) } : {}),
+  });
+
+  const head: Record<string, string> = {
+    key: by.toUpperCase(),
+    cacheWrite: "CACHE WRITE",
+    sessions: "SESSIONS",
+    ...(prices ? { cost: prices.currency ? `COST (${prices.currency})` : "COST" } : {}),
+  };
+  const cols = Object.keys(head);
+  const table = [...res.rows.map(cell), cell(res.totals)];
+  table[table.length - 1]!.key = "total";
+  const widths = cols.map((c) => Math.max(head[c]!.length, ...table.map((r) => r[c]!.length)));
+  const line = (r: Record<string, string>): string =>
+    cols.map((c, i) => (c === "key" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
+
+  console.log(line(head));
+  for (const r of table.slice(0, -1)) console.log(line(r));
+  console.log(line(table[table.length - 1]!));
+
+  // A dash is not a zero: say which it is.
+  if (res.rows.some((r) => !r.costRecorded)) {
+    console.log("\n— = no cost events recorded for that group; its token counts are unknown, not zero.");
+  }
+  const unpriced = res.totals.unpriced ?? [];
+  if (unpriced.length > 0) {
+    console.log(`no rate in the price table for: ${unpriced.join(", ")} — those rows are uncosted.`);
+  }
+  if (prices === undefined) {
+    console.log("\n(no money shown: pass --price <file> with your own rate table. See README.)");
+  }
+  if (res.skippedBySince > 0) {
+    console.log(`${res.skippedBySince} session(s) outside --since were not counted.`);
+  }
+  console.log("(files = lower bound: structured edits only — shell-driven changes are not tracked)");
+  return 0;
+}
+
 /** The format for everyone else: the log to stdout, no CLI linkage required. */
 /**
  * Search every imported session at once.
@@ -1267,8 +1862,15 @@ function cmdGrep(opts: Opts): number {
     return 2;
   }
 
-  const ids = listSessionIds(opts.dir);
+  let ids = listSessionIds(opts.dir);
+  if (opts.tag !== undefined) ids = ids.filter((id) => readNotes(opts.dir, id).tags.includes(opts.tag!));
   if (ids.length === 0) {
+    console.log(
+      opts.tag !== undefined
+        ? `no sessions tagged ${JSON.stringify(opts.tag)}`
+        : "no sessions imported yet (agit import <file>)",
+    );
+    if (opts.json) return 0; // NDJSON: zero lines is zero results, nothing more to say.
     console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
@@ -1288,10 +1890,12 @@ function cmdGrep(opts: Opts): number {
       type: opts.grepType,
       path: opts.grepPath,
     })) {
-      console.log(renderHit(hit, idWidth));
+      if (opts.json) process.stdout.write(JSON.stringify(hit) + "\n");
+      else console.log(renderHit(hit, idWidth));
       total++;
     }
   }
+  if (opts.json) return total === 0 ? 1 : 0;
   if (total === 0) {
     console.error(`no matches in ${searched} session${searched === 1 ? "" : "s"}`);
     return 1;
@@ -1315,6 +1919,11 @@ function cmdExportHtml(opts: Opts): number {
   const id = requireId(opts);
   const meta = readSessionMeta(opts.dir, id);
   if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
+  // A self-contained page exists to be handed to someone else, the same as a
+  // `pr` bundle — so it takes the same gate. `export` to stdout deliberately
+  // does not: it is how you read a session to decide whether it is safe, and
+  // the refusal itself tells you to go and check.
+  if (!refuseUnredacted(opts, id, "export")) return 1;
 
   const all = readSessionEvents(opts.dir, id);
   if (opts.at !== undefined && (!Number.isInteger(opts.at) || opts.at < 0 || opts.at >= all.length)) {
@@ -1346,10 +1955,51 @@ function cmdExportHtml(opts: Opts): number {
   return 0;
 }
 
+/** Loopback needs no transport security; anything else carries share traffic over a network. */
+function isLoopback(host: string): boolean {
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — binding
+  // 127.0.0.2 is as private as the default, and calling it "beyond loopback"
+  // in the warning would be untrue.
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return host === "localhost" || host === "::1" || host === "[::1]";
+}
+
 async function cmdRelay(opts: Opts): Promise<number> {
+  const host = opts.host ?? "127.0.0.1";
+
+  if ((opts.cert === undefined) !== (opts.key === undefined)) {
+    console.error("--cert and --key go together: a relay is HTTPS or it is HTTP, not half of one");
+    return 2;
+  }
+  let tls: { cert: string; key: string } | undefined;
+  if (opts.cert !== undefined && opts.key !== undefined) {
+    try {
+      tls = { cert: readFileSync(opts.cert, "utf8"), key: readFileSync(opts.key, "utf8") };
+    } catch (err) {
+      console.error(`cannot read the TLS material: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  // Exposing a plaintext relay should be a deliberate act, not a default. The
+  // link is the only secret a viewer holds, and without TLS it crosses the
+  // network in the clear along with every event the share carries.
+  if (tls === undefined && !isLoopback(host) && !opts.insecure) {
+    console.error(
+      `refusing to bind ${host} without TLS: share links and every event would cross the network in the clear.\n` +
+        "Pass --cert and --key to serve HTTPS, put a TLS proxy in front and keep the relay on loopback,\n" +
+        "or pass --insecure if the network is genuinely trusted.",
+    );
+    return 2;
+  }
+
   let handle;
   try {
-    handle = await startRelay({ port: opts.port, host: opts.host, trustedProxies: opts.trustedProxies });
+    handle = await startRelay({
+      port: opts.port,
+      host: opts.host,
+      trustedProxies: opts.trustedProxies,
+      tls,
+    });
   } catch (err) {
     if ((err as { code?: string }).code === "EADDRINUSE") {
       console.error(
@@ -1359,13 +2009,17 @@ async function cmdRelay(opts: Opts): Promise<number> {
     }
     throw err;
   }
-  const host = opts.host ?? "127.0.0.1";
-  console.log(`agit relay listening on http://${host}:${handle.port}`);
+  console.log(`agit relay listening on ${handle.scheme}://${host}:${handle.port}`);
   console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
-  if (host !== "127.0.0.1" && host !== "localhost") {
+  if (!isLoopback(host)) {
     console.log(
-      "NOTE: bound beyond loopback — anyone who can reach this port can view shares they have links for. Prefer a TLS reverse proxy or tunnel.",
+      handle.scheme === "https"
+        ? "NOTE: bound beyond loopback over TLS — anyone who can reach this port can view shares they have links for."
+        : "NOTE: bound beyond loopback WITHOUT TLS (--insecure) — share links and events are readable by anyone on the path.",
     );
+  }
+  if (handle.scheme === "https") {
+    console.log(`  share against it with: agit share <id> --relay https://${host}:${handle.port}`);
   }
   await waitForSigint();
   await handle.close();
@@ -1401,8 +2055,10 @@ async function cmdShare(opts: Opts): Promise<number> {
       nativePath = meta.source.path;
     } else {
       // This is the path that publishes the stored chain itself, so it is
-      // the one that must never publish a chain that does not verify.
+      // the one that must never publish a chain that does not verify — or
+      // one that was imported with --no-redact and never scanned.
       if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
+      if (!refuseUnredacted(opts, id, "share")) return 1;
       if (!refuseUnredacted(opts, id, "share")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
