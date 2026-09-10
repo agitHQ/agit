@@ -180,6 +180,27 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+- **`agit sign <id> --key <file>`** — bind a head to a key. The chain proves
+  a log was not modified after it was chained; it says nothing about *who*
+  chained it, because anyone can rebuild a perfectly valid chain over edited
+  content and a matching head. A signature is the missing half, and `verify`
+  catches exactly that forgery:
+
+  ```
+  ok: 31 events, chain intact, matches meta.json head
+  SIGNATURE DOES NOT MATCH (SHA256:+++sbwFo…): does not match this head
+  ```
+
+  Ed25519, reading the `~/.ssh/id_ed25519` you already have or any PKCS#8
+  PEM. Signatures live in `meta.json`, never in the chain, so a session can
+  be signed after import and by more than one person without rewriting an
+  event — and they travel in `pr` bundles, so the recipient can check them.
+  Encrypted keys are refused rather than prompted for; agit never handles a
+  passphrase. **What it does not prove: when.** The timestamp is signed, so
+  it cannot be edited afterwards, but it is still a time the signer chose.
+  Only a third-party RFC 3161 time-stamp makes that evidence, and agit does
+  not issue one. [SPEC §12](SPEC.md) documents the signed payload so other
+  implementations can verify without agit.
 - **`agit mcp`** — serve the store to an agent over MCP, so the agent can
   ask its own verified history "have I solved this before?" instead of that
   being something only a human can do with `grep`. Six read-only tools:

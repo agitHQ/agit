@@ -306,3 +306,56 @@ and `headHash` to detect truncation when present.
 fields. Adding a new event type or a new payload field is also a `v` bump in
 v2 (readers reject unknown types). Adapters carry their own versions;
 `meta.json` says which one wrote the log.
+
+## 12. Signatures
+
+The chain proves a log was not modified after it was chained. It does not
+prove *who* chained it: anyone can rebuild a valid chain over edited content
+and a matching `headHash`. A signature binds a head to a key.
+
+Signatures live in `meta.json`, never in the chain — signing happens to a
+finished head, so a chain covering it would have to cover something that did
+not exist when it was built. A session can therefore be signed after import,
+and by more than one person, without rewriting an event.
+
+```json
+"signatures": [
+  { "alg": "ed25519",
+    "key": "ssh-ed25519 AAAAC3Nza...",
+    "keyFingerprint": "SHA256:...",
+    "sig": "<base64>",
+    "at": "2026-09-10T10:25:30.029Z",
+    "payloadVersion": 1 }
+]
+```
+
+### The signed payload
+
+Ed25519 over the canonical JSON (§7) of exactly:
+
+```json
+{ "agitSignature": 1, "sessionId": "...", "headHash": "...",
+  "eventCount": 789, "at": "2026-..." }
+```
+
+`eventCount` is inside the payload because truncation leaves every remaining
+hash valid; without it a signed log could be silently shortened. `sessionId`
+is inside it so a signature cannot be lifted onto a different session that
+happens to share a head.
+
+An independent implementation can verify without agit: rebuild those five
+fields, serialize canonically, check the Ed25519 signature against `key`.
+
+### What a signature does not say
+
+- **Not when.** `at` is signed, so it cannot be edited afterwards, but it is
+  still a time the signer chose. Turning that claim into evidence needs a
+  third-party RFC 3161 time-stamp, which agit does not issue.
+- **Not that the content is true.** It binds an identity to bytes. A signed
+  log of false statements is a signed log of false statements.
+- **Not who ran the session.** It says who vouched for this head, which may
+  be a different person at a different time.
+
+`keyFingerprint` is a convenience for humans comparing keys and is recomputed
+from `key` on every verification; a verifier must never trust the stored
+value, or a doctored one could make an unrelated key look familiar.

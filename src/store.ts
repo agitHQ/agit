@@ -106,6 +106,18 @@ export function readSessionMeta(base: string, id: string): SessionMeta | null {
 }
 
 /**
+ * Replace a session's meta.json (#68: adding a signature).
+ *
+ * Writes the whole document rather than patching, so the file on disk is
+ * always exactly what `SessionMeta` says it is. Nothing here touches
+ * events.jsonl — a signature is metadata about a head, and adding one must
+ * never move the head it signs.
+ */
+export function writeSessionMeta(base: string, id: string, meta: SessionMeta): void {
+  writeFileSync(join(sessionDir(base, id), "meta.json"), JSON.stringify(meta, null, 2) + "\n", "utf8");
+}
+
+/**
  * Remove a session from the store. `id` is trusted here — every caller goes
  * through `resolveSessionId` first, which only ever returns an id that is
  * already a real directory name under sessions/, so this can't be handed an

@@ -64,8 +64,26 @@ export interface SessionMeta {
    * ran", which is what those imports did.
    */
   redaction?: { enabled: boolean; customPatterns: number; allowRules: number };
+  /**
+   * Ed25519 signatures over this head (#68), never in the chain: signing is
+   * something done to a finished head, so a chain covering it would have to
+   * cover a thing that did not exist when it was built. Kept here, a session
+   * can be signed after the fact, and by more than one person, without a
+   * single event being rewritten. See SPEC §12 for the signed payload.
+   */
+  signatures?: AgitSignatureRecord[];
   eventCount: number;
   headHash: string;
+}
+
+/** One signature over a head. Shape documented in SPEC §12 so others can verify it. */
+export interface AgitSignatureRecord {
+  alg: "ed25519";
+  key: string;
+  keyFingerprint: string;
+  sig: string;
+  at: string;
+  payloadVersion: number;
 }
 
 export function isEventType(t: string): t is EventType {
