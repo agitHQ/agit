@@ -61,7 +61,7 @@ node dist/cli.js share <id>        # prints a link; open it in a browser
 SPEC.md                  the event format (normative)
 PROTOCOL.md              the share relay protocol (v0, unstable)
 src/format/              events, canonical JSON, hashing, chain verification
-src/adapters/            runtime adapters (claude-code today; yours next?)
+src/adapters/            runtime adapters, plus atif.ts for the interchange format
 src/redact.ts            credential redaction, runs at import before hashing
 src/store.ts             the .agit/ directory
 src/state.ts             folds over event logs (file state, usage, rendering)

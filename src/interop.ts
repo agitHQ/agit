@@ -295,6 +295,8 @@ interface AtifStep {
   tool_calls?: AtifToolCall[];
   observation?: { results: { source_call_id?: string; content?: string; extra?: Record<string, Json> }[] };
   metrics?: Record<string, number>;
+  /** How many model calls this step's metrics cover; ATIF's own field for it. */
+  llm_call_count?: number;
   extra?: Record<string, Json>;
 }
 
@@ -430,6 +432,11 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
         // Usage belongs on the agent step it paid for.
         if (lastAgentStep === null) break;
         const u = usageOf(e);
+        // ATIF's Metrics is per step, so several cost events between two
+        // assistant messages fold into one object. `llm_call_count` is the
+        // field that says how many, and without it a reader sees five steps
+        // and concludes there were five calls when there were seven.
+        lastAgentStep.llm_call_count = (lastAgentStep.llm_call_count ?? 0) + 1;
         lastAgentStep.metrics = {
           ...(lastAgentStep.metrics ?? {}),
           prompt_tokens: (lastAgentStep.metrics?.prompt_tokens ?? 0) + (u.inputTokens ?? 0),

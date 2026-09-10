@@ -3,6 +3,37 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **ATIF import** (#64), the first adapter that reads a standard rather than
+  one runtime's private log. `agit import <trajectory.json>` ingests Harbor's
+  Agent Trajectory Interchange Format, so anything emitting ATIF — Harbor's
+  own agents, Terminus-2, whatever its OpenHands adapter converts — can be
+  verified, replayed, searched, signed and shared. It is the import half of
+  the `--atif` export added in #69, and the two round-trip: the conversation,
+  the tool calls and the exact token totals survive.
+
+  **It emits no `file.diff`, and that is the point rather than a gap.** ATIF
+  has no file-edit construct; a write is an ordinary tool call whose result is
+  prose. agit's file hashes are over bytes it actually holds, and a trajectory
+  does not carry them — not even one agit exported, which records only the
+  hashes of its edits. Reconstructing file events from those would mean
+  emitting a hash agit did not compute, which is exactly what every other
+  adapter refuses to do. So `blame`, `why`, `fork`, `merge` and `diff` have
+  nothing to work with on an ATIF session, and everything else works.
+
+  Every difference is accounted for in the import report rather than passed
+  over: file edits whose content is absent, system steps (SPEC §5 has no
+  system-message event), subagent trajectories (linearizing one would
+  attribute a subagent's work to its parent), steps that inherited a
+  timestamp, and how many model calls a single per-step metrics object stood
+  for. A trajectory with no timestamps anywhere is refused rather than dated
+  from the clock, which would make two imports of the same bytes differ
+  (SPEC §7). The exporter now also sets `llm_call_count`, so a reader can tell
+  five steps from seven calls.
+
 ## 0.6.0 — 2026-09-10
 
 ### Added

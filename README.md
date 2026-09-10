@@ -281,9 +281,11 @@ fall out of that chain.
 
 Said plainly:
 
-- **Three adapters, with different limits.** Claude Code is the reference;
-  Codex is mapped from its own structured edit records. OpenClaw is mapped from the `apply_patch` text it records, replayed
-  with OpenClaw's own matching rules.
+- **Four adapters, with different limits.** Claude Code is the reference;
+  Codex is mapped from its own structured edit records. OpenClaw is mapped
+  from the `apply_patch` text it records, replayed with OpenClaw's own
+  matching rules. ATIF is a standard rather than a runtime, and carries no
+  file content at all — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -334,6 +336,15 @@ Said plainly:
   only where the removed content matches both the fork point and what the
   target holds today. Fork and `pr` context seeding is a summary by design;
   you cannot inject history into a running agent.
+- **An ATIF import has no file history.** `agit import <trajectory.json>`
+  reads Harbor's Agent Trajectory Interchange Format, so anything emitting
+  ATIF can be verified, replayed, searched and shared. But ATIF has no
+  file-edit construct — a write is an ordinary tool call whose result is
+  prose — so no `file.diff` can be emitted over content the document does not
+  hold. `blame`, `why`, `fork`, `merge` and `diff` therefore have nothing to
+  work with on such a session; everything else does. What the import cannot
+  carry is counted and named rather than passed over, including edits that
+  agit itself exported as hashes.
 - **A signature does not prove when, and does not prove truth.**
   `agit sign` binds a head to a key, which is what the chain alone could
   never do. The timestamp inside it is signed, so it cannot be edited
