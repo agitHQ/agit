@@ -25,7 +25,17 @@ import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
 import { discoverSessionLogs, parseSince } from "./discover.js";
 import { buildMatcher, grepEvents, GrepPatternError, renderHit } from "./grep.js";
 import { mergeFork, readForkInfo } from "./merge.js";
-import { redactDeep, type RedactionCounts } from "./redact.js";
+import {
+  builtinConfig,
+  customPatternCount,
+  disabledConfig,
+  parseRedactionConfig,
+  redactDeep,
+  RedactionConfigError,
+  scanValue,
+  type RedactionConfig,
+  type RedactionCounts,
+} from "./redact.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -38,6 +48,7 @@ import {
   type ShareInfo,
 } from "./share.js";
 import {
+  agitDir,
   assertSafeSessionId,
   deleteShareState,
   listSessionIds,
@@ -73,6 +84,8 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
+  agit redact --check <session.jsonl>  dry run: what redaction would remove,
+                                       masked, with a re-scan afterwards
   agit grep <pattern>                  search every imported session; --type
                                        narrows to one event type, --path matches
                                        file paths only, --regex, -s case-sensitive
@@ -95,6 +108,9 @@ usage:
   agit relay                           run a relay (self-hosted, in-memory)
 
 options:
+  --redact-patterns <file>  extra patterns + allowlist (default: .agit/redact.json)
+  --no-redact      import: store the log unredacted (local-only stores)
+  --allow-unredacted  share/pr: publish an unredacted session anyway
   --dir <path>     where .agit/ lives (default: current directory)
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
@@ -137,6 +153,10 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  redactPatterns?: string;
+  noRedact: boolean;
+  allowUnredacted: boolean;
+  check: boolean;
   args: string[];
 }
 
@@ -156,6 +176,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     static: false,
     resume: false,
     trustedProxies: [],
+    noRedact: false,
+    allowUnredacted: false,
+    check: false,
     args: [],
   };
   const rest: string[] = [];
@@ -191,6 +214,10 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--redact-patterns") opts.redactPatterns = argv[++i];
+    else if (a === "--no-redact") opts.noRedact = true;
+    else if (a === "--allow-unredacted") opts.allowUnredacted = true;
+    else if (a === "--check") opts.check = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -212,6 +239,8 @@ async function main(): Promise<number> {
       return cmdVerify(opts);
     case "replay":
       return cmdReplay(opts);
+    case "redact":
+      return cmdRedact(opts);
     case "grep":
       return cmdGrep(opts);
     case "export":
@@ -278,6 +307,26 @@ function looksLikeAgitLog(lines: string[]): boolean {
  * claim this tool makes; a silent pass-through here would be the one bug
  * that undoes all of it.
  */
+/**
+ * A session imported with --no-redact never went through SPEC §8, so its log
+ * may hold live credentials verbatim. Publishing one is a decision, not a
+ * default: `share` and `pr` refuse unless the caller says so explicitly.
+ */
+function refuseUnredacted(opts: Opts, id: string, verb: string): boolean {
+  const meta = readSessionMeta(opts.dir, id);
+  if (meta?.redaction?.enabled !== false) return true;
+  if (opts.allowUnredacted) {
+    console.error(`warning: ${id} was imported with --no-redact; publishing it unredacted as asked.`);
+    return true;
+  }
+  console.error(
+    `refusing to ${verb} ${id}: it was imported with --no-redact, so its log never went through\n` +
+      "credential redaction (SPEC §8) and may contain live secrets verbatim.\n" +
+      "Re-import it without --no-redact, or pass --allow-unredacted to publish it as it is.",
+  );
+  return false;
+}
+
 function refuseUnlessVerified(opts: Opts, id: string, verb: string, consequence: string): boolean {
   const meta = readSessionMeta(opts.dir, id);
   const check = verifyChain(readSessionLines(opts.dir, id), meta ?? undefined);
@@ -325,6 +374,7 @@ function importNativeLog(
   raw: string,
   lines: string[],
   known: Map<string, string>,
+  redactCfg: RedactionConfig,
 ): ImportOutcome {
   const sha256 = sha256Hex(raw);
   const knownId = known.get(sha256);
@@ -335,7 +385,7 @@ function importNativeLog(
 
   const converted = adapter.convert(lines);
   const redactions: RedactionCounts = {};
-  for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
+  for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions, redactCfg);
   const events = buildChain(converted.sessionId, converted.drafts);
   // Same id already stored means the source grew (a resumed session) or changed.
   const previous = listSessionIds(opts.dir).includes(converted.sessionId)
@@ -350,6 +400,13 @@ function importNativeLog(
     source: { path, sha256, bytes: statSync(path).size, records: converted.records },
     skipped: converted.skipped,
     redactions,
+    // What redaction actually did here, so `share` and `pr` do not have to
+    // guess whether a log has been through it.
+    redaction: {
+      enabled: redactCfg.enabled,
+      customPatterns: customPatternCount(redactCfg),
+      allowRules: redactCfg.allowLiterals.size + redactCfg.allowRegexes.length,
+    },
     eventCount: events.length,
     headHash: events[events.length - 1]!.hash,
   };
@@ -400,15 +457,114 @@ function printImportReport(opts: Opts, outcome: ImportOutcome): number {
     console.log(`  skipped     ${skippedTotal} native records with no mapping: ${detail}`);
   }
   const redactedTotal = Object.values(redactions).reduce((a, b) => a + b, 0);
-  console.log(
-    redactedTotal > 0
-      ? `  redacted    ${redactedTotal}: ${Object.entries(redactions)
-          .map(([k, v]) => `${k}×${v}`)
-          .join(", ")}`
-      : `  redacted    nothing matched the credential patterns (SPEC §8 — a seatbelt, not a guarantee)`,
-  );
+  // "nothing matched" and "nothing was looked for" are very different claims
+  // about a stored log, and only one of them is reassuring.
+  if (opts.noRedact) {
+    console.log("  redacted    DISABLED (--no-redact): this log was stored exactly as the runtime wrote it");
+    console.log("              share and pr will refuse it without --allow-unredacted");
+  } else {
+    console.log(
+      redactedTotal > 0
+        ? `  redacted    ${redactedTotal}: ${Object.entries(redactions)
+            .map(([k, v]) => `${k}×${v}`)
+            .join(", ")}`
+        : `  redacted    nothing matched the credential patterns (SPEC §8 — a seatbelt, not a guarantee)`,
+    );
+  }
   console.log(`  head        ${outcome.headHash!.slice(0, 12)}`);
   console.log(`  wrote       ${sessionDir(opts.dir, id)}`);
+  return 0;
+}
+
+/**
+ * The redaction config for this run: `--redact-patterns`, else
+ * `.agit/redact.json` in the store, else the built-ins. `--no-redact`
+ * overrides both.
+ *
+ * A project's own token formats are exactly what the built-in list cannot
+ * know about, and its documented example keys are exactly what the built-in
+ * list should not rewrite.
+ */
+function redactionConfigFor(opts: Opts): RedactionConfig | null {
+  if (opts.noRedact) return disabledConfig();
+  const explicit = opts.redactPatterns !== undefined ? resolve(opts.redactPatterns) : null;
+  const conventional = join(agitDir(opts.dir), "redact.json");
+  const path = explicit ?? (existsSync(conventional) ? conventional : null);
+  if (path === null) return builtinConfig();
+  try {
+    return parseRedactionConfig(readFileSync(path, "utf8"));
+  } catch (err) {
+    console.error(
+      err instanceof RedactionConfigError
+        ? `${path}: ${err.message}`
+        : `${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * `agit redact --check <native-log>` — what redaction would do, before it is
+ * hashed into anything.
+ *
+ * Reports per event type and payload path, with every sample masked: a report
+ * that printed the credentials it found would be a worse leak than the log.
+ * After redacting, it re-scans the result and reports anything still
+ * matching, so the count can never quietly under-report.
+ */
+function cmdRedact(opts: Opts): number {
+  const src = opts.args[0];
+  if (!opts.check || !src) {
+    console.error("usage: agit redact --check <native-session.jsonl>");
+    return 2;
+  }
+  const cfg = redactionConfigFor(opts);
+  if (cfg === null) return 2;
+  const path = resolve(src);
+  const lines = readFileSync(path, "utf8")
+    .split("\n")
+    .filter((l) => l.trim() !== "");
+  const adapter = ADAPTERS.find((a) => a.detect(lines));
+  if (!adapter) {
+    console.error("no adapter recognizes this file");
+    return 1;
+  }
+  const converted = adapter.convert(lines);
+
+  const byLabel = new Map<string, number>();
+  let total = 0;
+  console.log(`redaction dry run: ${path}`);
+  console.log(
+    `  config      ${customPatternCount(cfg)} custom pattern(s), ${cfg.allowLiterals.size + cfg.allowRegexes.length} allow rule(s)`,
+  );
+  for (const d of converted.drafts) {
+    for (const f of scanValue(d.payload, cfg)) {
+      byLabel.set(f.label, (byLabel.get(f.label) ?? 0) + 1);
+      total++;
+      console.log(`  ${d.type.padEnd(18)} ${f.at.padEnd(28)} ${f.label}  ${f.sample}`);
+    }
+  }
+  if (total === 0) {
+    console.log("  nothing matched the credential patterns (SPEC §8 — a seatbelt, not a guarantee)");
+    return 0;
+  }
+  console.log(`  would redact ${total}: ${[...byLabel.entries()].map(([k, v]) => `${k}×${v}`).join(", ")}`);
+
+  // Re-scan after redaction. A pattern whose replacement still matches
+  // something would leave a credential in the log while reporting a count, so
+  // this is the check that the count is the truth.
+  const counts: RedactionCounts = {};
+  const residue: string[] = [];
+  for (const d of converted.drafts) {
+    const after = redactDeep(d.payload, counts, cfg);
+    for (const f of scanValue(after, cfg)) residue.push(`${d.type} ${f.at} ${f.label} ${f.sample}`);
+  }
+  if (residue.length > 0) {
+    console.error(`\n${residue.length} match(es) STILL PRESENT after redaction — this is a bug:`);
+    for (const r of residue) console.error(`  ${r}`);
+    return 1;
+  }
+  console.log("  re-scan after redaction: clean");
   return 0;
 }
 
@@ -448,7 +604,9 @@ function importPath(opts: Opts, target: string): number {
   // rewrite a log this path promises to store byte for byte.
   if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, raw);
 
-  return printImportReport(opts, importNativeLog(opts, path, raw, lines, knownSources(opts.dir)));
+  const redactCfg = redactionConfigFor(opts);
+  if (redactCfg === null) return 2;
+  return printImportReport(opts, importNativeLog(opts, path, raw, lines, knownSources(opts.dir), redactCfg));
 }
 
 function ago(mtimeMs: number): string {
@@ -480,6 +638,8 @@ function cmdImportDiscovered(opts: Opts): number {
     );
     return 1;
   }
+  const redactCfg = redactionConfigFor(opts);
+  if (redactCfg === null) return 2;
   const cutoff = opts.since !== undefined ? Date.now() - opts.since : null;
   const candidates = cutoff === null ? logs : logs.filter((l) => l.mtimeMs >= cutoff);
   if (candidates.length === 0) {
@@ -519,7 +679,7 @@ function cmdImportDiscovered(opts: Opts): number {
       const lines = raw.split("\n").filter((l) => l.trim() !== "");
       outcome = looksLikeAgitLog(lines)
         ? { status: "unrecognized" }
-        : importNativeLog(opts, log.path, raw, lines, known);
+        : importNativeLog(opts, log.path, raw, lines, known, redactCfg);
     } catch (err) {
       tally.failed++;
       console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1046,6 +1206,7 @@ function cmdPr(opts: Opts): number {
     return 2;
   }
   if (!refuseUnlessVerified(opts, id, "hand off", "nothing was written")) return 1;
+  if (!refuseUnredacted(opts, id, "hand off")) return 1;
   const outDir = resolve(opts.out ?? `agit-pr-${id.slice(0, 8)}`);
   if (existsSync(outDir)) {
     console.error(`refusing to write into existing ${outDir} — pass a fresh --out`);
@@ -1218,6 +1379,12 @@ async function cmdShare(opts: Opts): Promise<number> {
     console.error("usage: agit share <session-id | native-session.jsonl>   (or --resume <share-id>)");
     return 2;
   }
+  const shareCfg = redactionConfigFor(opts);
+  if (shareCfg === null) return 2;
+  if (!shareCfg.enabled && !opts.allowUnredacted) {
+    console.error("refusing to share with --no-redact; pass --allow-unredacted to mean it.");
+    return 2;
+  }
   const ttlMs =
     opts.ttlHours !== undefined && Number.isFinite(opts.ttlHours) ? opts.ttlHours * 3600_000 : undefined;
 
@@ -1236,6 +1403,7 @@ async function cmdShare(opts: Opts): Promise<number> {
       // This is the path that publishes the stored chain itself, so it is
       // the one that must never publish a chain that does not verify.
       if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
+      if (!refuseUnredacted(opts, id, "share")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
   }
@@ -1251,7 +1419,7 @@ async function cmdShare(opts: Opts): Promise<number> {
     }
     const converted = adapter.convert(lines);
     const counts: RedactionCounts = {};
-    for (const d of converted.drafts) d.payload = redactDeep(d.payload, counts);
+    for (const d of converted.drafts) d.payload = redactDeep(d.payload, counts, shareCfg);
     staticEvents = buildChain(converted.sessionId, converted.drafts);
     nativePath = null;
   }

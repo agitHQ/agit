@@ -53,6 +53,12 @@ export interface SessionMeta {
   source: { path: string; sha256: string; bytes: number; records: number };
   skipped: Record<string, number>;
   redactions: Record<string, number>;
+  /**
+   * What redaction did at import (#70). Optional: logs imported before this
+   * existed simply do not carry it, and absence means "the built-in patterns
+   * ran", which is what those imports did.
+   */
+  redaction?: { enabled: boolean; customPatterns: number; allowRules: number };
   eventCount: number;
   headHash: string;
 }
