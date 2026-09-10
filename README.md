@@ -54,11 +54,25 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   Deterministic: the same input always produces byte-identical output.
   Credential-looking strings are redacted on the way in (see
   [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
+  `--no-redact` stores a session verbatim when redaction would mangle it;
+  `share`, `pr` and `export-html` then refuse that session until you pass
+  `--allow-unredacted`, and re-importing without the flag puts redaction back.
 - **`agit ls`** — list imported sessions: start, duration, events, files touched.
 - **`agit show <id>`** — one-session summary: model, tools, token totals,
   per-file diffstat. `--by-model` splits it: what each model cost and how
   many files its edits touched. Tokens are exact; file attribution credits
   an edit to the model named by the nearest preceding event, and says so.
+- **`agit rm <id> --yes`** — delete a session from the store. `--yes` is the
+  confirmation: there is no interactive prompt for a script to answer, so the
+  flag is it. Without it, `rm` says what it would remove and stops. It does
+  not know whether a fork somewhere still points at the session — forks live
+  wherever `--out` put them, with no registry to consult — and says so rather
+  than guessing.
+- **`agit stats`** — token and API-call totals across every imported
+  session, grouped `--by model` (default) or `--by runtime`. A fold over the
+  `cost` events each session already carries, so it needs no new data — and
+  it says how many sessions it could not read rather than quietly leaving
+  them out. `--json` for scripts.
 - **`agit grep <pattern>`** — search every imported session at once:
   "which session touched auth.py" (`--path`), "where did I run pytest"
   (`--type tool.call`). Matches the same one-line rendering `replay
@@ -111,6 +125,12 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+
+**`--json`** on `ls`, `show`, `show --by-model`, `verify`, `grep`, `diff`
+and `export` emits the structures agit already builds, so a script reads
+the same numbers the table renders — full ids, ISO timestamps, real
+integers. `grep --json` is one object per line (NDJSON); everything else
+is one document. Errors stay on stderr, so a pipe into `jq` is always clean.
 
 Session ids accept unique prefixes, git-style. The inspection verbs are
 fully local: no server, no network calls, no telemetry. Only `share` talks
