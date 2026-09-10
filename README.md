@@ -180,6 +180,26 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+- **`agit export <id> --otel | --atif`** — feed the tools you already run,
+  with a log that verifies. `--otel` emits OTLP/JSON spans following the
+  OpenTelemetry GenAI semantic conventions: an `invoke_agent` root, `chat`
+  children per model call with token counts, `execute_tool` children per tool.
+  `--atif` emits a Harbor Agent Trajectory Interchange Format document
+  (ATIF-v1.8), which Harbor uses for evals and fine-tuning and which its
+  OpenHands adapter converts OpenHands event logs into. Both are folds over
+  events already stored; neither changes SPEC.
+
+  **Span ids are the leading bytes of the event hash they came from**, so a
+  trace in Grafana points back at a specific line of a log you can `agit
+  verify`; the full hash rides along as an attribute, because 8 bytes is a
+  convenience and not a proof. Output is deterministic — no random ids, no
+  wall clock — and an unverified session is refused, since feeding an eval
+  from a log agit cannot vouch for is how a verified pipeline quietly stops
+  being one. The GenAI conventions are at Development stability and have
+  never cut a release, so the emitted schema URL ends in `-dev` and this will
+  need updating; `file.diff` has no home in either schema, so edits ride in
+  each format's own extension field with the SPEC §5.7 lower bound stated
+  beside them.
 - **`agit sign <id> --key <file>`** — bind a head to a key. The chain proves
   a log was not modified after it was chained; it says nothing about *who*
   chained it, because anyone can rebuild a perfectly valid chain over edited
@@ -280,28 +300,41 @@ Said plainly:
   inject input into a live interactive session, and agit does not pretend
   otherwise; if a runtime ever offers a real path, it gets wired
   per-adapter, opt-in.
-- **No TLS in the relay.** It binds loopback by default; exposing it to a
-  network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
-- **Merge is file-level and needs git.** Three-way content merge only:
-  renames are two files, and `git merge-file` must be on PATH. A file absent
-  from the fork tree still counts as untouched rather than deleted — the tree
-  records only what the log could reconstruct — but `agit merge --session
-  <id>` reads the fork's own imported session and honours the `file.delete`
-  events it recorded after the fork point, deleting only where the removed
-  content matches both the fork point and what the target holds today. Fork/pr context seeding
-  is a summary by design; you cannot inject history into a running agent.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
-  HTTP on loopback, and binding beyond loopback without TLS is refused
-  unless `--insecure` is passed. A tunnel or TLS-terminating proxy remains a
+  HTTP on loopback, and binding beyond loopback without TLS is refused unless
+  `--insecure` is passed. A tunnel or TLS-terminating proxy remains a
   perfectly good alternative (PROTOCOL.md).
-- **Merge is file-level.** Three-way content merge only: deletions in a fork
-  are invisible (the fork tree records what the log could reconstruct, so
-  absence means untouched, not deleted) and renames are two files. It uses
-  `git merge-file` when git is on PATH and a built-in three-way merge
-  otherwise (`--no-git` forces the built-in one); git is preferred because
-  its results are what everyone's expectations are calibrated against.
-  Fork/pr context seeding  is a summary by design; you cannot inject history into a running agent.
+- **Merge is file-level.** Three-way content *content* merge only, and a
+  rename is two files. It uses `git merge-file` when git is on PATH and a
+  built-in three-way merge otherwise (`--no-git` forces the built-in one);
+  git is preferred because its results are what everyone's expectations are
+  calibrated against, and the two are pinned to each other by differential
+  tests. A file simply absent from a fork tree counts as untouched rather
+  than deleted, because the tree records only what the log could reconstruct
+  — but `agit merge --session <id>` reads the fork's own imported session and
+  honours the `file.delete` events it recorded after the fork point, deleting
+  only where the removed content matches both the fork point and what the
+  target holds today. Fork and `pr` context seeding is a summary by design;
+  you cannot inject history into a running agent.
+- **A signature does not prove when, and does not prove truth.**
+  `agit sign` binds a head to a key, which is what the chain alone could
+  never do. The timestamp inside it is signed, so it cannot be edited
+  afterwards, but it is still the signer's own claim — turning that into
+  evidence needs a third-party RFC 3161 time-stamp, which agit does not
+  issue. And a signature over a log full of false statements is a signed log
+  full of false statements: it binds an identity to bytes, nothing more.
+- **The MCP server labels untrusted content; it does not sandbox it.**
+  `agit mcp` hands recorded session text to a model, and that text can
+  contain anything the agent saw, including material written to read as
+  instructions. Every payload is framed as recorded data in a field no
+  session can shadow, which is a label of the same kind as redaction and
+  deserves the same scepticism.
+- **The OpenTelemetry export tracks a moving target.** The GenAI semantic
+  conventions are at Development stability, moved repositories during 2026,
+  and have never cut a release — so `--otel` emits the only schema URL that
+  exists, which ends in `-dev`, and will need updating as the conventions
+  settle.
 - **Redaction is a seatbelt, not a guarantee.** Session logs contain whatever
   the agent saw. Before sharing one anywhere, read it.
 

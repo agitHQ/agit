@@ -69,6 +69,7 @@ src/share.ts             live follower + relay client
 src/relay/               the relay server and the share page
 src/mcp.ts               read-only MCP server over the store (stdio JSON-RPC)
 src/sign.ts              ed25519 signatures over a head (SPEC §12)
+src/interop.ts           OpenTelemetry GenAI and ATIF exports
 src/cli.ts               the verbs
 fixtures/                synthetic session logs for tests
 test/                    vitest suites
