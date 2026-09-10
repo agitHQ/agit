@@ -99,7 +99,6 @@ usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                        [--base REF]    adopt an agit log or pr bundle as-is;
                                        --base seeds pre-session file content
-                                       adopt an agit log or pr bundle as-is
   agit import <session> --no-redact    skip credential scanning; share/pr later
                                        refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
