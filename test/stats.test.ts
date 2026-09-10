@@ -1,144 +1,205 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-
-/**
- * `agit stats` (issue #67, scoped down): usage across every imported
- * session, grouped by model (default) or runtime. `--since` and `--price`
- * from the same issue are separate, larger pieces of work and not part of
- * this first cut — this is a fold over data `usageTotals`/`usageByModel`
- * already compute per session, merged across the whole store.
- */
+import { buildChain } from "../src/format/hash.js";
+import type { AgitEvent, DraftEvent } from "../src/format/events.js";
+import { computeStats, parsePriceTable, PriceTableError, type StatsRow } from "../src/stats.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
-const SIMPLE = join(ROOT, "fixtures", "claude-code", "simple.jsonl");
-const DEMO = join(ROOT, "fixtures", "claude-code", "demo.jsonl");
-const CODEX = join(ROOT, "fixtures", "codex", "edits.jsonl");
 
 function agit(args: string[]): { code: number; out: string } {
   try {
-    const out = execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8", stdio: "pipe" });
-    return { code: 0, out };
-  } catch (e) {
-    const err = e as { status?: number; stdout?: string; stderr?: string };
-    return { code: err.status ?? 1, out: (err.stdout ?? "") + (err.stderr ?? "") };
+    return {
+      code: 0,
+      out: execFileSync(process.execPath, [CLI, ...args], { encoding: "utf8", stdio: "pipe" }),
+    };
+  } catch (err) {
+    const e = err as { status?: number | null; stdout?: string; stderr?: string };
+    return { code: e.status ?? 1, out: (e.stdout ?? "") + (e.stderr ?? "") };
   }
 }
 
-interface StatsRow {
-  key: string;
-  sessions: number;
-  apiMessages: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-}
-interface StatsJson {
-  by: string;
-  sessionsRead: number;
-  sessionsSkipped: number;
-  rows: StatsRow[];
-}
-
-let store: string;
-
-beforeAll(() => {
-  store = mkdtempSync(join(tmpdir(), "agit-stats-"));
-  expect(agit(["import", SIMPLE, "--dir", store]).code).toBe(0);
-  expect(agit(["import", DEMO, "--dir", store]).code).toBe(0);
-  expect(agit(["import", CODEX, "--dir", store]).code).toBe(0);
+const cost = (ts: string, model: string, inTok: number, outTok: number): DraftEvent => ({
+  ts,
+  type: "cost",
+  payload: {
+    model,
+    usage: {
+      inputTokens: inTok,
+      outputTokens: outTok,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+    },
+    native: { messageId: "m", requestId: null },
+  },
 });
 
-describe("agit stats", () => {
-  it("an empty store says so plainly, not an error", () => {
-    const empty = mkdtempSync(join(tmpdir(), "agit-stats-empty-"));
-    const r = agit(["stats", "--dir", empty]);
+function session(id: string, runtime: string, cwd: string, drafts: DraftEvent[]): AgitEvent[] {
+  return buildChain(id, [
+    { ts: drafts[0]?.ts ?? "2026-01-01T00:00:00.000Z", type: "session.start", payload: { runtime, cwd } },
+    ...drafts,
+  ]);
+}
+
+const A = session("a", "claude-code", "/work/alpha", [
+  cost("2026-01-01T10:00:00.000Z", "opus", 100, 10),
+  cost("2026-01-02T10:00:00.000Z", "opus", 200, 20),
+]);
+const B = session("b", "codex", "/work/beta", [cost("2026-01-02T11:00:00.000Z", "gpt", 50, 5)]);
+/** A runtime that records no cost events at all — Codex's real situation today. */
+const C = session("c", "codex", "/work/beta", [
+  {
+    ts: "2026-01-03T10:00:00.000Z",
+    type: "file.diff",
+    payload: {
+      path: "/work/beta/x.ts",
+      kind: "create",
+      diff: "",
+      beforeHash: null,
+      afterHash: "h",
+      toolUseId: "t",
+      source: "apply_patch",
+    },
+  },
+]);
+const ALL = [
+  { id: "a", events: A },
+  { id: "b", events: B },
+  { id: "c", events: C },
+];
+
+const row = (rows: StatsRow[], key: string): StatsRow => rows.find((r) => r.key === key)!;
+
+describe("computeStats (#67)", () => {
+  it("groups by day, oldest first", () => {
+    const { rows } = computeStats(ALL, { by: "day" });
+    expect(rows.map((r) => r.key)).toEqual(["2026-01-01", "2026-01-02"]);
+    expect(row(rows, "2026-01-01").inputTokens).toBe(100);
+    expect(row(rows, "2026-01-02").inputTokens).toBe(250); // 200 + 50
+    expect(row(rows, "2026-01-02").apiCalls).toBe(2);
+  });
+
+  it("groups by model", () => {
+    const { rows } = computeStats(ALL, { by: "model" });
+    expect(row(rows, "opus").inputTokens).toBe(300);
+    expect(row(rows, "gpt").inputTokens).toBe(50);
+  });
+
+  it("groups by runtime and by project", () => {
+    const byRuntime = computeStats(ALL, { by: "runtime" }).rows;
+    expect(row(byRuntime, "claude-code").sessions).toBe(1);
+    expect(row(byRuntime, "codex").sessions).toBe(2);
+
+    const byProject = computeStats(ALL, { by: "project" }).rows;
+    expect(byProject.map((r) => r.key).sort()).toEqual(["alpha", "beta"]);
+    expect(row(byProject, "beta").sessions).toBe(2);
+  });
+
+  it("says a group recorded no cost rather than showing it as zero", () => {
+    // The one session with no cost events must not read as "this was free".
+    const rows = computeStats([{ id: "c", events: C }], { by: "runtime" }).rows;
+    expect(row(rows, "codex").costRecorded).toBe(false);
+    expect(row(rows, "codex").apiCalls).toBe(0);
+    expect(row(rows, "codex").sessions).toBe(1);
+    // It still contributes its files: those are recorded even when cost is not.
+    expect(row(rows, "codex").files).toBe(1);
+  });
+
+  it("totals across every group", () => {
+    const { totals } = computeStats(ALL, { by: "day" });
+    expect(totals.apiCalls).toBe(3);
+    expect(totals.inputTokens).toBe(350);
+    expect(totals.sessions).toBe(3);
+  });
+
+  it("honours --since by the session's last event", () => {
+    // A ends 01-02T10:00, B ends 01-02T11:00 -- a cutoff of 10:30 drops A only.
+    const now = Date.parse("2026-01-02T11:30:00.000Z");
+    const res = computeStats(ALL, { by: "day", sinceMs: 3600_000, now });
+    expect(res.skippedBySince).toBe(1);
+    expect(res.totals.apiCalls).toBe(1); // only B's cost event survives
+  });
+});
+
+describe("price tables", () => {
+  it("costs only what the table covers, and names what it does not", () => {
+    const prices = parsePriceTable(
+      JSON.stringify({ currency: "USD", per: 1_000_000, models: { opus: { input: 10, output: 100 } } }),
+    );
+    const { rows, totals } = computeStats(ALL, { by: "model", prices });
+    // opus: 300 in * 10/1e6 + 30 out * 100/1e6
+    expect(row(rows, "opus").cost).toBeCloseTo(300 * 1e-5 + 30 * 1e-4, 10);
+    // gpt has no rate: reported as unpriced, never costed at zero.
+    expect(row(rows, "gpt").cost).toBeUndefined();
+    expect(row(rows, "gpt").unpriced).toEqual(["gpt"]);
+    expect(totals.unpriced).toEqual(["gpt"]);
+    // And the total declines to state a figure it knows is incomplete.
+    expect(totals.cost).toBeUndefined();
+  });
+
+  it("defaults to per-million and rejects a nonsense unit", () => {
+    expect(parsePriceTable('{"models":{}}').per).toBe(1_000_000);
+    expect(() => parsePriceTable('{"per":0,"models":{}}')).toThrow(PriceTableError);
+    expect(() => parsePriceTable("not json")).toThrow(/not valid JSON/);
+    expect(() => parsePriceTable('{"currency":"USD"}')).toThrow(/"models"/);
+  });
+});
+
+describe("agit stats through the CLI", () => {
+  let store: string;
+  beforeAll(() => {
+    store = mkdtempSync(join(tmpdir(), "agit-stats-"));
+    for (const f of [
+      join(ROOT, "fixtures", "claude-code", "demo.jsonl"),
+      join(ROOT, "fixtures", "codex", "edits.jsonl"),
+    ]) {
+      expect(agit(["import", f, "--dir", store]).code).toBe(0);
+    }
+  });
+
+  it("prints a table with a dash for the runtime that records no cost", () => {
+    const r = agit(["stats", "--by", "runtime", "--dir", store]);
     expect(r.code).toBe(0);
-    expect(r.out).toContain("no sessions imported yet");
+    expect(r.out).toContain("RUNTIME");
+    expect(r.out).toMatch(/codex\s+—/);
+    expect(r.out).toContain("no cost events recorded for that group");
   });
 
-  it("an empty store, --json: an empty array", () => {
-    const empty = mkdtempSync(join(tmpdir(), "agit-stats-empty-"));
-    const r = agit(["stats", "--json", "--dir", empty]);
-    expect(r.code).toBe(0);
-    expect(JSON.parse(r.out)).toEqual([]);
-  });
-
-  it("groups by model by default, and the totals add up across every row", () => {
-    const r = agit(["stats", "--json", "--dir", store]);
-    expect(r.code).toBe(0);
-    const doc = JSON.parse(r.out) as StatsJson;
-    expect(doc.by).toBe("model");
-    expect(doc.sessionsRead).toBe(3);
-    expect(doc.sessionsSkipped).toBe(0);
-    expect(doc.rows.length).toBeGreaterThan(0);
-
-    const claude = doc.rows.find((r2) => r2.key === "claude-opus-5")!;
-    expect(claude).toBeDefined();
-    expect(claude.sessions).toBe(2); // simple + demo both used it
-    expect(claude.apiMessages).toBeGreaterThan(0);
-
-    const sumInput = doc.rows.reduce((n, r2) => n + r2.inputTokens, 0);
-    const sumOutput = doc.rows.reduce((n, r2) => n + r2.outputTokens, 0);
-    expect(sumInput).toBeGreaterThan(0);
-    expect(sumOutput).toBeGreaterThan(0);
-  });
-
-  it("--by runtime groups by session.start's runtime instead", () => {
-    const r = agit(["stats", "--by", "runtime", "--json", "--dir", store]);
-    expect(r.code).toBe(0);
-    const doc = JSON.parse(r.out) as StatsJson;
-    expect(doc.by).toBe("runtime");
-    const claudeCode = doc.rows.find((r2) => r2.key === "claude-code")!;
-    const codex = doc.rows.find((r2) => r2.key === "codex")!;
-    expect(claudeCode.sessions).toBe(2);
-    expect(codex.sessions).toBe(1);
-  });
-
-  it("a model or runtime with no cost events still gets a row, not silence", () => {
-    // The codex fixture has file edits attributed to a model but no
-    // token_count/cost records — usageByModel already surfaces that as a
-    // zero-message row rather than omitting it; stats must not filter it out.
-    const r = agit(["stats", "--by", "runtime", "--json", "--dir", store]);
-    const doc = JSON.parse(r.out) as StatsJson;
-    const codex = doc.rows.find((r2) => r2.key === "codex")!;
-    expect(codex).toBeDefined();
-    expect(codex.apiMessages).toBe(0);
-  });
-
-  it("rejects an unknown --by value instead of silently defaulting", () => {
-    const r = agit(["stats", "--by", "nonsense", "--dir", store]);
-    expect(r.code).toBe(2);
-    expect(r.out).toMatch(/--by takes "model" or "runtime"/);
-  });
-
-  it("human output prints a table and a totals line", () => {
+  it("shows no money at all without a rate table", () => {
     const r = agit(["stats", "--dir", store]);
-    expect(r.code).toBe(0);
-    expect(r.out).toContain("agit stats — 3 sessions, by model");
-    expect(r.out).toContain("MODEL");
-    expect(r.out).toContain("totals:");
+    expect(r.out).not.toContain("COST");
+    expect(r.out).toContain("pass --price");
   });
 
-  it("one corrupt session is skipped and counted, not fatal to the rest", () => {
-    const dirty = mkdtempSync(join(tmpdir(), "agit-stats-corrupt-"));
-    expect(agit(["import", SIMPLE, "--dir", dirty]).code).toBe(0);
-    expect(agit(["import", DEMO, "--dir", dirty]).code).toBe(0);
-    // Corrupt one session's log directly.
-    execFileSync(process.execPath, [
-      "-e",
-      `require("fs").writeFileSync(process.argv[1], "")`,
-      join(dirty, ".agit", "sessions", "fixture-simple-0001", "events.jsonl"),
-    ]);
-    const r = agit(["stats", "--json", "--dir", dirty]);
+  it("costs with a supplied table", () => {
+    const rates = join(store, "rates.json");
+    writeFileSync(
+      rates,
+      JSON.stringify({ currency: "USD", models: { "claude-opus-5": { input: 15, output: 75 } } }),
+      "utf8",
+    );
+    const r = agit(["stats", "--by", "model", "--price", rates, "--dir", store]);
     expect(r.code).toBe(0);
-    const doc = JSON.parse(r.out) as StatsJson;
-    expect(doc.sessionsRead).toBe(1);
-    expect(doc.sessionsSkipped).toBe(1);
+    expect(r.out).toContain("COST (USD)");
+  });
+
+  it("rejects an unknown --by", () => {
+    const r = agit(["stats", "--by", "wednesday", "--dir", store]);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("unknown --by");
+    expect(r.out).toContain("runtime");
+  });
+
+  it("emits JSON when asked", () => {
+    const r = agit(["stats", "--by", "runtime", "--json", "--dir", store]);
+    expect(r.code).toBe(0);
+    const doc = JSON.parse(r.out) as { by: string; rows: StatsRow[]; totals: StatsRow };
+    expect(doc.by).toBe("runtime");
+    expect(doc.rows.some((x) => x.costRecorded === false)).toBe(true);
+    expect(doc.totals.sessions).toBe(2);
   });
 });

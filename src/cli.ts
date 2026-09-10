@@ -53,6 +53,15 @@ import {
   writeShareState,
 } from "./store.js";
 import { clipLine, fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
+import {
+  computeStats,
+  GROUP_BY,
+  isGroupBy,
+  parsePriceTable,
+  PriceTableError,
+  type PriceTable,
+  type StatsRow,
+} from "./stats.js";
 
 const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
@@ -79,6 +88,9 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
+  agit stats [--by day|model|runtime|project]
+                                       store-wide usage across every session;
+                                       --since narrows, --price <file> costs it
   agit grep <pattern>                  search every imported session; --type
                                        narrows to one event type, --path matches
                                        file paths only, --regex, -s case-sensitive
@@ -112,9 +124,10 @@ options:
   --session <id>   merge: the fork's own imported session, so deletions it
                    recorded after the fork point are honoured
   --no-git         merge: use the built-in three-way merge, not git merge-file
-  --since <dur>    import --all: only logs modified within 7d / 24h / 30m
+  --since <dur>    import --all / stats: window of 7d / 24h / 30m
   --yes, -y        rm: confirm the deletion (there is no interactive prompt)
-  --by <k>         stats: group by "model" (default) or "runtime"
+  --by <group>     stats: day (default), model, runtime or project
+  --price <file>   stats: a local rate table; without it no money is shown
   --json           ls/show/verify/grep/diff/export: machine-readable output
                    instead of the human-formatted default (grep: one JSON
                    object per line, NDJSON; everything else: one document)
@@ -148,7 +161,6 @@ interface Opts {
   since?: number;
   json: boolean;
   yes: boolean;
-  statsBy: "model" | "runtime";
   noRedact: boolean;
   allowUnredacted: boolean;
   grepType?: string;
@@ -165,6 +177,8 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  by?: string;
+  price?: string;
   session?: string;
   noGit: boolean;
   cert?: string;
@@ -183,7 +197,6 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     latest: false,
     json: false,
     yes: false,
-    statsBy: "model",
     noRedact: false,
     allowUnredacted: false,
     grepPath: false,
@@ -214,13 +227,6 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
         process.exit(2);
       }
       opts.since = ms;
-    } else if (a === "--by") {
-      const v = argv[++i];
-      if (v !== "model" && v !== "runtime") {
-        console.error(`--by takes "model" or "runtime", got ${JSON.stringify(v)}`);
-        process.exit(2);
-      }
-      opts.statsBy = v;
     } else if (a === "--type") opts.grepType = argv[++i];
     else if (a === "--path") opts.grepPath = true;
     else if (a === "--regex") opts.grepRegex = true;
@@ -240,6 +246,8 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--by") opts.by = argv[++i];
+    else if (a === "--price") opts.price = argv[++i];
     else if (a === "--session") opts.session = argv[++i];
     else if (a === "--no-git") opts.noGit = true;
     else if (a === "--cert") opts.cert = argv[++i];
@@ -872,153 +880,6 @@ function cmdRm(opts: Opts): number {
   return 0;
 }
 
-interface StatsRow {
-  key: string;
-  sessions: number;
-  apiMessages: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-}
-
-/**
- * Usage across every imported session, grouped by model or by runtime
- * (issue #67). A fold over `cost` events every session already carries;
- * `usageTotals`/`usageByModel` do the per-session work, this just merges
- * their results across the whole store. No `--since` window and no
- * `--price` rate table yet — both are real asks in the same issue, scoped
- * out of this first cut to keep it small.
- */
-function cmdStats(opts: Opts): number {
-  if (!existsSync(opts.dir)) {
-    console.error(`no such directory: ${opts.dir}`);
-    return 1;
-  }
-  const ids = listSessionIds(opts.dir);
-  if (ids.length === 0) {
-    if (opts.json) process.stdout.write("[]\n");
-    else console.log("no sessions imported yet (agit import <file>)");
-    return 0;
-  }
-  const rows = new Map<string, StatsRow>();
-  const row = (key: string): StatsRow => {
-    let r = rows.get(key);
-    if (!r) {
-      r = {
-        key,
-        sessions: 0,
-        apiMessages: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 0,
-      };
-      rows.set(key, r);
-    }
-    return r;
-  };
-  let sessionsRead = 0;
-  let sessionsSkipped = 0;
-  for (const id of ids) {
-    let events: AgitEvent[];
-    try {
-      events = readSessionEvents(opts.dir, id);
-    } catch {
-      sessionsSkipped++;
-      continue;
-    }
-    sessionsRead++;
-    if (opts.statsBy === "runtime") {
-      const start = events[0]?.payload as { runtime?: unknown } | undefined;
-      const runtime = typeof start?.runtime === "string" ? start.runtime : "?";
-      const u = usageTotals(events);
-      const r = row(runtime);
-      r.sessions++;
-      r.apiMessages += u.apiMessages;
-      r.inputTokens += u.inputTokens;
-      r.outputTokens += u.outputTokens;
-      r.cacheReadInputTokens += u.cacheReadInputTokens;
-      r.cacheCreationInputTokens += u.cacheCreationInputTokens;
-      // `row(runtime)` above already created this row even when apiMessages
-      // is 0 — a runtime with no cost events (e.g. an adapter that never
-      // emits `cost`) still shows up, with a session count and zero tokens,
-      // rather than being invisible in the totals.
-      continue;
-    }
-    const perModel = usageByModel(events);
-    if (perModel.length === 0) continue; // no cost events in this session at all
-    const touchedInThisSession = new Set<string>();
-    for (const m of perModel) {
-      const r = row(m.model);
-      if (!touchedInThisSession.has(m.model)) {
-        r.sessions++;
-        touchedInThisSession.add(m.model);
-      }
-      r.apiMessages += m.apiMessages;
-      r.inputTokens += m.inputTokens;
-      r.outputTokens += m.outputTokens;
-      r.cacheReadInputTokens += m.cacheReadInputTokens;
-      r.cacheCreationInputTokens += m.cacheCreationInputTokens;
-    }
-  }
-
-  const sorted = [...rows.values()].sort(
-    (a, b) => b.outputTokens - a.outputTokens || a.key.localeCompare(b.key),
-  );
-
-  if (opts.json) {
-    process.stdout.write(
-      JSON.stringify({ by: opts.statsBy, sessionsRead, sessionsSkipped, rows: sorted }, null, 2) + "\n",
-    );
-    return 0;
-  }
-
-  console.log(`agit stats — ${sessionsRead} session${sessionsRead === 1 ? "" : "s"}, by ${opts.statsBy}`);
-  if (sessionsSkipped > 0) {
-    console.log(`  (${sessionsSkipped} session${sessionsSkipped === 1 ? "" : "s"} unreadable, skipped)`);
-  }
-  console.log("");
-  if (sorted.length === 0) {
-    console.log("  no cost events in any imported session");
-    return 0;
-  }
-  const table = sorted.map((r) => ({
-    key: r.key,
-    sessions: String(r.sessions),
-    calls: String(r.apiMessages),
-    in: r.inputTokens.toLocaleString("en-US"),
-    out: r.outputTokens.toLocaleString("en-US"),
-    cacheRead: r.cacheReadInputTokens.toLocaleString("en-US"),
-  }));
-  const cols = ["key", "sessions", "calls", "in", "out", "cacheRead"] as const;
-  const head = {
-    key: opts.statsBy.toUpperCase(),
-    sessions: "SESSIONS",
-    calls: "CALLS",
-    in: "IN",
-    out: "OUT",
-    cacheRead: "CACHE READ",
-  };
-  const widths = cols.map((c) => Math.max(head[c].length, ...table.map((r) => r[c].length)));
-  const line = (r: Record<string, string>): string =>
-    cols.map((c, i) => (c === "key" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
-  console.log("  " + line(head));
-  for (const r of table) console.log("  " + line(r));
-  const totals = sorted.reduce(
-    (t, r) => ({
-      inputTokens: t.inputTokens + r.inputTokens,
-      outputTokens: t.outputTokens + r.outputTokens,
-      apiMessages: t.apiMessages + r.apiMessages,
-    }),
-    { inputTokens: 0, outputTokens: 0, apiMessages: 0 },
-  );
-  console.log(
-    `\n  totals: in=${totals.inputTokens.toLocaleString("en-US")} out=${totals.outputTokens.toLocaleString("en-US")} (${totals.apiMessages.toLocaleString("en-US")} API call${totals.apiMessages === 1 ? "" : "s"} across ${sessionsRead} session${sessionsRead === 1 ? "" : "s"})`,
-  );
-  return 0;
-}
-
 function cmdShow(opts: Opts): number {
   const id = requireId(opts);
   const events = readSessionEvents(opts.dir, id);
@@ -1506,6 +1367,114 @@ function cmdPr(opts: Opts): number {
   console.log("    SEED.md       what the session was doing — the recipient's starting prompt");
   console.log("    fork.json     provenance: source session id + fork-point hash");
   console.log("share the directory however you like; nothing in it phones home.");
+  return 0;
+}
+
+/**
+ * Token and API-call totals across the whole store (issue #67).
+ *
+ * A fold over the `cost` events sessions already carry, so nothing new is
+ * recorded. Money is only ever shown against a rate table the user supplies
+ * (`--price`): prices change and vary by account, and a wrong number here
+ * would be worse than no number.
+ */
+function cmdStats(opts: Opts): number {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    return 1;
+  }
+  const by = opts.by ?? "day";
+  if (!isGroupBy(by)) {
+    console.error(`unknown --by ${JSON.stringify(by)}; one of: ${GROUP_BY.join(", ")}`);
+    return 2;
+  }
+  let prices: PriceTable | undefined;
+  if (opts.price !== undefined) {
+    try {
+      prices = parsePriceTable(readFileSync(resolve(opts.price), "utf8"));
+    } catch (err) {
+      console.error(
+        err instanceof PriceTableError
+          ? `--price ${opts.price}: ${err.message}`
+          : `--price ${opts.price}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 2;
+    }
+  }
+
+  const sessions = [];
+  for (const id of listSessionIds(opts.dir)) {
+    try {
+      sessions.push({ id, events: readSessionEvents(opts.dir, id) });
+    } catch {
+      // One corrupt session must not take down the whole report.
+      console.error(`skipping ${id.slice(0, 8)}: unreadable (agit verify it)`);
+    }
+  }
+  if (sessions.length === 0) {
+    if (opts.json) process.stdout.write(JSON.stringify({ by, rows: [], totals: null }, null, 2) + "\n");
+    else console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+
+  const res = computeStats(sessions, { by, sinceMs: opts.since, prices });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ by, since: opts.since ?? null, ...res }, null, 2) + "\n");
+    return 0;
+  }
+
+  const money = (r: StatsRow): string =>
+    prices === undefined ? "" : r.cost === undefined ? "—" : r.cost.toFixed(2);
+  const n = (x: number): string => x.toLocaleString("en-US");
+  const cell = (r: StatsRow): Record<string, string> => ({
+    key: r.key,
+    calls: r.costRecorded ? n(r.apiCalls) : "—",
+    in: r.costRecorded ? n(r.inputTokens) : "—",
+    out: r.costRecorded ? n(r.outputTokens) : "—",
+    cacheRead: r.costRecorded ? n(r.cacheReadInputTokens) : "—",
+    cacheWrite: r.costRecorded ? n(r.cacheCreationInputTokens) : "—",
+    sessions: n(r.sessions),
+    files: n(r.files),
+    ...(prices ? { cost: money(r) } : {}),
+  });
+
+  const head: Record<string, string> = {
+    key: by.toUpperCase(),
+    calls: "CALLS",
+    in: "IN",
+    out: "OUT",
+    cacheRead: "CACHE READ",
+    cacheWrite: "CACHE WRITE",
+    sessions: "SESSIONS",
+    files: "FILES",
+    ...(prices ? { cost: prices.currency ? `COST (${prices.currency})` : "COST" } : {}),
+  };
+  const cols = Object.keys(head);
+  const table = [...res.rows.map(cell), cell(res.totals)];
+  table[table.length - 1]!.key = "total";
+  const widths = cols.map((c) => Math.max(head[c]!.length, ...table.map((r) => r[c]!.length)));
+  const line = (r: Record<string, string>): string =>
+    cols.map((c, i) => (c === "key" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
+
+  console.log(line(head));
+  for (const r of table.slice(0, -1)) console.log(line(r));
+  console.log(line(table[table.length - 1]!));
+
+  // A dash is not a zero: say which it is.
+  if (res.rows.some((r) => !r.costRecorded)) {
+    console.log("\n— = no cost events recorded for that group; its token counts are unknown, not zero.");
+  }
+  const unpriced = res.totals.unpriced ?? [];
+  if (unpriced.length > 0) {
+    console.log(`no rate in the price table for: ${unpriced.join(", ")} — those rows are uncosted.`);
+  }
+  if (prices === undefined) {
+    console.log("\n(no money shown: pass --price <file> with your own rate table. See README.)");
+  }
+  if (res.skippedBySince > 0) {
+    console.log(`${res.skippedBySince} session(s) outside --since were not counted.`);
+  }
+  console.log("(files = lower bound: structured edits only — shell-driven changes are not tracked)");
   return 0;
 }
 

@@ -62,6 +62,22 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   per-file diffstat. `--by-model` splits it: what each model cost and how
   many files its edits touched. Tokens are exact; file attribution credits
   an edit to the model named by the nearest preceding event, and says so.
+- **`agit stats`** — store-wide usage across every session and runtime:
+  tokens, cache reads and writes, API calls, sessions and files touched,
+  grouped `--by day|model|runtime|project` and narrowed with `--since`.
+  No prices are built in — they change, they differ per account, and a stale
+  number that looks authoritative is worse than none. Pass your own rate
+  table to get money:
+
+  ```json
+  { "currency": "USD", "per": 1000000,
+    "models": { "claude-opus-5": { "input": 15, "output": 75,
+                                   "cacheRead": 1.5, "cacheWrite": 18.75 } } }
+  ```
+
+  `agit stats --by model --price rates.json`. A model missing from the table
+  is reported as unpriced, never costed at zero, and a group whose runtime
+  records no cost events at all says so rather than showing a row of zeros.
 - **`agit rm <id> --yes`** — delete a session from the store. `--yes` is the
   confirmation: there is no interactive prompt for a script to answer, so the
   flag is it. Without it, `rm` says what it would remove and stops. It does
