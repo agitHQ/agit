@@ -1867,7 +1867,13 @@ function cmdStats(opts: Opts): number {
     ...(prices ? { cost: money(r) } : {}),
   });
 
-  const head: Record<string, string> = {
+  // The column list is declared, not read back off the header object. Deriving
+  // it from the object made the object its own schema, so losing a property
+  // lost a column with nothing to complain — which is how five of these went
+  // missing once. `Record<StatsCol, string>` makes that a compile error.
+  const STATS_COLS = ["key", "calls", "in", "out", "cacheRead", "cacheWrite", "sessions", "files"] as const;
+  type StatsCol = (typeof STATS_COLS)[number] | "cost";
+  const head: Record<(typeof STATS_COLS)[number], string> & { cost?: string } = {
     key: by.toUpperCase(),
     calls: "CALLS",
     in: "IN",
@@ -1878,7 +1884,7 @@ function cmdStats(opts: Opts): number {
     files: "FILES",
     ...(prices ? { cost: prices.currency ? `COST (${prices.currency})` : "COST" } : {}),
   };
-  const cols = Object.keys(head);
+  const cols: StatsCol[] = prices ? [...STATS_COLS, "cost"] : [...STATS_COLS];
   const table = [...res.rows.map(cell), cell(res.totals)];
   table[table.length - 1]!.key = "total";
   const widths = cols.map((c) => Math.max(head[c]!.length, ...table.map((r) => r[c]!.length)));

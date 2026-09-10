@@ -117,7 +117,11 @@ Notable changes to agit. The event format itself is versioned separately
   shape and removed most of the table's column headers; the tests asserted
   only that the first column appeared, so a silently narrower report passed
   them. The header is restored, and the tests now assert the whole row for
-  `stats` and for `show --by-model`, with and without a rate table.
+  `stats` and for `show --by-model`, with and without a rate table. The stats
+  table's columns are now a declared list rather than the header object's own
+  keys, so losing a header is a compile error instead of a quietly narrower
+  report — the header object had been serving as its own schema, which is why
+  nothing objected.
 - `agit stats --by model` and `--by day` key each row off a cost event, so a
   session that records none (every Codex session today) reached the total
   while appearing in no row, leaving the columns quietly failing to add up.
