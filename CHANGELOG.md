@@ -3,6 +3,75 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`agit merge --session <id>` honours deletions** (#88). Schema v2 gave the
+  log `file.delete`; a fork's own session now tells `merge` which files it
+  removed after the fork point, so a deletion survives the round trip instead
+  of reading as "untouched". Each one is checked against the fork point's
+  content hash before anything is removed, a path the target changed since
+  the fork is kept and reported as a conflict rather than deleted, and
+  without `--session` the old rule stands: absence means untouched.
+- **`agit merge` no longer needs git on PATH** (#89). A built-in line-based
+  three-way merge takes over when `git merge-file` is missing, and `--no-git`
+  forces it. git is still preferred where present, because its output is what
+  everyone's expectations are calibrated against — and the two are now pinned
+  to each other by differential tests covering conflicts, deletions,
+  adjacent edits, a missing trailing newline and CRLF files.
+- **Relay TLS** (#87): `agit relay --cert <pem> --key <pem>` serves HTTPS,
+  and share links carry `https://` accordingly. Binding beyond loopback
+  without TLS is refused unless `--insecure` says the network is trusted,
+  and that case prints what it costs rather than passing silently. The
+  whole `127.0.0.0/8` block counts as loopback, so a relay on `127.0.0.2`
+  is treated as privately as the default.
+- **Codex renames are recorded** (#86) as a `file.delete` of the old path
+  plus a `file.diff` create of the new one — what the filesystem saw, and
+  the same shape the OpenClaw adapter emits, so no view needs a
+  Codex-specific case. A rename whose base content is not in the log is
+  still skipped and counted rather than hashed on a guess.
+- **`agit rm <id> --yes`** (#71) removes a session from the store. The flag
+  is the confirmation — there is no prompt a script could answer — and
+  without it `rm` reports what it would delete, including when the log is
+  too corrupt to summarize, and exits 2. It does not attempt to find forks
+  that point at the session: they live in whatever directory `--out` named
+  and there is no registry to scan, so the command says so instead of
+  guessing.
+- **`agit stats`** (#67) — usage across the whole store, grouped `--by
+  model` (default) or `--by runtime`, with `--json`. A fold over the `cost`
+  events sessions already carry: no new event types, nothing recorded that
+  was not already there. A runtime that logs no cost events shows as zeros
+  rather than being dropped, and unreadable sessions are counted and named
+  in the output instead of silently narrowing the totals. `--since` windows
+  the scan and `--price <file>` costs it against a rate table you supply —
+  agit ships no prices, and a model missing from the table is left uncosted
+  rather than counted as free, which also leaves the total uncosted rather
+  than presenting a partial sum as a whole one. Groups by `day` (default),
+  `model`, `runtime` or `project`.
+- **`--json` on every read verb** (#73): `ls`, `show`, `show --by-model`,
+  `verify`, `grep` and `diff` emit the structures the code already builds —
+  full session ids, ISO timestamps and real numbers rather than the padded
+  display strings — so what a script reads is what the table renders.
+  `grep --json` is NDJSON, one hit per line; everything else is one
+  document. Exit codes and human output are unchanged, and errors stay on
+  stderr so a pipe into `jq` is always clean. `ls --json` reports
+  `readable` rather than a `corrupt` flag that never consults the hash
+  chain, and carries the reason when a log cannot be read; `show --json`
+  reports `redactionSkipped`, because a `--no-redact` import also leaves
+  `redactions` empty and a consumer gating on it needs to tell the two
+  apart.
+- **`agit import --no-redact`** (#70) stores a session verbatim when the
+  credential patterns would mangle content you need intact. `meta.json`
+  records that the scan was skipped, and `share`, `pr` and `export-html`
+  refuse such a session until `--allow-unredacted` says you have read it
+  yourself. Adopting a bundle from a `--no-redact` origin says so plainly —
+  the recipient has the least context and adoption is the one moment agit
+  speaks to them. Re-importing the same file with the mode flipped now
+  actually re-imports: the "already imported" check compares redaction mode
+  as well as the source bytes, so re-importing without the flag is the cure
+  for an accidental `--no-redact` rather than a no-op that reports success.
+
 ## 0.5.0 — 2026-09-09
 
 ### Changed
