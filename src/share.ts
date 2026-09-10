@@ -18,7 +18,7 @@ import type { Adapter } from "./adapters/adapter.js";
 import { canonicalJson } from "./format/canonical.js";
 import { buildChain, sha256Hex } from "./format/hash.js";
 import type { AgitEvent, DraftEvent } from "./format/events.js";
-import { redactDeep, type RedactionCounts } from "./redact.js";
+import { builtinConfig, redactDeep, type RedactionConfig, type RedactionCounts } from "./redact.js";
 
 export class StabilityError extends Error {
   constructor(detail: string) {
@@ -50,9 +50,20 @@ export class SessionFollower {
   private lastSize = -1;
   private lastMtimeMs = -1;
 
+  /**
+   * `redaction` is the project's config, not the built-in list.
+   *
+   * A live share re-converts from the native log rather than reading the
+   * store, so it did its own redaction with the built-ins alone and never saw
+   * `.agit/redact.json`. A custom pattern exists precisely because the
+   * built-ins cannot know an internal token format, and share is the path
+   * that puts the result in front of other people, so that was the one place
+   * it had to apply and did not.
+   */
   constructor(
     private readonly path: string,
     private readonly adapter: Adapter,
+    private readonly redaction: RedactionConfig = builtinConfig(),
   ) {}
 
   /** Convert the file as it stands and return newly chained (redacted) events. */
@@ -132,7 +143,10 @@ export class SessionFollower {
     this.prefixDigest = digest;
     this.sentDrafts = drafts.length;
 
-    const redacted = fresh.map((d) => ({ ...d, payload: redactDeep(d.payload, this.redactions) }));
+    const redacted = fresh.map((d) => ({
+      ...d,
+      payload: redactDeep(d.payload, this.redactions, this.redaction),
+    }));
     const events = buildChain(this.sessionId, redacted, { seq: this.nextSeq, prev: this.lastHash });
     this.nextSeq += events.length;
     this.lastHash = events.length > 0 ? events[events.length - 1]!.hash : this.lastHash;

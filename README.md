@@ -134,7 +134,10 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   under-report. `--no-redact` stores a log exactly as the runtime wrote it —
   for local-only stores; `share` and `pr` refuse such a session unless
   `--allow-unredacted` is passed. Redaction still happens once, before
-  hashing, at import: the chain never holds both versions of a string.
+  hashing, at import: the chain never holds both versions of a string. A
+  live `share` re-converts from the native log rather than reading the
+  store, and applies the same config, so what a viewer sees is redacted by
+  the same rules the store was.
 - **`agit replay <id>`** — step through events (`n`/`p`/`g N`), inspect any
   event, and show cumulative file state at any point (`s`, or `--at N
   --state` non-interactively). `--at N` jumps straight to event N;
