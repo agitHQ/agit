@@ -41,6 +41,7 @@ import {
   type RedactionCounts,
 } from "./redact.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
+import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -66,6 +67,7 @@ import {
   readSessionEvents,
   readSessionLines,
   readSessionMeta,
+  writeSessionMeta,
   resolveSessionId,
   resolveShareState,
   sessionDir,
@@ -153,6 +155,8 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
+  agit sign <id> --key <file>          sign this head with an ed25519 key, so
+                                       the log proves who recorded it
   agit mcp                             serve the store to an agent over MCP
                                        (stdio, read-only: grep/show/replay/
                                        diff/verify/list)
@@ -362,6 +366,8 @@ async function main(): Promise<number> {
       return cmdShow(opts);
     case "verify":
       return cmdVerify(opts);
+    case "sign":
+      return cmdSign(opts);
     case "replay":
       return cmdReplay(opts);
     case "blame":
@@ -1504,6 +1510,86 @@ function printByModel(events: AgitEvent[]): void {
   );
 }
 
+/**
+ * `agit sign <id> --key <file>` (#68) — bind a head to a key someone holds.
+ *
+ * The chain proves a log was not modified after it was chained; it says
+ * nothing about who chained it, since anyone can build a fresh valid chain
+ * over edited content. A signature over (session, head, count, time) is the
+ * missing half.
+ *
+ * Refuses to sign a log that does not verify. Signing a broken chain would
+ * put a real identity behind bytes agit itself cannot vouch for, which is
+ * worse than leaving it unsigned.
+ */
+function cmdSign(opts: Opts): number {
+  const id = requireId(opts);
+  if (opts.key === undefined) {
+    console.error("usage: agit sign <id> --key <path-to-ed25519-key>");
+    console.error("no key? ssh-keygen -t ed25519 -N '' -f agit-signing-key");
+    return 2;
+  }
+
+  const meta = readSessionMeta(opts.dir, id);
+  if (meta === null) {
+    console.error(`${id} has no meta.json, so there is no recorded head to sign`);
+    return 1;
+  }
+  const res = verifyChain(readSessionLines(opts.dir, id), meta);
+  if (!res.ok) {
+    console.error(`refusing to sign ${id}: its chain does not verify`);
+    console.error(`BROKEN at seq ${res.firstBroken!.seq}: ${res.firstBroken!.reason}`);
+    console.error("A signature over a log agit cannot vouch for puts your name behind bytes nobody checked.");
+    return 1;
+  }
+
+  let key;
+  try {
+    key = loadPrivateKey(readFileSync(resolve(opts.key), "utf8"));
+  } catch (e) {
+    console.error(e instanceof KeyError ? e.message : `cannot read ${opts.key}: ${String(e)}`);
+    return 1;
+  }
+
+  const at = new Date().toISOString();
+  const signature = signHead(key, {
+    agitSignature: SIGNATURE_PAYLOAD_VERSION,
+    sessionId: id,
+    headHash: meta.headHash,
+    eventCount: meta.eventCount,
+    at,
+  });
+
+  // Re-signing with the same key replaces that key's signature rather than
+  // stacking duplicates; a different key appends, because two people signing
+  // the same head is the point.
+  const kept = (meta.signatures ?? []).filter((s) => s.keyFingerprint !== signature.keyFingerprint);
+  writeSessionMeta(opts.dir, id, { ...meta, signatures: [...kept, signature] });
+
+  console.log(`signed ${id} with ${signature.keyFingerprint}`);
+  console.log(`  head  ${meta.headHash.slice(0, 16)}… over ${meta.eventCount} events`);
+  console.log(`  at    ${at} (the time you claim, signed so it cannot be edited — not proof of when)`);
+  if (kept.length > 0) console.log(`  ${kept.length} other signature(s) on this head kept`);
+  return 0;
+}
+
+/** Report every signature on a head, for `verify`. */
+function signatureLines(meta: SessionMeta | undefined, sessionId: string): string[] {
+  const sigs = meta?.signatures ?? [];
+  if (meta === undefined || sigs.length === 0)
+    return ["unsigned (agit sign <id> --key <file> binds this head to a key)"];
+  return sigs.map((s) => {
+    const v = verifySignature(s, {
+      sessionId,
+      headHash: meta.headHash,
+      eventCount: meta.eventCount,
+    });
+    return v.ok
+      ? `signed by ${v.fingerprint} at ${v.at}`
+      : `SIGNATURE DOES NOT MATCH (${s.keyFingerprint}): ${v.reason}`;
+  });
+}
+
 function cmdVerify(opts: Opts): number {
   // A path to an events.jsonl (a pr bundle, a downloaded share log) verifies
   // directly; otherwise the argument is a store session id.
@@ -1522,18 +1608,49 @@ function cmdVerify(opts: Opts): number {
     meta = readSessionMeta(opts.dir, id) ?? undefined;
   }
   const res = verifyChain(lines, meta);
+  // A signature is checked against the head agit holds, so it is only
+  // meaningful alongside the chain result — never instead of it.
+  const head = {
+    sessionId: meta?.sessionId ?? "",
+    headHash: meta?.headHash ?? "",
+    eventCount: meta?.eventCount ?? 0,
+  };
+  const sigs = (meta?.signatures ?? []).map((s) => ({
+    keyFingerprint: s.keyFingerprint,
+    at: s.at,
+    ...verifySignature(s, head),
+  }));
+
   if (opts.json) {
-    process.stdout.write(JSON.stringify({ ...res, hasMeta: meta !== undefined }, null, 2) + "\n");
-    return res.ok ? 0 : 1;
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ...res,
+          hasMeta: meta !== undefined,
+          signed: sigs.length > 0,
+          signatures: sigs,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // A signature that does not match is a failure even when the chain is
+    // intact: something claimed this head and the claim does not hold.
+    return res.ok && sigs.every((s) => s.ok) ? 0 : 1;
   }
   if (res.ok) {
     console.log(
       `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
     );
-    return 0;
+    for (const line of signatureLines(meta, meta?.sessionId ?? "")) {
+      if (line.startsWith("SIGNATURE DOES NOT MATCH")) console.error(line);
+      else console.log(line);
+    }
+    return sigs.every((s) => s.ok) ? 0 : 1;
   }
   console.error(`BROKEN at seq ${res.firstBroken!.seq}: ${res.firstBroken!.reason}`);
   console.error(`${res.events} events verified before the break`);
+  for (const line of signatureLines(meta, meta?.sessionId ?? "")) console.error(line);
   return 1;
 }
 

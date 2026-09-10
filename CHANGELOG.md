@@ -7,6 +7,27 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit sign <id> --key <file>`** (#68) binds a head to an Ed25519 key, and
+  **SPEC §12** documents the signed payload so other implementations can
+  verify without agit. The chain proves a log was not modified after it was
+  chained; it never proved *who* chained it, since anyone can rebuild a valid
+  chain over edited content with a matching `headHash`. `verify` now catches
+  precisely that: the chain reports intact and the signature reports a
+  mismatch, and the exit code is 1. The payload covers session id, head hash,
+  event count and time — the count because truncation leaves every remaining
+  hash valid, the session id so a signature cannot be lifted onto another
+  session sharing a head. Reads the `~/.ssh/id_ed25519` most people already
+  have, or any PKCS#8 PEM; encrypted keys are refused with the `ssh-keygen`
+  command to fix it rather than prompting, because agit never handles a
+  passphrase. Signing a log whose chain does not verify is refused outright.
+  Signatures live in `meta.json`, never in the chain, so a session can be
+  signed after import and by several people without rewriting an event, and
+  they travel in `pr` bundles. The stored fingerprint is recomputed on every
+  check, so a doctored one cannot make an unrelated key look familiar. What
+  it still does not prove is *when*: the timestamp is signed and so cannot be
+  edited afterwards, but it is the signer's own claim, and only a third-party
+  RFC 3161 time-stamp would make it evidence.
+
 - **`agit mcp`** (#66) serves the store to an agent over MCP on stdio, so an
   agent can consult its own verified history rather than that being something
   only a human can do with `grep`. Six read-only tools — `agit_list`,
