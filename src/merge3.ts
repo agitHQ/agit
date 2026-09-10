@@ -220,19 +220,24 @@ export function merge3(
       out.push(...ourSlice); // both made the same change
     } else {
       conflicts++;
+      // Markers take the file's own line ending. git emits CRLF markers in a
+      // CRLF file, and markers that are LF around CRLF content leave a
+      // mixed-ending file behind -- on Windows that is the common case, not
+      // the exotic one.
+      const eol = [...ourSlice, ...theirSlice, ...baseSlice].some((l) => l.endsWith("\r\n")) ? "\r\n" : "\n";
       // A marker has to start its own line. When the side above it ended
       // without a trailing newline -- the last line of a file with no final
       // newline, say -- one is added, which is what git does here too.
       const marker = (text: string): void => {
         const prev = out[out.length - 1];
-        if (prev !== undefined && !prev.endsWith("\n")) out[out.length - 1] = prev + "\n";
+        if (prev !== undefined && !prev.endsWith("\n")) out[out.length - 1] = prev + eol;
         out.push(text);
       };
-      marker(`<<<<<<< ${labels.ours}\n`);
+      marker(`<<<<<<< ${labels.ours}${eol}`);
       out.push(...ourSlice);
-      marker(`=======\n`);
+      marker(`=======${eol}`);
       out.push(...theirSlice);
-      marker(`>>>>>>> ${labels.theirs}\n`);
+      marker(`>>>>>>> ${labels.theirs}${eol}`);
     }
 
     basePos = groupEnd;

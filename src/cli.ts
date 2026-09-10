@@ -39,6 +39,7 @@ import {
 } from "./share.js";
 import {
   assertSafeSessionId,
+  deleteSession,
   deleteShareState,
   listSessionIds,
   readSessionEvents,
@@ -61,10 +62,15 @@ const USAGE = `agit — git for running agents
 usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                                        adopt an agit log or pr bundle as-is
+  agit import <session> --no-redact    skip credential scanning; share/pr later
+                                       refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
   agit import --latest                 import the most recently written session
   agit ls                              list imported sessions
+  agit rm <id> --yes                   permanently delete a session from the store
+  agit stats [--by model|runtime]      usage across every imported session —
+             [--json]                 tokens and API calls, grouped
   agit show <id> [--by-model]          summarize one session; --by-model splits
                                        cost and file edits per model
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
@@ -93,7 +99,8 @@ usage:
                                        is still running; viewer messages land here
   agit share --resume <share-id>       resume a live share after a crash (relay
                                        keeps the buffer; only the tail is pushed)
-  agit relay                           run a relay (self-hosted, in-memory)
+  agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
+                                       serves HTTPS when given a cert and key
 
 options:
   --dir <path>     where .agit/ lives (default: current directory)
@@ -102,6 +109,14 @@ options:
   --summary <txt>  merge: what the fork learned, recorded in merge.json
   --no-git         merge: use the built-in three-way merge, not git merge-file
   --since <dur>    import --all: only logs modified within 7d / 24h / 30m
+  --yes, -y        rm: confirm the deletion (there is no interactive prompt)
+  --by <k>         stats: group by "model" (default) or "runtime"
+  --json           ls/show/verify/grep/diff/export: machine-readable output
+                   instead of the human-formatted default (grep: one JSON
+                   object per line, NDJSON; everything else: one document)
+  --no-redact      import: store the session verbatim, skipping credential
+                   scanning (SPEC §8) — meta.json remembers this
+  --allow-unredacted  share/pr: proceed anyway on a --no-redact session
   --type <t>       grep: only this event type (tool.call, file.diff, ...)
   --path           grep: match file.diff paths instead of rendered lines
   --regex          grep: treat the pattern as a regular expression
@@ -112,6 +127,9 @@ options:
   --port <n>       relay: port to listen on (default 7717)
   --host <addr>    relay: address to bind (default 127.0.0.1; 0.0.0.0 exposes it)
   --trusted-proxy <addr>  relay: trust X-Forwarded-For from this proxy (repeatable)
+  --cert <pem>     relay: TLS certificate; with --key, serve HTTPS
+  --key <pem>      relay: TLS private key
+  --insecure       relay: allow binding beyond loopback without TLS
 
 <id> accepts any unique prefix. See SPEC.md for the format, PROTOCOL.md for the relay.`;
 
@@ -125,6 +143,10 @@ interface Opts {
   latest: boolean;
   since?: number;
   json: boolean;
+  yes: boolean;
+  statsBy: "model" | "runtime";
+  noRedact: boolean;
+  allowUnredacted: boolean;
   grepType?: string;
   grepPath: boolean;
   grepRegex: boolean;
@@ -140,6 +162,9 @@ interface Opts {
   host?: string;
   trustedProxies: string[];
   noGit: boolean;
+  cert?: string;
+  key?: string;
+  insecure: boolean;
   args: string[];
 }
 
@@ -152,6 +177,10 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     all: false,
     latest: false,
     json: false,
+    yes: false,
+    statsBy: "model",
+    noRedact: false,
+    allowUnredacted: false,
     grepPath: false,
     grepRegex: false,
     caseSensitive: false,
@@ -160,6 +189,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     resume: false,
     trustedProxies: [],
     noGit: false,
+    insecure: false,
     args: [],
   };
   const rest: string[] = [];
@@ -179,6 +209,13 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
         process.exit(2);
       }
       opts.since = ms;
+    } else if (a === "--by") {
+      const v = argv[++i];
+      if (v !== "model" && v !== "runtime") {
+        console.error(`--by takes "model" or "runtime", got ${JSON.stringify(v)}`);
+        process.exit(2);
+      }
+      opts.statsBy = v;
     } else if (a === "--type") opts.grepType = argv[++i];
     else if (a === "--path") opts.grepPath = true;
     else if (a === "--regex") opts.grepRegex = true;
@@ -188,6 +225,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--into") opts.into = argv[++i];
     else if (a === "--summary") opts.summary = argv[++i];
     else if (a === "--json") opts.json = true;
+    else if (a === "--yes" || a === "-y") opts.yes = true;
+    else if (a === "--no-redact") opts.noRedact = true;
+    else if (a === "--allow-unredacted") opts.allowUnredacted = true;
     else if (a === "--relay") opts.relay = argv[++i] ?? opts.relay;
     else if (a === "--ttl") opts.ttlHours = Number(argv[++i]);
     else if (a === "--static") opts.static = true;
@@ -196,6 +236,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
     else if (a === "--no-git") opts.noGit = true;
+    else if (a === "--cert") opts.cert = argv[++i];
+    else if (a === "--key") opts.key = argv[++i];
+    else if (a === "--insecure") opts.insecure = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -211,6 +254,10 @@ async function main(): Promise<number> {
       return cmdImport(opts);
     case "ls":
       return cmdLs(opts);
+    case "rm":
+      return cmdRm(opts);
+    case "stats":
+      return cmdStats(opts);
     case "show":
       return cmdShow(opts);
     case "verify":
@@ -297,12 +344,37 @@ function refuseUnlessVerified(opts: Opts, id: string, verb: string, consequence:
   return false;
 }
 
+/**
+ * The gate every verb that hands a stored session's raw content to someone
+ * else goes through. `agit import --no-redact` is opt-in and explicit at
+ * import time; `share`/`pr` must be equally explicit before they publish or
+ * bundle a session that was never scanned for credentials.
+ */
+function refuseUnlessRedacted(opts: Opts, id: string, verb: string): boolean {
+  if (opts.allowUnredacted) return true;
+  const meta = readSessionMeta(opts.dir, id);
+  if (!meta?.redactionSkipped) return true;
+  console.error(
+    `refusing to ${verb} ${id.slice(0, 8)}: imported with --no-redact, so it was never scanned for credentials.`,
+  );
+  console.error("  pass --allow-unredacted if you have already checked its contents yourself.");
+  return false;
+}
+
+/** A session already in the store, and the redaction mode it was imported under. */
+interface KnownSource {
+  id: string;
+  noRedact: boolean;
+}
+
 interface ImportOutcome {
   status: "imported" | "updated" | "unchanged" | "unrecognized";
   id?: string;
   adapter?: Adapter;
   events?: number;
   previousEvents?: number;
+  /** True when this re-import flipped --no-redact on or off for an already-stored session. */
+  modeChanged?: boolean;
   records?: number;
   skipped?: Record<string, number>;
   redactions?: RedactionCounts;
@@ -314,11 +386,13 @@ interface ImportOutcome {
  * a log is already in the store. Import is deterministic, so a matching hash
  * means byte-identical output and nothing to do.
  */
-function knownSources(dir: string): Map<string, string> {
-  const known = new Map<string, string>();
+function knownSources(dir: string): Map<string, KnownSource> {
+  const known = new Map<string, KnownSource>();
   for (const id of listSessionIds(dir)) {
     const meta = readSessionMeta(dir, id);
-    if (meta?.source?.sha256) known.set(meta.source.sha256, id);
+    if (meta?.source?.sha256) {
+      known.set(meta.source.sha256, { id, noRedact: meta.redactionSkipped === true });
+    }
   }
   return known;
 }
@@ -329,23 +403,36 @@ function importNativeLog(
   path: string,
   raw: string,
   lines: string[],
-  known: Map<string, string>,
+  known: Map<string, KnownSource>,
 ): ImportOutcome {
   const sha256 = sha256Hex(raw);
-  const knownId = known.get(sha256);
-  if (knownId !== undefined) return { status: "unchanged", id: knownId };
+  const hit = known.get(sha256);
+  // The source bytes alone stopped being a complete identity the moment
+  // --no-redact made the stored output depend on a flag too. Re-import when
+  // the requested mode differs from the stored one, so that re-importing
+  // without the flag is the cure for an accidental --no-redact rather than a
+  // no-op that reports success.
+  if (hit !== undefined && hit.noRedact === opts.noRedact) {
+    return { status: "unchanged", id: hit.id };
+  }
 
   const adapter = ADAPTERS.find((a) => a.detect(lines));
   if (!adapter) return { status: "unrecognized" };
 
   const converted = adapter.convert(lines);
   const redactions: RedactionCounts = {};
-  for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
+  if (!opts.noRedact) {
+    for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
+  }
   const events = buildChain(converted.sessionId, converted.drafts);
   // Same id already stored means the source grew (a resumed session) or changed.
   const previous = listSessionIds(opts.dir).includes(converted.sessionId)
     ? readSessionMeta(opts.dir, converted.sessionId)
     : null;
+  // Same bytes, different mode: the user is switching redaction on or off,
+  // which is the one case where "updated N -> N events" would read as a
+  // no-op when it is in fact a full rewrite of the stored payloads.
+  const modeChanged = previous !== null && (previous.redactionSkipped === true) !== opts.noRedact;
 
   const meta: SessionMeta = {
     agitSchema: SCHEMA_VERSION,
@@ -357,12 +444,14 @@ function importNativeLog(
     redactions,
     eventCount: events.length,
     headHash: events[events.length - 1]!.hash,
+    ...(opts.noRedact ? { redactionSkipped: true as const } : {}),
   };
   writeSession(opts.dir, converted.sessionId, toJsonl(events), meta);
-  known.set(sha256, converted.sessionId);
+  known.set(sha256, { id: converted.sessionId, noRedact: opts.noRedact });
   return {
     status: previous ? "updated" : "imported",
     id: converted.sessionId,
+    modeChanged,
     adapter,
     events: events.length,
     previousEvents: previous?.eventCount,
@@ -396,6 +485,13 @@ function printImportReport(opts: Opts, outcome: ImportOutcome): number {
       ? `  events      ${outcome.previousEvents} → ${outcome.events} (from ${outcome.records} native records)`
       : `  events      ${outcome.events} (from ${outcome.records} native records)`,
   );
+  if (outcome.modeChanged === true) {
+    console.log(
+      opts.noRedact
+        ? "  re-imported  redaction was ON for the stored copy; it is now OFF (--no-redact)"
+        : "  re-imported  redaction was OFF (--no-redact) for the stored copy; it is now ON",
+    );
+  }
   const skippedTotal = Object.values(skipped).reduce((a, b) => a + b, 0);
   if (skippedTotal > 0) {
     const detail = Object.entries(skipped)
@@ -406,11 +502,13 @@ function printImportReport(opts: Opts, outcome: ImportOutcome): number {
   }
   const redactedTotal = Object.values(redactions).reduce((a, b) => a + b, 0);
   console.log(
-    redactedTotal > 0
-      ? `  redacted    ${redactedTotal}: ${Object.entries(redactions)
-          .map(([k, v]) => `${k}×${v}`)
-          .join(", ")}`
-      : `  redacted    nothing matched the credential patterns (SPEC §8 — a seatbelt, not a guarantee)`,
+    opts.noRedact
+      ? "  redacted    SKIPPED (--no-redact) — stored verbatim; share/pr refuse this session without --allow-unredacted"
+      : redactedTotal > 0
+        ? `  redacted    ${redactedTotal}: ${Object.entries(redactions)
+            .map(([k, v]) => `${k}×${v}`)
+            .join(", ")}`
+        : `  redacted    nothing matched the credential patterns (SPEC §8 — a seatbelt, not a guarantee)`,
   );
   console.log(`  head        ${outcome.headHash!.slice(0, 12)}`);
   console.log(`  wrote       ${sessionDir(opts.dir, id)}`);
@@ -628,11 +726,21 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   console.log(`  events      ${res.events}, chain intact${meta ? ", matches meta.json head" : ""}`);
   if (meta) {
     console.log(`  origin      ${meta.adapter.name}@${meta.adapter.version}, imported ${meta.importedAt}`);
-    const redacted = Object.entries(meta.redactions);
-    if (redacted.length > 0) {
+    // The recipient has the least context about how this log was produced,
+    // and adoption is the one moment agit speaks to them. A --no-redact
+    // origin leaves `redactions` empty, so silence here would read as
+    // "scanned, nothing found" — the opposite of what happened.
+    if (meta.redactionSkipped) {
       console.log(
-        `  redactions  ${redacted.map(([k, v]) => `${k}×${v}`).join(", ")} (applied at the origin; agit did not re-scan)`,
+        "  redactions  NONE — the origin imported with --no-redact, so this log was never scanned for credentials (agit did not re-scan either)",
       );
+    } else {
+      const redacted = Object.entries(meta.redactions);
+      if (redacted.length > 0) {
+        console.log(
+          `  redactions  ${redacted.map(([k, v]) => `${k}×${v}`).join(", ")} (applied at the origin; agit did not re-scan)`,
+        );
+      }
     }
   } else {
     console.log("  meta        none in the bundle — truncation is not checkable for this session");
@@ -642,6 +750,24 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   return 0;
 }
 
+interface LsRow {
+  id: string;
+  /**
+   * Whether the stored log parses back into events — nothing more. `ls` does
+   * not verify the hash chain (`agit verify` does), so a tampered log that
+   * still parses is `readable: true`. Named for what it measures: a field
+   * called `corrupt: false` would read as an integrity claim this never makes.
+   */
+  readable: boolean;
+  /** Why the log could not be read, when readable is false. */
+  reason?: string;
+  started?: string;
+  durationMs?: number;
+  events?: number;
+  files?: number;
+  runtime?: string;
+}
+
 function cmdLs(opts: Opts): number {
   if (!existsSync(opts.dir)) {
     console.error(`no such directory: ${opts.dir}`);
@@ -649,43 +775,241 @@ function cmdLs(opts: Opts): number {
   }
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
-    console.log("no sessions imported yet (agit import <file>)");
+    if (opts.json) process.stdout.write("[]\n");
+    else console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
-  const rows = ids.map((id) => {
+  const rows: LsRow[] = ids.map((id) => {
     // One corrupt session must not take down the whole listing.
     let events;
     try {
       events = readSessionEvents(opts.dir, id);
       if (events.length === 0) throw new Error("empty log");
-    } catch {
-      return {
-        id: id.slice(0, 8),
-        started: "(corrupt — run `agit verify " + id.slice(0, 8) + "`)",
-        dur: "",
-        events: "",
-        files: "",
-        runtime: "",
-      };
+    } catch (err) {
+      return { id, readable: false, reason: err instanceof Error ? err.message : String(err) };
     }
     const first = events[0]!;
     const last = events[events.length - 1]!;
     const files = fileStateAt(events).size;
     const start = (first.payload as { runtime?: unknown }).runtime;
     return {
-      id: id.slice(0, 8),
-      started: first.ts.slice(0, 16).replace("T", " "),
-      dur: humanDuration(Date.parse(last.ts) - Date.parse(first.ts)),
-      events: String(events.length),
-      files: String(files),
+      id,
+      readable: true,
+      started: first.ts,
+      durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+      events: events.length,
+      files,
       runtime: typeof start === "string" ? start : "?",
     };
   });
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(rows, null, 2) + "\n");
+    return 0;
+  }
+  const displayRows = rows.map((r) =>
+    !r.readable
+      ? {
+          id: r.id.slice(0, 8),
+          started: "(corrupt — run `agit verify " + r.id.slice(0, 8) + "`)",
+          dur: "",
+          events: "",
+          files: "",
+          runtime: "",
+        }
+      : {
+          id: r.id.slice(0, 8),
+          started: r.started!.slice(0, 16).replace("T", " "),
+          dur: humanDuration(r.durationMs!),
+          events: String(r.events),
+          files: String(r.files),
+          runtime: r.runtime!,
+        },
+  );
   const cols = ["id", "started", "dur", "events", "files", "runtime"] as const;
-  const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => r[c].length)));
+  const widths = cols.map((c) => Math.max(c.length, ...displayRows.map((r) => r[c].length)));
   console.log(cols.map((c, i) => c.toUpperCase().padEnd(widths[i]!)).join("  "));
-  for (const r of rows) console.log(cols.map((c, i) => r[c].padEnd(widths[i]!)).join("  "));
+  for (const r of displayRows) console.log(cols.map((c, i) => r[c].padEnd(widths[i]!)).join("  "));
   console.log("(files = lower bound: structured edits only — shell-driven changes are not tracked)");
+  return 0;
+}
+
+/**
+ * Remove a session from the store (issue #71). Requires --yes: there is no
+ * interactive prompt to confirm against, so the flag itself is the
+ * confirmation, the same way `docker rm -f` or `kubectl delete` ask for an
+ * explicit flag rather than a y/n prompt a script can't answer.
+ *
+ * Does not check whether a fork elsewhere in the filesystem still points at
+ * this session (fork.json names its source by id) — forks live in whatever
+ * directory `--out` named, with no central registry agit could scan. That
+ * would need one; it does not exist yet, and this command does not guess
+ * at where forks might be.
+ */
+function cmdRm(opts: Opts): number {
+  const id = requireId(opts);
+  if (!opts.yes) {
+    // A session `rm` is likely to be pointed at is often the corrupt one
+    // ls already can't summarize — don't let that same corruption block
+    // deleting it.
+    let detail: string;
+    try {
+      detail = ` (${readSessionEvents(opts.dir, id).length} events)`;
+    } catch {
+      detail = " (unreadable/corrupt)";
+    }
+    console.error(`this will permanently delete session ${id}${detail} from the store.`);
+    console.error("pass --yes to confirm.");
+    return 2;
+  }
+  deleteSession(opts.dir, id);
+  console.log(`removed ${id}`);
+  return 0;
+}
+
+interface StatsRow {
+  key: string;
+  sessions: number;
+  apiMessages: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+}
+
+/**
+ * Usage across every imported session, grouped by model or by runtime
+ * (issue #67). A fold over `cost` events every session already carries;
+ * `usageTotals`/`usageByModel` do the per-session work, this just merges
+ * their results across the whole store. No `--since` window and no
+ * `--price` rate table yet — both are real asks in the same issue, scoped
+ * out of this first cut to keep it small.
+ */
+function cmdStats(opts: Opts): number {
+  if (!existsSync(opts.dir)) {
+    console.error(`no such directory: ${opts.dir}`);
+    return 1;
+  }
+  const ids = listSessionIds(opts.dir);
+  if (ids.length === 0) {
+    if (opts.json) process.stdout.write("[]\n");
+    else console.log("no sessions imported yet (agit import <file>)");
+    return 0;
+  }
+  const rows = new Map<string, StatsRow>();
+  const row = (key: string): StatsRow => {
+    let r = rows.get(key);
+    if (!r) {
+      r = {
+        key,
+        sessions: 0,
+        apiMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      };
+      rows.set(key, r);
+    }
+    return r;
+  };
+  let sessionsRead = 0;
+  let sessionsSkipped = 0;
+  for (const id of ids) {
+    let events: AgitEvent[];
+    try {
+      events = readSessionEvents(opts.dir, id);
+    } catch {
+      sessionsSkipped++;
+      continue;
+    }
+    sessionsRead++;
+    if (opts.statsBy === "runtime") {
+      const start = events[0]?.payload as { runtime?: unknown } | undefined;
+      const runtime = typeof start?.runtime === "string" ? start.runtime : "?";
+      const u = usageTotals(events);
+      const r = row(runtime);
+      r.sessions++;
+      r.apiMessages += u.apiMessages;
+      r.inputTokens += u.inputTokens;
+      r.outputTokens += u.outputTokens;
+      r.cacheReadInputTokens += u.cacheReadInputTokens;
+      r.cacheCreationInputTokens += u.cacheCreationInputTokens;
+      // `row(runtime)` above already created this row even when apiMessages
+      // is 0 — a runtime with no cost events (e.g. an adapter that never
+      // emits `cost`) still shows up, with a session count and zero tokens,
+      // rather than being invisible in the totals.
+      continue;
+    }
+    const perModel = usageByModel(events);
+    if (perModel.length === 0) continue; // no cost events in this session at all
+    const touchedInThisSession = new Set<string>();
+    for (const m of perModel) {
+      const r = row(m.model);
+      if (!touchedInThisSession.has(m.model)) {
+        r.sessions++;
+        touchedInThisSession.add(m.model);
+      }
+      r.apiMessages += m.apiMessages;
+      r.inputTokens += m.inputTokens;
+      r.outputTokens += m.outputTokens;
+      r.cacheReadInputTokens += m.cacheReadInputTokens;
+      r.cacheCreationInputTokens += m.cacheCreationInputTokens;
+    }
+  }
+
+  const sorted = [...rows.values()].sort(
+    (a, b) => b.outputTokens - a.outputTokens || a.key.localeCompare(b.key),
+  );
+
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify({ by: opts.statsBy, sessionsRead, sessionsSkipped, rows: sorted }, null, 2) + "\n",
+    );
+    return 0;
+  }
+
+  console.log(`agit stats — ${sessionsRead} session${sessionsRead === 1 ? "" : "s"}, by ${opts.statsBy}`);
+  if (sessionsSkipped > 0) {
+    console.log(`  (${sessionsSkipped} session${sessionsSkipped === 1 ? "" : "s"} unreadable, skipped)`);
+  }
+  console.log("");
+  if (sorted.length === 0) {
+    console.log("  no cost events in any imported session");
+    return 0;
+  }
+  const table = sorted.map((r) => ({
+    key: r.key,
+    sessions: String(r.sessions),
+    calls: String(r.apiMessages),
+    in: r.inputTokens.toLocaleString("en-US"),
+    out: r.outputTokens.toLocaleString("en-US"),
+    cacheRead: r.cacheReadInputTokens.toLocaleString("en-US"),
+  }));
+  const cols = ["key", "sessions", "calls", "in", "out", "cacheRead"] as const;
+  const head = {
+    key: opts.statsBy.toUpperCase(),
+    sessions: "SESSIONS",
+    calls: "CALLS",
+    in: "IN",
+    out: "OUT",
+    cacheRead: "CACHE READ",
+  };
+  const widths = cols.map((c) => Math.max(head[c].length, ...table.map((r) => r[c].length)));
+  const line = (r: Record<string, string>): string =>
+    cols.map((c, i) => (c === "key" ? r[c]!.padEnd(widths[i]!) : r[c]!.padStart(widths[i]!))).join("  ");
+  console.log("  " + line(head));
+  for (const r of table) console.log("  " + line(r));
+  const totals = sorted.reduce(
+    (t, r) => ({
+      inputTokens: t.inputTokens + r.inputTokens,
+      outputTokens: t.outputTokens + r.outputTokens,
+      apiMessages: t.apiMessages + r.apiMessages,
+    }),
+    { inputTokens: 0, outputTokens: 0, apiMessages: 0 },
+  );
+  console.log(
+    `\n  totals: in=${totals.inputTokens.toLocaleString("en-US")} out=${totals.outputTokens.toLocaleString("en-US")} (${totals.apiMessages.toLocaleString("en-US")} API call${totals.apiMessages === 1 ? "" : "s"} across ${sessionsRead} session${sessionsRead === 1 ? "" : "s"})`,
+  );
   return 0;
 }
 
@@ -697,15 +1021,6 @@ function cmdShow(opts: Opts): number {
   const last = events[events.length - 1]!;
   const start = first.payload as { [k: string]: unknown };
 
-  console.log(`session ${id}`);
-  console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
-  if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
-  if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
-  console.log(`  started     ${first.ts}`);
-  console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
-  if (meta)
-    console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
-
   const byType = new Map<string, number>();
   const tools = new Map<string, number>();
   for (const e of events) {
@@ -715,6 +1030,51 @@ function cmdShow(opts: Opts): number {
       if (typeof name === "string") tools.set(name, (tools.get(name) ?? 0) + 1);
     }
   }
+  const u = usageTotals(events);
+
+  if (opts.json) {
+    if (opts.byModel) {
+      process.stdout.write(JSON.stringify(usageByModelJson(events), null, 2) + "\n");
+      return 0;
+    }
+    process.stdout.write(
+      JSON.stringify(
+        {
+          id,
+          runtime: typeof start.runtime === "string" ? start.runtime : null,
+          runtimeVersion: typeof start.runtimeVersion === "string" ? start.runtimeVersion : null,
+          cwd: typeof start.cwd === "string" ? start.cwd : null,
+          gitBranch: typeof start.gitBranch === "string" ? start.gitBranch : null,
+          startedAt: first.ts,
+          durationMs: Date.parse(last.ts) - Date.parse(first.ts),
+          imported: meta ? { at: meta.importedAt, adapter: meta.adapter } : null,
+          events: events.length,
+          byType: Object.fromEntries(byType),
+          tools: Object.fromEntries(tools),
+          usage: { ...u, models: [...u.models] },
+          files: [...fileStateAt(events).values()],
+          redactions: meta?.redactions ?? {},
+          // {} alone is ambiguous: a --no-redact import (#79) also leaves it
+          // empty, so a consumer gating on redaction needs this to tell
+          // "scanned, found nothing" from "never scanned".
+          redactionSkipped: meta?.redactionSkipped === true,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+
+  console.log(`session ${id}`);
+  console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
+  if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
+  if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
+  console.log(`  started     ${first.ts}`);
+  console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
+  if (meta)
+    console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+
   console.log(
     `  events      ${events.length}  (${[...byType.entries()].map(([t, n]) => `${t}×${n}`).join(", ")})`,
   );
@@ -727,7 +1087,6 @@ function cmdShow(opts: Opts): number {
     );
   }
 
-  const u = usageTotals(events);
   if (u.apiMessages > 0) {
     console.log(`  models      ${[...u.models].join(", ")}`);
     console.log(
@@ -755,7 +1114,9 @@ function cmdShow(opts: Opts): number {
       );
     }
   }
-  if (meta && Object.keys(meta.redactions).length > 0) {
+  if (meta?.redactionSkipped) {
+    console.log("  redactions  SKIPPED at import (--no-redact) — share/pr need --allow-unredacted");
+  } else if (meta && Object.keys(meta.redactions).length > 0) {
     console.log(
       `  redactions  ${Object.entries(meta.redactions)
         .map(([k, v]) => `${k}×${v}`)
@@ -763,6 +1124,27 @@ function cmdShow(opts: Opts): number {
     );
   }
   return 0;
+}
+
+/** usageByModel's ModelUsage carries a Set — swap it for an array/count so JSON.stringify needs no help. */
+function usageByModelJson(events: AgitEvent[]): {
+  model: string;
+  apiMessages: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  files: string[];
+}[] {
+  return usageByModel(events).map((r) => ({
+    model: r.model,
+    apiMessages: r.apiMessages,
+    inputTokens: r.inputTokens,
+    outputTokens: r.outputTokens,
+    cacheReadInputTokens: r.cacheReadInputTokens,
+    cacheCreationInputTokens: r.cacheCreationInputTokens,
+    files: [...r.files],
+  }));
 }
 
 /**
@@ -837,6 +1219,10 @@ function cmdVerify(opts: Opts): number {
     meta = readSessionMeta(opts.dir, id) ?? undefined;
   }
   const res = verifyChain(lines, meta);
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ ...res, hasMeta: meta !== undefined }, null, 2) + "\n");
+    return res.ok ? 0 : 1;
+  }
   if (res.ok) {
     console.log(
       `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
@@ -975,15 +1361,14 @@ function cmdDiff(opts: Opts): number {
       // about, and the same thing `agit merge` reads.
       forkSide = { tree: treeOnDisk(join(resolve(first), "tree")), label: "fork" };
     }
-    for (const line of renderDiff(
+    printDiff(
+      opts,
       diffSessions({
         a: { events: parent, label: info.sourceSession.slice(0, 8) },
         b: forkSide,
         from: { seq: info.atSeq, hash: info.atHash },
       }),
-    )) {
-      console.log(line);
-    }
+    );
     return 0;
   }
 
@@ -999,15 +1384,22 @@ function cmdDiff(opts: Opts): number {
     console.error("those are the same session");
     return 2;
   }
-  for (const line of renderDiff(
+  printDiff(
+    opts,
     diffSessions({
       a: { events: readSessionEvents(opts.dir, idA), label: idA.slice(0, 8) },
       b: { events: readSessionEvents(opts.dir, idB), label: idB.slice(0, 8) },
     }),
-  )) {
-    console.log(line);
-  }
+  );
   return 0;
+}
+
+function printDiff(opts: Opts, diff: ReturnType<typeof diffSessions>): void {
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
+    return;
+  }
+  for (const line of renderDiff(diff)) console.log(line);
 }
 
 function cmdMerge(opts: Opts): number {
@@ -1066,6 +1458,7 @@ function cmdPr(opts: Opts): number {
     return 2;
   }
   if (!refuseUnlessVerified(opts, id, "hand off", "nothing was written")) return 1;
+  if (!refuseUnlessRedacted(opts, id, "hand off")) return 1;
   const outDir = resolve(opts.out ?? `agit-pr-${id.slice(0, 8)}`);
   if (existsSync(outDir)) {
     console.error(`refusing to write into existing ${outDir} — pass a fresh --out`);
@@ -1128,6 +1521,7 @@ function cmdGrep(opts: Opts): number {
 
   const ids = listSessionIds(opts.dir);
   if (ids.length === 0) {
+    if (opts.json) return 0; // NDJSON: zero lines is zero results, nothing more to say.
     console.log("no sessions imported yet (agit import <file>)");
     return 0;
   }
@@ -1147,10 +1541,12 @@ function cmdGrep(opts: Opts): number {
       type: opts.grepType,
       path: opts.grepPath,
     })) {
-      console.log(renderHit(hit, idWidth));
+      if (opts.json) process.stdout.write(JSON.stringify(hit) + "\n");
+      else console.log(renderHit(hit, idWidth));
       total++;
     }
   }
+  if (opts.json) return total === 0 ? 1 : 0;
   if (total === 0) {
     console.error(`no matches in ${searched} session${searched === 1 ? "" : "s"}`);
     return 1;
@@ -1174,6 +1570,11 @@ function cmdExportHtml(opts: Opts): number {
   const id = requireId(opts);
   const meta = readSessionMeta(opts.dir, id);
   if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
+  // A self-contained page exists to be handed to someone else, the same as a
+  // `pr` bundle — so it takes the same gate. `export` to stdout deliberately
+  // does not: it is how you read a session to decide whether it is safe, and
+  // the refusal itself tells you to go and check.
+  if (!refuseUnlessRedacted(opts, id, "export")) return 1;
 
   const all = readSessionEvents(opts.dir, id);
   if (opts.at !== undefined && (!Number.isInteger(opts.at) || opts.at < 0 || opts.at >= all.length)) {
@@ -1205,10 +1606,51 @@ function cmdExportHtml(opts: Opts): number {
   return 0;
 }
 
+/** Loopback needs no transport security; anything else carries share traffic over a network. */
+function isLoopback(host: string): boolean {
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — binding
+  // 127.0.0.2 is as private as the default, and calling it "beyond loopback"
+  // in the warning would be untrue.
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return host === "localhost" || host === "::1" || host === "[::1]";
+}
+
 async function cmdRelay(opts: Opts): Promise<number> {
+  const host = opts.host ?? "127.0.0.1";
+
+  if ((opts.cert === undefined) !== (opts.key === undefined)) {
+    console.error("--cert and --key go together: a relay is HTTPS or it is HTTP, not half of one");
+    return 2;
+  }
+  let tls: { cert: string; key: string } | undefined;
+  if (opts.cert !== undefined && opts.key !== undefined) {
+    try {
+      tls = { cert: readFileSync(opts.cert, "utf8"), key: readFileSync(opts.key, "utf8") };
+    } catch (err) {
+      console.error(`cannot read the TLS material: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  // Exposing a plaintext relay should be a deliberate act, not a default. The
+  // link is the only secret a viewer holds, and without TLS it crosses the
+  // network in the clear along with every event the share carries.
+  if (tls === undefined && !isLoopback(host) && !opts.insecure) {
+    console.error(
+      `refusing to bind ${host} without TLS: share links and every event would cross the network in the clear.\n` +
+        "Pass --cert and --key to serve HTTPS, put a TLS proxy in front and keep the relay on loopback,\n" +
+        "or pass --insecure if the network is genuinely trusted.",
+    );
+    return 2;
+  }
+
   let handle;
   try {
-    handle = await startRelay({ port: opts.port, host: opts.host, trustedProxies: opts.trustedProxies });
+    handle = await startRelay({
+      port: opts.port,
+      host: opts.host,
+      trustedProxies: opts.trustedProxies,
+      tls,
+    });
   } catch (err) {
     if ((err as { code?: string }).code === "EADDRINUSE") {
       console.error(
@@ -1218,13 +1660,17 @@ async function cmdRelay(opts: Opts): Promise<number> {
     }
     throw err;
   }
-  const host = opts.host ?? "127.0.0.1";
-  console.log(`agit relay listening on http://${host}:${handle.port}`);
+  console.log(`agit relay listening on ${handle.scheme}://${host}:${handle.port}`);
   console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
-  if (host !== "127.0.0.1" && host !== "localhost") {
+  if (!isLoopback(host)) {
     console.log(
-      "NOTE: bound beyond loopback — anyone who can reach this port can view shares they have links for. Prefer a TLS reverse proxy or tunnel.",
+      handle.scheme === "https"
+        ? "NOTE: bound beyond loopback over TLS — anyone who can reach this port can view shares they have links for."
+        : "NOTE: bound beyond loopback WITHOUT TLS (--insecure) — share links and events are readable by anyone on the path.",
     );
+  }
+  if (handle.scheme === "https") {
+    console.log(`  share against it with: agit share <id> --relay https://${host}:${handle.port}`);
   }
   await waitForSigint();
   await handle.close();
@@ -1254,8 +1700,10 @@ async function cmdShare(opts: Opts): Promise<number> {
       nativePath = meta.source.path;
     } else {
       // This is the path that publishes the stored chain itself, so it is
-      // the one that must never publish a chain that does not verify.
+      // the one that must never publish a chain that does not verify — or
+      // one that was imported with --no-redact and never scanned.
       if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
+      if (!refuseUnlessRedacted(opts, id, "share")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
   }

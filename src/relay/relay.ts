@@ -18,6 +18,7 @@
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createTlsServer } from "node:https";
 import { SHARE_PAGE } from "./page.js";
 
 export interface RelayOptions {
@@ -28,6 +29,12 @@ export interface RelayOptions {
   defaultTtlMs?: number;
   maxTtlMs?: number;
   trustedProxies?: string[];
+  /**
+   * PEM certificate and private key. Both, or neither: a relay is HTTPS or it
+   * is HTTP, never half of one. Everything above the socket is identical --
+   * same routes, same tokens, same SSE framing.
+   */
+  tls?: { cert: string; key: string };
 }
 
 interface Share {
@@ -71,6 +78,8 @@ const LIMITS = {
 export interface RelayHandle {
   server: Server;
   port: number;
+  /** The scheme this relay actually speaks, so callers build links that work. */
+  scheme: "http" | "https";
   close(): Promise<void>;
 }
 
@@ -101,13 +110,19 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
   }, 15_000);
   heartbeat.unref();
 
-  const server = createServer((req, res) => {
+  const onRequest = (req: IncomingMessage, res: ServerResponse): void => {
     handle(req, res).catch((err) => {
       if (!res.headersSent) json(res, 500, { error: "internal error" });
       else res.end();
       console.error("relay:", err instanceof Error ? err.message : err);
     });
-  });
+  };
+  // node:https' server is a node:http server with a TLS socket underneath, so
+  // every handler, route and SSE write below is shared verbatim.
+  const scheme: "http" | "https" = opts.tls ? "https" : "http";
+  const server: Server = opts.tls
+    ? createTlsServer({ cert: opts.tls.cert, key: opts.tls.key }, onRequest)
+    : createServer(onRequest);
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://relay.invalid");
@@ -294,6 +309,7 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
       resolve({
         server,
         port,
+        scheme,
         close: () =>
           new Promise<void>((r) => {
             clearInterval(reaper);

@@ -201,3 +201,41 @@ describe("mergeFork through both engines", () => {
     expect(record.engine).toBe("builtin");
   });
 });
+
+describe("the fallback agrees with git, byte for byte", () => {
+  // The premise of the fallback is that a machine without git gets a
+  // different availability story, not a different merge. These compare the
+  // two implementations against each other rather than asserting on either
+  // one's output, so a future divergence surfaces here rather than in
+  // somebody's working tree.
+  const CASES: [string, string, string, string][] = [
+    ["non-overlapping", "a\nb\nc\n", "A\nb\nc\n", "a\nb\nC\n"],
+    ["true conflict", "x\n", "ours\n", "theirs\n"],
+    ["adjacent lines", "1\n2\n3\n", "1\nX\n3\n", "1\n2\nY\n"],
+    ["ours deletes a line", "a\nb\nc\n", "a\nc\n", "a\nb\nC\n"],
+    ["both append", "a\n", "a\nO\n", "a\nT\n"],
+    ["identical edits", "a\nb\n", "a\nB\n", "a\nB\n"],
+    ["no trailing newline", "a\nb", "A\nb", "a\nB"],
+    ["empty base", "", "o\n", "t\n"],
+    ["CRLF", "a\r\nb\r\n", "A\r\nb\r\n", "a\r\nB\r\n"],
+  ];
+
+  for (const [name, base, ours, theirs] of CASES) {
+    it(`matches git merge-file: ${name}`, () => {
+      const viaGit = mergeFileContents(base, ours, theirs, { noGit: false });
+      const builtIn = mergeFileContents(base, ours, theirs, { noGit: true });
+      expect(builtIn.clean).toBe(viaGit.clean);
+      expect(builtIn.content).toBe(viaGit.content);
+    });
+  }
+
+  it("writes CRLF conflict markers in a CRLF file", () => {
+    // LF markers around CRLF content leave a mixed-ending file behind, and
+    // on Windows a CRLF working tree is the common case.
+    const r = mergeFileContents("a\r\nb\r\n", "A\r\nb\r\n", "a\r\nB\r\n", { noGit: true });
+    expect(r.clean).toBe(false);
+    expect(r.content).toContain("<<<<<<< ours\r\n");
+    expect(r.content).toContain("=======\r\n");
+    expect(r.content).toContain(">>>>>>> fork\r\n");
+  });
+});
