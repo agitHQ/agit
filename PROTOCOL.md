@@ -119,15 +119,24 @@ ever offers a real injection path, it gets wired per-adapter, opt-in.
 
 ## Deployment notes
 
-The relay binds loopback by default and speaks plain HTTP. **Never expose it
-directly** (`--host 0.0.0.0`) without TLS in front: share links and writer
-tokens are bearer capabilities, and on a plaintext link anyone on the path
-can read the session and hijack the writer role. The two easy shapes:
+The relay binds loopback by default. Share links and writer tokens are bearer
+capabilities, so on a plaintext link anyone on the path can read the session
+and hijack the writer role — which is why binding beyond loopback without TLS
+is **refused** unless you pass `--insecure` and mean it. Three shapes:
 
+- **Native TLS** — `agit relay --cert <pem> --key <pem>` serves HTTPS
+  directly (`node:https`). Same routes, same tokens, same SSE framing; only
+  the socket changes. Share against it with
+  `agit share <id> --relay https://host:7717`.
 - **Tunnel** — keep the relay on loopback and put `cloudflared tunnel`,
   `tailscale funnel`, or an SSH forward in front. Zero relay configuration.
 - **Reverse proxy** — Caddy (`caddy reverse-proxy --from share.example.com
   --to localhost:7717`) or nginx with proxied SSE (`proxy_buffering off`).
+  Terminating TLS elsewhere stays perfectly good; native TLS is for when
+  there is nowhere else to put it.
+
+`--cert` and `--key` go together: a relay is HTTPS or it is HTTP, never half
+of one.
 
 There is no persistence, no accounts, and no cross-share enumeration:
 `GET /api/shares` does not exist.

@@ -260,6 +260,55 @@ describe("codex adapter", () => {
     });
   });
 
+  it("records a rename as the filesystem saw it: old path deleted, new one created", () => {
+    // Before schema v2 this was skipped -- two paths and no event type that
+    // said one became the other. Mirrors the OpenClaw mapping (#52).
+    const res = codexAdapter.convert(editLines);
+    const fileEvents = res.drafts
+      .filter((d) => d.type === "file.diff" || d.type === "file.delete")
+      .map((d) => [
+        d.type,
+        String((d.payload as { path: Json }).path)
+          .split("\\")
+          .pop(),
+      ]);
+    const at = fileEvents.findIndex(([, name]) => name === "renamed.py");
+    expect(at).toBeGreaterThan(0);
+    expect(fileEvents[at - 1]).toEqual(["file.delete", "hello.py"]);
+    expect(fileEvents[at]).toEqual(["file.diff", "renamed.py"]);
+  });
+
+  it("hashes both sides of a rename against real content", () => {
+    const res = codexAdapter.convert(editLines);
+    const before = 'def main():\n    print("hello there")\n';
+    const after = 'def main():\n    print("renamed")\n';
+
+    const del = res.drafts.find(
+      (d) => d.type === "file.delete" && String((d.payload as { path: Json }).path).endsWith("hello.py"),
+    )!;
+    expect((del.payload as Record<string, Json>).beforeHash).toBe(sha(before));
+
+    const created = res.drafts.find(
+      (d) => d.type === "file.diff" && String((d.payload as { path: Json }).path).endsWith("renamed.py"),
+    )!;
+    const p = created.payload as Record<string, Json>;
+    // The destination is new, so it is a create: no prior content at that path.
+    expect(p.kind).toBe("create");
+    expect(p.beforeHash).toBeNull();
+    expect(p.afterHash).toBe(sha(after));
+    expect(p.source).toBe("apply_patch");
+  });
+
+  it("skips a rename whose base predates the session rather than guessing", () => {
+    const res = codexAdapter.convert(editLines);
+    expect(res.skipped["patch_apply:update(rename, base content not in log)"]).toBe(1);
+    const paths = res.drafts
+      .filter((d) => d.type === "file.diff" || d.type === "file.delete")
+      .map((d) => String((d.payload as { path: Json }).path));
+    expect(paths.some((x) => x.endsWith("legacy.py"))).toBe(false);
+    expect(paths.some((x) => x.endsWith("legacy2.py"))).toBe(false);
+  });
+
   it("orders a multi-file patch by path so imports stay byte-identical", () => {
     // Rust serializes `changes` from a HashMap; its order is not stable, and
     // the fixture deliberately lists z, a, m in that order.
@@ -279,8 +328,9 @@ describe("codex adapter", () => {
       // Nothing reached disk for these two.
       "patch_apply:failed": 1,
       "patch_apply:declined": 1,
-      // A rename is two paths; recording only content would lose the move.
-      "patch_apply:update(rename)": 1,
+      // A rename whose base predates the session: neither path has content
+      // we could hash, so that one is still skipped.
+      "patch_apply:update(rename, base content not in log)": 1,
       // Malformed and partial payloads, counted rather than guessed at.
       "patch_apply:add(no content)": 1,
       "patch_apply:update(no diff)": 1,
@@ -296,7 +346,7 @@ describe("codex adapter", () => {
       .map((d) => String((d.payload as { path: Json }).path));
     expect(paths.some((p) => p.endsWith("existing.py"))).toBe(false);
     expect(paths.some((p) => p.endsWith("obsolete.py"))).toBe(false);
-    expect(paths.some((p) => p.endsWith("renamed.py"))).toBe(false);
+    expect(paths.some((p) => p.endsWith("legacy2.py"))).toBe(false);
   });
 
   it("a failed patch does not poison the content chain for later updates", () => {
@@ -333,9 +383,12 @@ describe("codex adapter", () => {
     const { files, skipped } = reconstructTree(events, events.length - 1);
     expect(skipped).toEqual([]);
     const byName = Object.fromEntries(files.map((f) => [f.path.split("\\").pop(), f.content]));
-    expect(byName["hello.py"]).toBe('def main():\n    print("hello there")\n');
+    // hello.py was renamed to renamed.py, so the replayed tree holds the
+    // destination and not the source -- what the filesystem actually saw.
+    expect(byName["renamed.py"]).toBe('def main():\n    print("renamed")\n');
+    expect(byName["hello.py"]).toBeUndefined();
     expect(byName["notes.md"]).toBe("# notes\n\n- shipped\n");
-    expect(Object.keys(byName).sort()).toEqual(["a.py", "hello.py", "m.py", "notes.md", "z.py"]);
+    expect(Object.keys(byName).sort()).toEqual(["a.py", "m.py", "notes.md", "renamed.py", "z.py"]);
   });
 
   it("session.start carries provenance", () => {
