@@ -7,6 +7,51 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit push`, `agit pull`, `relay --store` and `share --detach`** (#72)
+  turn the relay into a remote without changing the local model: a remote is
+  just a relay someone else runs. `push` publishes a verified session and
+  exits with a link; `pull` adopts it elsewhere over HTTP. Pull is the same
+  code path as adopting a `pr` bundle, deliberately — the chain is verified
+  before anything is stored and the events land byte for byte with the hashes
+  the origin published, so **nothing here trusts the relay**: one altered byte
+  produces a log that fails verification, which is the whole reason the chain
+  exists, and there is a test that alters one. Pushing twice reuses the same
+  link unless `--force` says otherwise, and pushing a session that does not
+  verify is refused like every other publishing verb. `agit relay --store
+  <dir>` persists shares across a restart as two flat files each, metadata
+  rewritten whole and events appended — not a database, because agit has no
+  runtime dependencies and `node:sqlite` needs Node 22 against a package that
+  supports 20. The TTL survives a restart rather than resetting, a corrupt
+  share costs one share instead of the relay's startup, and the head is
+  recomputed from the events that actually loaded so a truncated file cannot
+  claim a head it can no longer serve. That directory holds writer tokens and
+  is documented as a credential store. `share --static --detach` prints the
+  link and exits for CI; detaching from a *live* share is refused, since
+  nothing would be left tailing the log.
+
+- **`agit export --otel` and `agit export --atif`** (#69) turn a verified
+  session into the shapes other tools already ingest. `--otel` emits OTLP/JSON
+  spans following the OpenTelemetry GenAI semantic conventions — an
+  `invoke_agent` root, `chat` children carrying token counts, `execute_tool`
+  children — and `--atif` emits a Harbor Agent Trajectory Interchange Format
+  document (ATIF-v1.8), the format Harbor uses for evals and fine-tuning and
+  the one its OpenHands adapter converts OpenHands event logs into. Both are
+  pure views over stored events; SPEC is unchanged. Every ATIF model forbids
+  unknown keys, so the field names are exact and agit's own additions sit in
+  each object's `extra`.
+  Span ids are the first eight bytes of the event hash they came from, so a
+  trace points back at a line of a log that can be verified, with the full
+  hash alongside as an attribute. Output is deterministic, and an unverified
+  session is refused for the same reason `export` refuses one. The GenAI
+  conventions are at Development stability, moved repositories during 2026 and
+  have never cut a release, so the export targets the current names
+  (`gen_ai.provider.name`, not the renamed-away `gen_ai.system`;
+  `cache_write`, not `cache_creation`) and emits the only schema URL that
+  exists, which ends in `-dev`. `file.diff` has no equivalent in either
+  format, so edits ride in each one's own extension field rather than being
+  dropped or bent into a shape that means something else, with the SPEC §5.7
+  lower bound stated beside them.
+
 - **`agit sign <id> --key <file>`** (#68) binds a head to an Ed25519 key, and
   **SPEC §12** documents the signed payload so other implementations can
   verify without agit. The chain proves a log was not modified after it was
