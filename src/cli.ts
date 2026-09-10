@@ -1645,12 +1645,25 @@ function cmdVerify(opts: Opts): number {
     at: s.at,
     ...verifySignature(s, head),
   }));
+  // A signature that does not match is a failure even when the chain is
+  // intact: something claimed this head and the claim does not hold.
+  const signaturesOk = sigs.every((s) => s.ok);
+  const verdict = res.ok && signaturesOk;
 
   if (opts.json) {
     process.stdout.write(
       JSON.stringify(
         {
           ...res,
+          // `ok` is the same answer the exit code gives. It used to carry the
+          // chain result alone, so a session with an intact chain and a
+          // signature that did not match reported `ok: true` and exited 1 --
+          // opposite answers in one run, from the one verb whose entire job is
+          // to say whether this can be trusted. The two halves stay available
+          // under their own names.
+          ok: verdict,
+          chainOk: res.ok,
+          signaturesOk,
           hasMeta: meta !== undefined,
           signed: sigs.length > 0,
           signatures: sigs,
@@ -1659,19 +1672,19 @@ function cmdVerify(opts: Opts): number {
         2,
       ) + "\n",
     );
-    // A signature that does not match is a failure even when the chain is
-    // intact: something claimed this head and the claim does not hold.
-    return res.ok && sigs.every((s) => s.ok) ? 0 : 1;
+    return verdict ? 0 : 1;
   }
   if (res.ok) {
-    console.log(
-      `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
-    );
+    const chain = `${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`;
+    // Leading with "ok:" on a run that exits 1 reads as a pass, whatever the
+    // line under it says.
+    if (signaturesOk) console.log(`ok: ${chain}`);
+    else console.log(`NOT OK: ${chain}, but a signature does not match:`);
     for (const line of signatureLines(meta, meta?.sessionId ?? "")) {
       if (line.startsWith("SIGNATURE DOES NOT MATCH")) console.error(line);
       else console.log(line);
     }
-    return sigs.every((s) => s.ok) ? 0 : 1;
+    return verdict ? 0 : 1;
   }
   console.error(`BROKEN at seq ${res.firstBroken!.seq}: ${res.firstBroken!.reason}`);
   console.error(`${res.events} events verified before the break`);
