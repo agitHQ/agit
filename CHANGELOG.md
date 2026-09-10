@@ -7,6 +7,22 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit mcp`** (#66) serves the store to an agent over MCP on stdio, so an
+  agent can consult its own verified history rather than that being something
+  only a human can do with `grep`. Six read-only tools — `agit_list`,
+  `agit_grep`, `agit_show`, `agit_replay`, `agit_diff`, `agit_verify` — and
+  one server covers every runtime agit imports from, since Claude Code,
+  Codex, Cursor, Gemini and Cline all speak MCP. Read-only is enforced rather
+  than promised: no tool writes, nothing on this transport reaches `import`,
+  `tag`, `rm` or the redaction config, and a test asserts the tool list can
+  never grow one. Every answer carries whether that session's chain verifies,
+  and a session that fails verification is still answered from and flagged
+  rather than hidden, because refusing to read it would lose information the
+  log still holds. Session logs are untrusted input, so each payload is
+  labelled as recorded data rather than instructions, in a field no session
+  can shadow. The JSON-RPC is written by hand: agit still has zero runtime
+  dependencies.
+
 - **`agit blame`, `agit why` and `agit link`** (#65) connect a line of code
   back to the moment it was written. `blame` attributes each line to the
   session and event that last wrote it; `why <file>:<line>` adds the prompt
