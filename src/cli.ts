@@ -91,7 +91,8 @@ usage:
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
                                        its parent from the fork point
   agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back
-                                       (base = fork point), via git merge-file
+                                       (base = fork point). Uses git merge-file
+                                       when present, a built-in merge otherwise
   agit pr <id> [--at N] [--out DIR]    handoff bundle for a colleague: log +
                                        meta + verified tree + context seed
   agit share <id | native.jsonl>       share a session through a relay — live if it
@@ -106,6 +107,7 @@ options:
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
   --summary <txt>  merge: what the fork learned, recorded in merge.json
+  --no-git         merge: use the built-in three-way merge, not git merge-file
   --since <dur>    import --all: only logs modified within 7d / 24h / 30m
   --yes, -y        rm: confirm the deletion (there is no interactive prompt)
   --by <k>         stats: group by "model" (default) or "runtime"
@@ -159,6 +161,7 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  noGit: boolean;
   cert?: string;
   key?: string;
   insecure: boolean;
@@ -185,6 +188,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     static: false,
     resume: false,
     trustedProxies: [],
+    noGit: false,
     insecure: false,
     args: [],
   };
@@ -231,6 +235,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--no-git") opts.noGit = true;
     else if (a === "--cert") opts.cert = argv[++i];
     else if (a === "--key") opts.key = argv[++i];
     else if (a === "--insecure") opts.insecure = true;
@@ -1416,10 +1421,25 @@ function cmdMerge(opts: Opts): number {
     return 1;
   }
   const intoDir = resolve(opts.into ?? ".");
-  const { results, conflicts } = mergeFork({ forkDir, intoDir, sourceEvents: events, summary: opts.summary });
+  const { results, conflicts, engines } = mergeFork({
+    forkDir,
+    intoDir,
+    sourceEvents: events,
+    summary: opts.summary,
+    noGit: opts.noGit,
+  });
 
   console.log(`merging fork of ${info.sourceSession} (at event ${info.atSeq}) into ${intoDir}`);
   for (const r of results) console.log(`  ${r.outcome.padEnd(12)} ${r.rel}`);
+  if (engines.includes("builtin")) {
+    // Say which engine ran: the results are a merge someone will act on, and
+    // git's are what their expectations are calibrated against.
+    console.log(
+      opts.noGit
+        ? "  (content merges used agit's built-in three-way merge, as --no-git asked)"
+        : "  (git merge-file was not on PATH; content merges used agit's built-in three-way merge)",
+    );
+  }
   console.log(
     conflicts > 0
       ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files; finish by hand.`

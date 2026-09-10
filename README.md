@@ -185,11 +185,13 @@ Said plainly:
   HTTP on loopback, and binding beyond loopback without TLS is refused
   unless `--insecure` is passed. A tunnel or TLS-terminating proxy remains a
   perfectly good alternative (PROTOCOL.md).
-- **Merge is file-level and needs git.** Three-way content merge only:
-  deletions in a fork are invisible (the fork tree records what the log
-  could reconstruct, so absence means untouched, not deleted), renames are
-  two files, and `git merge-file` must be on PATH. Fork/pr context seeding
-  is a summary by design; you cannot inject history into a running agent.
+- **Merge is file-level.** Three-way content merge only: deletions in a fork
+  are invisible (the fork tree records what the log could reconstruct, so
+  absence means untouched, not deleted) and renames are two files. It uses
+  `git merge-file` when git is on PATH and a built-in three-way merge
+  otherwise (`--no-git` forces the built-in one); git is preferred because
+  its results are what everyone's expectations are calibrated against.
+  Fork/pr context seeding  is a summary by design; you cannot inject history into a running agent.
 - **Redaction is a seatbelt, not a guarantee.** Session logs contain whatever
   the agent saw. Before sharing one anywhere, read it.
 

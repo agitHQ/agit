@@ -7,6 +7,12 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit merge` no longer needs git on PATH** (#89). A built-in line-based
+  three-way merge takes over when `git merge-file` is missing, and `--no-git`
+  forces it. git is still preferred where present, because its output is what
+  everyone's expectations are calibrated against — and the two are now pinned
+  to each other by differential tests covering conflicts, deletions,
+  adjacent edits, a missing trailing newline and CRLF files.
 - **Relay TLS** (#87): `agit relay --cert <pem> --key <pem>` serves HTTPS,
   and share links carry `https://` accordingly. Binding beyond loopback
   without TLS is refused unless `--insecure` says the network is trusted,
