@@ -279,11 +279,11 @@ references already embedded in agit's adapter code and public
 documentation:
 
 - Session transcript schema: `src/agents/sessions/session-manager-types.ts`
-  (referenced in [openclaw.ts L10–16](../src/adapters/openclaw.ts))
+  (referenced in [openclaw.ts L10–16](../../src/adapters/openclaw.ts))
 - Transcript header: `src/config/sessions/transcript-header.ts`
-  (referenced in [openclaw.ts L10](../src/adapters/openclaw.ts))
+  (referenced in [openclaw.ts L10](../../src/adapters/openclaw.ts))
 - Session state dir: `src/config/state-dir.ts`
-  (referenced in [discover.ts L11](../src/discover.ts))
+  (referenced in [discover.ts L11](../../src/discover.ts))
 - Gateway protocol schema: `packages/gateway-protocol/src/schema.ts`
   (public, documented at docs.openclaw.ai)
 - Gateway auth configuration: `gateway.auth.mode` in `openclaw.json`
