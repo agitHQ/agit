@@ -7,6 +7,13 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit rm <id> --yes`** (#71) removes a session from the store. The flag
+  is the confirmation — there is no prompt a script could answer — and
+  without it `rm` reports what it would delete, including when the log is
+  too corrupt to summarize, and exits 2. It does not attempt to find forks
+  that point at the session: they live in whatever directory `--out` named
+  and there is no registry to scan, so the command says so instead of
+  guessing.
 - **`agit stats`** (#67) — usage across the whole store, grouped `--by
   model` (default) or `--by runtime`, with `--json`. A fold over the `cost`
   events sessions already carry: no new event types, nothing recorded that

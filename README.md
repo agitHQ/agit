@@ -62,6 +62,12 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   per-file diffstat. `--by-model` splits it: what each model cost and how
   many files its edits touched. Tokens are exact; file attribution credits
   an edit to the model named by the nearest preceding event, and says so.
+- **`agit rm <id> --yes`** — delete a session from the store. `--yes` is the
+  confirmation: there is no interactive prompt for a script to answer, so the
+  flag is it. Without it, `rm` says what it would remove and stops. It does
+  not know whether a fork somewhere still points at the session — forks live
+  wherever `--out` put them, with no registry to consult — and says so rather
+  than guessing.
 - **`agit stats`** — token and API-call totals across every imported
   session, grouped `--by model` (default) or `--by runtime`. A fold over the
   `cost` events each session already carries, so it needs no new data — and

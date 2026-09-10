@@ -105,6 +105,16 @@ export function readSessionMeta(base: string, id: string): SessionMeta | null {
   return JSON.parse(readFileSync(p, "utf8")) as SessionMeta;
 }
 
+/**
+ * Remove a session from the store. `id` is trusted here — every caller goes
+ * through `resolveSessionId` first, which only ever returns an id that is
+ * already a real directory name under sessions/, so this can't be handed an
+ * unsafe path the way `writeSession` can from untrusted import input.
+ */
+export function deleteSession(base: string, id: string): void {
+  rmSync(sessionDir(base, id), { recursive: true, force: true });
+}
+
 // ---------------------------------------------------------------------------
 // Share state: credentials for resuming a live share after a crash. Written
 // when a live share starts, deleted when it ends cleanly — so a surviving
