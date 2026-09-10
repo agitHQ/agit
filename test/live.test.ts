@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -112,6 +112,64 @@ describe("SessionFollower", () => {
     expect(mutated.join("\n").length).toBe(lines.slice(0, 6).join("\n").length);
     writeFileSync(path, mutated.join("\n") + "\n", "utf8");
     expect(() => follower.poll()).toThrow(StabilityError);
+  });
+
+  it("catches a same-size rewrite even when mtime is byte-identical", () => {
+    // The failure this guards against, reproduced without depending on the
+    // filesystem's resolution: force mtime back to exactly what it was, which
+    // is what a coarse-granularity filesystem does for free when two writes
+    // land inside one tick. CI on Windows hit this for real.
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.slice(0, 6).join("\n") + "\n", "utf8");
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    expect(follower.poll().length).toBeGreaterThan(0);
+    const before = statSync(path);
+
+    const mutated = lines
+      .slice(0, 6)
+      .map((l, i) => (i === 1 ? l.replace("greeting module", "greetinj module") : l));
+    writeFileSync(path, mutated.join("\n") + "\n", "utf8");
+    utimesSync(path, before.atime, before.mtime);
+    expect(statSync(path).size).toBe(before.size);
+
+    // Size identical, mtime as close to unchanged as the platform allows: the
+    // digest still has to run, or history could be rewritten unnoticed.
+    expect(() => follower.poll()).toThrow(StabilityError);
+  });
+
+  it("still skips the read on a file nothing has touched recently", () => {
+    // The optimization the gate exists for (#4) has to survive the fix: a
+    // long quiet session costs one stat() per tick, not a re-read.
+    //
+    // Proven by putting content on disk that WOULD throw if it were read. A
+    // poll that returns nothing did not read it.
+    //
+    // This is also the honest boundary of the fix above: an mtime deliberately
+    // set back to an old value still takes the fast path. That is not a hole
+    // worth closing, because anyone who can rewrite the file AND backdate its
+    // mtime already controls the log the follower is reading. What the fix
+    // addresses is the accidental case — a filesystem whose resolution is too
+    // coarse to notice two writes — which needs no attacker at all.
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.slice(0, 6).join("\n") + "\n", "utf8");
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    expect(follower.poll().length).toBeGreaterThan(0);
+
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old);
+    expect(follower.poll()).toEqual([]); // records the aged size and mtime
+
+    const rewritten = lines
+      .slice(0, 6)
+      .map((l, i) => (i === 1 ? l.replace("greeting module", "greetinj module") : l));
+    writeFileSync(path, rewritten.join("\n") + "\n", "utf8");
+    utimesSync(path, old, old);
+
+    expect(follower.poll()).toEqual([]);
   });
 
   it("stops loudly if streamed history stops being a prefix", () => {

@@ -30,6 +30,13 @@ export class StabilityError extends Error {
   }
 }
 
+/**
+ * How long a file's mtime must have been stable before the idle fast path
+ * will trust it. Two seconds is FAT's granularity, the coarsest in common
+ * use; anything finer is covered by it.
+ */
+const MTIME_SETTLE_MS = 2000;
+
 export class SessionFollower {
   readonly redactions: RedactionCounts = {};
   sessionId: string | null = null;
@@ -72,7 +79,19 @@ export class SessionFollower {
     // history tampering the full-prefix digest below exists to catch.
     if (live) {
       const st = statSync(this.path);
-      if (st.size === this.lastSize && st.mtimeMs === this.lastMtimeMs) return [];
+      // ...but only once the file's mtime has had time to settle. Filesystems
+      // report mtime at a coarse resolution — two seconds on FAT, and in
+      // practice enough on Windows that CI caught this — so two writes inside
+      // one tick leave size and mtime both unchanged. A same-size in-place
+      // rewrite in that window would take the fast path out and never reach
+      // the digest below, which is the one check that catches history being
+      // rewritten. That is precisely the tampering PROTOCOL.md promises to
+      // stop loudly, so the gate only applies to a file nothing has touched
+      // recently. A long quiet session still costs one stat() per tick, which
+      // is what the fast path was for; a file changed moments ago is re-read,
+      // which is exactly when it matters.
+      const settled = Date.now() - st.mtimeMs > MTIME_SETTLE_MS;
+      if (settled && st.size === this.lastSize && st.mtimeMs === this.lastMtimeMs) return [];
       this.lastSize = st.size;
       this.lastMtimeMs = st.mtimeMs;
     }
