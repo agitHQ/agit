@@ -9,7 +9,7 @@
 
 export class PatchError extends Error {}
 
-interface Hunk {
+export interface Hunk {
   oldStart: number;
   lines: string[]; // ' ' context, '-' delete, '+' add, '\' no-newline marker
 }
@@ -77,7 +77,7 @@ export function applyUnifiedDiff(base: string | null, diff: string): string {
   return out.join("\n") + trail;
 }
 
-function parseHunks(diff: string): Hunk[] {
+export function parseHunks(diff: string): Hunk[] {
   const rawLines = diff.split("\n");
   const hunks: Hunk[] = [];
   let current: Hunk | null = null;

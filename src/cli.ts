@@ -14,11 +14,13 @@ import { verifyChain } from "./format/verify.js";
 import {
   EVENT_TYPES,
   isEventType,
+  type Json,
   SCHEMA_VERSION,
   SUPPORTED_SCHEMA_VERSIONS,
   type AgitEvent,
   type SessionMeta,
 } from "./format/events.js";
+import { blameFile, sessionTrailer, whyLine, type LineOrigin } from "./blame.js";
 import { writeFork } from "./fork.js";
 import { renderSessionHtml } from "./html.js";
 import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
@@ -73,6 +75,11 @@ usage:
   agit replay <id> [--at N] [--state]  step through events; --at jumps to N,
                                        --state prints file state at that point
   agit replay <id> --timeline          print the whole timeline, one line per event
+  agit blame <file>                    which session and event last wrote each
+                                       line (structured edits only, SPEC 5.7)
+  agit why <file>:<line>               that, plus the prompt that asked for it
+  agit link [<session-id> | <file>]    print the Agit-Session commit trailer
+                                       (default: the newest session)
   agit grep <pattern>                  search every imported session; --type
                                        narrows to one event type, --path matches
                                        file paths only, --regex, -s case-sensitive
@@ -212,6 +219,12 @@ async function main(): Promise<number> {
       return cmdVerify(opts);
     case "replay":
       return cmdReplay(opts);
+    case "blame":
+      return cmdBlame(opts);
+    case "why":
+      return cmdWhy(opts);
+    case "link":
+      return cmdLink(opts);
     case "grep":
       return cmdGrep(opts);
     case "export":
@@ -1079,6 +1092,184 @@ function cmdPr(opts: Opts): number {
  * anyway. Sessions that fail to parse are reported to stderr and skipped:
  * one corrupt store entry must not hide every other session's matches.
  */
+/** Every readable session in the store, for the folds that span all of them. */
+function allSessions(opts: Opts): { id: string; events: AgitEvent[] }[] {
+  const out: { id: string; events: AgitEvent[] }[] = [];
+  for (const id of listSessionIds(opts.dir)) {
+    try {
+      out.push({ id, events: readSessionEvents(opts.dir, id) });
+    } catch {
+      console.error(`skipping ${id.slice(0, 8)}: unreadable (agit verify it)`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Match a file argument against the paths the logs recorded.
+ *
+ * Logs hold absolute paths from whatever machine ran the session, so an exact
+ * match is the exception. A suffix match on path segments is what actually
+ * works, and an ambiguous one is reported rather than picked.
+ */
+function resolveLoggedPath(
+  sessions: { id: string; events: AgitEvent[] }[],
+  arg: string,
+): { path: string } | { error: string } {
+  const wanted = arg.replace(/\\/g, "/").replace(/^\.\//, "");
+  const seen = new Set<string>();
+  for (const { events } of sessions) {
+    for (const e of events) {
+      if (e.type !== "file.diff" && e.type !== "file.delete") continue;
+      const p = (e.payload as { path?: Json }).path;
+      if (typeof p === "string") seen.add(p);
+    }
+  }
+  if (seen.has(arg)) return { path: arg };
+  const matches = [...seen].filter((p) => {
+    const norm = p.replace(/\\/g, "/");
+    return norm === wanted || norm.endsWith("/" + wanted);
+  });
+  if (matches.length === 1) return { path: matches[0]! };
+  if (matches.length === 0) {
+    return { error: `no structured edit to ${JSON.stringify(arg)} in any imported session` };
+  }
+  return { error: `${JSON.stringify(arg)} is ambiguous:\n  ${matches.join("\n  ")}` };
+}
+
+function cmdBlame(opts: Opts): number {
+  const arg = opts.args[0];
+  if (!arg) {
+    console.error("usage: agit blame <file>");
+    return 2;
+  }
+  const sessions = allSessions(opts);
+  const found = resolveLoggedPath(sessions, arg);
+  if ("error" in found) {
+    console.error(found.error);
+    return 1;
+  }
+  const res = blameFile(sessions, found.path);
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(res, null, 2) + "\n");
+    return 0;
+  }
+  const width = 8;
+  console.log(`${found.path}  (${res.sessions.length} session(s) touched it)`);
+  for (const l of res.lines) {
+    const who =
+      l.session === null
+        ? "(no structured edit)".padEnd(width + 7)
+        : `${l.session.slice(0, width).padEnd(width)} @${String(l.seq).padStart(5)}`;
+    console.log(`${who}  ${String(l.line).padStart(4)}  ${clipLine(l.text, 120)}`);
+  }
+  if (res.divergedAtSeq !== undefined) {
+    console.log(
+      `\nblame stops at seq ${res.divergedAtSeq} of ${res.divergedIn?.slice(0, 8)}: that edit did not fit the content agit held,\n` +
+        "which is proof the file changed outside structured edits (SPEC §5.7). Lines above are still verified;\n" +
+        "everything after is not knowable from the log, so it is not guessed at.",
+    );
+  }
+  console.log("(lines a shell command wrote left no structured edit and carry no attribution)");
+  return 0;
+}
+
+function cmdWhy(opts: Opts): number {
+  const arg = opts.args[0];
+  const m = /^(.*):(\d+)$/.exec(arg ?? "");
+  if (!m) {
+    console.error("usage: agit why <file>:<line>");
+    return 2;
+  }
+  const [, fileArg, lineArg] = m;
+  const sessions = allSessions(opts);
+  const found = resolveLoggedPath(sessions, fileArg!);
+  if ("error" in found) {
+    console.error(found.error);
+    return 1;
+  }
+  const res = blameFile(sessions, found.path);
+  const origin: LineOrigin | undefined = res.lines[Number(lineArg) - 1];
+  if (origin === undefined) {
+    console.error(`${found.path} has ${res.lines.length} line(s); ${lineArg} is outside it`);
+    return 1;
+  }
+  if (origin.session === null) {
+    console.log(`${found.path}:${lineArg}  ${clipLine(origin.text, 120)}`);
+    console.log("\n(no structured edit) — nothing in the store wrote this line; a shell command may have.");
+    return 0;
+  }
+  const events = sessions.find((s) => s.id === origin.session)!.events;
+  const why = whyLine(events, origin);
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(why, null, 2) + "\n");
+    return 0;
+  }
+  console.log(`${found.path}:${origin.line}  ${clipLine(origin.text, 120)}`);
+  console.log(`\nwritten by  ${origin.session} @${origin.seq}  (${origin.ts})`);
+  console.log(`\nasked for by:\n${indentClip(why.prompt ?? "(no user message before it)", 20)}`);
+  if (why.rationale) console.log(`\nthe assistant said:\n${indentClip(why.rationale, 12)}`);
+  console.log(
+    `\nverify it: agit verify ${origin.session} && agit replay ${origin.session} --at ${origin.seq}`,
+  );
+  return 0;
+}
+
+/**
+ * The commit trailer that anchors a commit to a session.
+ *
+ * Printed rather than written: which commit this belongs to, and whether it
+ * goes through a hook or an editor, is the user's business — and a verb that
+ * silently rewrites a commit message is a surprise nobody asked for.
+ */
+function cmdLink(opts: Opts): number {
+  const sessions = allSessions(opts);
+  if (sessions.length === 0) {
+    console.error("no sessions imported yet (agit import <file>)");
+    return 1;
+  }
+  let chosen: { id: string; events: AgitEvent[] } | undefined;
+  const target = opts.args[0];
+  // A bare argument is a session id if one matches, and a file otherwise.
+  const asSession = (() => {
+    if (target === undefined) return undefined;
+    try {
+      return resolveSessionId(opts.dir, target);
+    } catch {
+      return undefined;
+    }
+  })();
+  if (asSession !== undefined) {
+    chosen = sessions.find((s) => s.id === asSession);
+  } else if (target !== undefined) {
+    // A file: the session whose latest structured edit to it is most recent.
+    const found = resolveLoggedPath(sessions, target);
+    if ("error" in found) {
+      console.error(found.error);
+      return 1;
+    }
+    let best: { s: { id: string; events: AgitEvent[] }; ts: string } | null = null;
+    for (const s of sessions) {
+      for (const e of s.events) {
+        if (e.type !== "file.diff" && e.type !== "file.delete") continue;
+        if ((e.payload as { path?: Json }).path !== found.path) continue;
+        if (best === null || e.ts > best.ts) best = { s, ts: e.ts };
+      }
+    }
+    chosen = best?.s;
+  } else {
+    // Nothing named: the most recently started session in the store.
+    chosen = [...sessions].sort((a, b) => a.events[0]!.ts.localeCompare(b.events[0]!.ts)).pop();
+  }
+  if (chosen === undefined) {
+    console.error("no session matched; name a session id or a file one of them edited");
+    return 1;
+  }
+  const last = chosen.events[chosen.events.length - 1]!;
+  console.log(sessionTrailer(chosen.id, last.seq, last.hash));
+  return 0;
+}
+
 function cmdGrep(opts: Opts): number {
   const pattern = opts.args[0];
   if (pattern === undefined || pattern === "") {
