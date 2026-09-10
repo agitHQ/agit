@@ -180,8 +180,11 @@ Said plainly:
   inject input into a live interactive session, and agit does not pretend
   otherwise; if a runtime ever offers a real path, it gets wired
   per-adapter, opt-in.
-- **No TLS in the relay.** It binds loopback by default; exposing it to a
-  network means putting a TLS proxy or tunnel in front (PROTOCOL.md).
+- **The relay speaks TLS only when you give it a certificate.**
+  `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
+  HTTP on loopback, and binding beyond loopback without TLS is refused
+  unless `--insecure` is passed. A tunnel or TLS-terminating proxy remains a
+  perfectly good alternative (PROTOCOL.md).
 - **Merge is file-level and needs git.** Three-way content merge only:
   deletions in a fork are invisible (the fork tree records what the log
   could reconstruct, so absence means untouched, not deleted), renames are

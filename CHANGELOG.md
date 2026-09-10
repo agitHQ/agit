@@ -7,6 +7,12 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Relay TLS** (#87): `agit relay --cert <pem> --key <pem>` serves HTTPS,
+  and share links carry `https://` accordingly. Binding beyond loopback
+  without TLS is refused unless `--insecure` says the network is trusted,
+  and that case prints what it costs rather than passing silently. The
+  whole `127.0.0.0/8` block counts as loopback, so a relay on `127.0.0.2`
+  is treated as privately as the default.
 - **Codex renames are recorded** (#86) as a `file.delete` of the old path
   plus a `file.diff` create of the new one — what the filesystem saw, and
   the same shape the OpenClaw adapter emits, so no view needs a
