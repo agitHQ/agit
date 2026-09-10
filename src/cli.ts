@@ -1588,7 +1588,11 @@ function cmdExportHtml(opts: Opts): number {
 
 /** Loopback needs no transport security; anything else carries share traffic over a network. */
 function isLoopback(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — binding
+  // 127.0.0.2 is as private as the default, and calling it "beyond loopback"
+  // in the warning would be untrue.
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return host === "localhost" || host === "::1" || host === "[::1]";
 }
 
 async function cmdRelay(opts: Opts): Promise<number> {

@@ -144,6 +144,13 @@ describe("relay TLS (#87)", () => {
     expect(r.out).toContain("--insecure");
   });
 
+  it("treats the whole 127.0.0.0/8 block as loopback, not just 127.0.0.1", () => {
+    // 127.0.0.2 is as private as the default; refusing it would be wrong, and
+    // warning "bound beyond loopback" after --insecure would be untrue.
+    const r = agit(["relay", "--host", "127.0.0.2", "--port", "-1"]);
+    expect(r.out).not.toContain("refusing to bind");
+  });
+
   it("still allows loopback without TLS, which is the default posture", () => {
     // Nothing to refuse here: the check is about traffic crossing a network.
     // Proven by the flag parse getting far enough to hit the port instead.
