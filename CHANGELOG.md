@@ -5,6 +5,23 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## 0.7.0 — 2026-09-10
 
+### Fixed
+
+- **The live follower's idle fast path could skip the tamper check entirely.**
+  While sharing live, the follower recomputes a rolling digest over everything
+  already streamed, so a rewrite of already-sent history stops the share —
+  the guarantee PROTOCOL.md makes. The fast path returned early when `stat()`
+  reported the same size and mtime, and filesystems report mtime at a coarse
+  resolution (two seconds on FAT, and enough on a Windows CI runner). Two
+  writes inside one tick therefore left both unchanged, so a same-size
+  in-place rewrite took the fast path out and the digest never ran. CI caught
+  it; it was read as flake first, and it was not. The gate now applies only to
+  a file whose mtime has been stable longer than the coarsest resolution in
+  common use, so a quiet session keeps its one-syscall tick and a file changed
+  moments ago is re-read. An mtime deliberately backdated still takes the fast
+  path, which is left alone deliberately: anyone able to rewrite the file and
+  backdate it already controls the log being read.
+
 ### Changed
 
 - The test suite's timeout ceiling is 30s rather than vitest's 5s default.
