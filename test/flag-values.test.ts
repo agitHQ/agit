@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,24 @@ const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const DEMO = join(ROOT, "fixtures", "claude-code", "demo.jsonl");
 const SIMPLE = join(ROOT, "fixtures", "claude-code", "simple.jsonl");
+
+/**
+ * The body of parseArgs, read from source.
+ *
+ * The two tests below derive what they check from this rather than from a
+ * hand-written list of flags. A list passes happily while a flag added later
+ * goes unguarded, which is exactly how `--store` shipped reading `argv[++i]`
+ * on the same day this rule arrived.
+ */
+function parseArgsSource(): string {
+  const src = readFileSync(join(ROOT, "src", "cli.ts"), "utf8");
+  return src.slice(src.indexOf("function parseArgs("), src.indexOf("async function main("));
+}
+
+/** Every flag the parser reads a value for, taken from its `need(...)` calls. */
+function valueFlags(): string[] {
+  return [...new Set([...parseArgsSource().matchAll(/need\("(--[a-z-]+)"\)/g)].map((m) => m[1]!))];
+}
 
 /** Run from `cwd` so the "silently fell back to the current directory" case is visible. */
 function agit(args: string[], cwd?: string): { code: number; out: string } {
@@ -45,36 +63,26 @@ describe("a flag with a missing value is an error, not a silent fallback", () =>
     expect(r.out).toContain("--dir");
   });
 
-  it("covers the flags that take a value, not just --dir", () => {
-    for (const flag of [
-      "--sort",
-      "--runtime",
-      "--project",
-      "--by",
-      "--type",
-      "--out",
-      "--into",
-      "--summary",
-      "--base",
-      "--price",
-      "--session",
-      "--redact-patterns",
-      "--host",
-      "--relay",
-      "--cert",
-      "--key",
-      "--trusted-proxy",
-      "--at",
-      "--ttl",
-      "--port",
-      "--since",
-      "--older-than",
-    ]) {
+  it("has no flag left reading argv directly", () => {
+    const raw = [
+      ...parseArgsSource().matchAll(/a === "(--[a-z-]+)"\)\s*(?:opts\.\w+(?:\.push)?\(?\s*=?\s*)?argv\[/g),
+    ].map((m) => m[1]!);
+    expect(raw, `these flags still read argv[++i]: ${raw.join(", ")}`).toEqual([]);
+  });
+
+  it("rejects a bare value for every flag the parser reads a value for", () => {
+    // Derived rather than listed, so adding a flag adds a test. This replaced
+    // a hand-written list: the list passed happily while `--store` shipped
+    // unguarded, because nobody remembered to add the new flag to it.
+    const flags = valueFlags();
+    expect(flags.length).toBeGreaterThan(20);
+    expect(flags).toContain("--store");
+    for (const flag of flags) {
       const r = agit(["ls", flag]);
       expect(r.code, `${flag} should be rejected`).toBe(2);
       expect(r.out, `${flag} should be named`).toContain(`${flag} needs a value`);
     }
-  });
+  }, 60_000);
 
   it("suggests the way to pass a value that looks like a flag", () => {
     const r = agit(["ls", "--sort"]);

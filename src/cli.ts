@@ -381,7 +381,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--insecure") opts.insecure = true;
     else if (a === "--detach") opts.detach = true;
     else if (a === "--force") opts.force = true;
-    else if (a === "--store") opts.store = argv[++i];
+    else if (a === "--store") opts.store = need("--store");
     else if (a === "--otel") opts.otel = true;
     else if (a === "--atif") opts.atif = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
