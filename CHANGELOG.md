@@ -110,6 +110,21 @@ Notable changes to agit. The event format itself is versioned separately
   as well as the source bytes, so re-importing without the flag is the cure
   for an accidental `--no-redact` rather than a no-op that reports success.
 
+### Fixed
+
+- `agit stats` printed only three of its eight columns. Resolving conflicts
+  across the merge queue, a de-duplication pass matched object properties by
+  shape and removed most of the table's column headers; the tests asserted
+  only that the first column appeared, so a silently narrower report passed
+  them. The header is restored, and the tests now assert the whole row for
+  `stats` and for `show --by-model`, with and without a rate table.
+- `agit stats --by model` and `--by day` key each row off a cost event, so a
+  session that records none (every Codex session today) reached the total
+  while appearing in no row, leaving the columns quietly failing to add up.
+  Those sessions are now counted and reported, with a pointer to `--by
+  runtime`, which can always place them. `--json` carries the count as
+  `unattributedSessions`.
+
 ## 0.5.0 — 2026-09-09
 
 ### Changed

@@ -89,6 +89,20 @@ describe("computeStats (#67)", () => {
     expect(row(rows, "gpt").inputTokens).toBe(50);
   });
 
+  it("counts the sessions that model and day grouping cannot place", () => {
+    // Session c records no cost event, so there is no model and no day to key
+    // it by — but the totals still count it. Report the gap.
+    const byModel = computeStats(ALL, { by: "model" });
+    expect(byModel.unattributedSessions).toBe(1);
+    expect(byModel.totals.sessions).toBe(3);
+    expect(byModel.rows.reduce((n, r) => n + r.sessions, 0)).toBe(2);
+
+    expect(computeStats(ALL, { by: "day" }).unattributedSessions).toBe(1);
+    // Runtime and project can always place a session, so nothing is left over.
+    expect(computeStats(ALL, { by: "runtime" }).unattributedSessions).toBe(0);
+    expect(computeStats(ALL, { by: "project" }).unattributedSessions).toBe(0);
+  });
+
   it("groups by runtime and by project", () => {
     const byRuntime = computeStats(ALL, { by: "runtime" }).rows;
     expect(row(byRuntime, "claude-code").sessions).toBe(1);
@@ -201,5 +215,58 @@ describe("agit stats through the CLI", () => {
     expect(doc.by).toBe("runtime");
     expect(doc.rows.some((x) => x.costRecorded === false)).toBe(true);
     expect(doc.totals.sessions).toBe(2);
+  });
+
+  // A conflict resolution once deleted most of this header and every test
+  // still passed, because they only ever asserted the first column. Assert
+  // the whole row: a missing column is a silently narrower report.
+  it("prints every column, in order", () => {
+    const r = agit(["stats", "--by", "runtime", "--dir", store]);
+    expect(r.code).toBe(0);
+    const header = r.out.split("\n").find((l) => l.includes("RUNTIME"));
+    expect(header?.split(/\s{2,}/).map((s) => s.trim())).toEqual([
+      "RUNTIME",
+      "CALLS",
+      "IN",
+      "OUT",
+      "CACHE READ",
+      "CACHE WRITE",
+      "SESSIONS",
+      "FILES",
+    ]);
+  });
+
+  it("adds a COST column, and only that, when a rate table is supplied", () => {
+    const rates = join(store, "cols.json");
+    writeFileSync(rates, JSON.stringify({ currency: "EUR", models: {} }), "utf8");
+    const r = agit(["stats", "--by", "runtime", "--price", rates, "--dir", store]);
+    const header = r.out.split("\n").find((l) => l.includes("RUNTIME"));
+    expect(header?.split(/\s{2,}/).map((s) => s.trim())).toEqual([
+      "RUNTIME",
+      "CALLS",
+      "IN",
+      "OUT",
+      "CACHE READ",
+      "CACHE WRITE",
+      "SESSIONS",
+      "FILES",
+      "COST (EUR)",
+    ]);
+  });
+
+  // Grouping by model keys off the cost event, so the Codex session lands in
+  // no row while the total still counts it. The rows not summing to the total
+  // is honest, but only if the report says why.
+  it("says when sessions reach the total but no row", () => {
+    const r = agit(["stats", "--by", "model", "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("1 session(s) recorded no cost events");
+    expect(r.out).toContain("in no model row");
+    expect(r.out).toContain("--by runtime");
+  });
+
+  it("stays quiet about it when every session lands in a row", () => {
+    const r = agit(["stats", "--by", "runtime", "--dir", store]);
+    expect(r.out).not.toContain("recorded no cost events, so they appear");
   });
 });

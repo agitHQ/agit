@@ -1869,8 +1869,13 @@ function cmdStats(opts: Opts): number {
 
   const head: Record<string, string> = {
     key: by.toUpperCase(),
+    calls: "CALLS",
+    in: "IN",
+    out: "OUT",
+    cacheRead: "CACHE READ",
     cacheWrite: "CACHE WRITE",
     sessions: "SESSIONS",
+    files: "FILES",
     ...(prices ? { cost: prices.currency ? `COST (${prices.currency})` : "COST" } : {}),
   };
   const cols = Object.keys(head);
@@ -1887,6 +1892,16 @@ function cmdStats(opts: Opts): number {
   // A dash is not a zero: say which it is.
   if (res.rows.some((r) => !r.costRecorded)) {
     console.log("\n— = no cost events recorded for that group; its token counts are unknown, not zero.");
+  }
+  // Grouping by model or day keys off the cost event, so a session that
+  // records none is in the total and in no row. Say so, or the columns look
+  // like they simply fail to add up.
+  if (res.unattributedSessions > 0) {
+    const n = res.unattributedSessions;
+    console.log(
+      `\n${n} session(s) recorded no cost events, so they appear in the total but in no ${by} row.` +
+        `\nUse --by runtime or --by project to see them.`,
+    );
   }
   const unpriced = res.totals.unpriced ?? [];
   if (unpriced.length > 0) {

@@ -90,6 +90,21 @@ describe("show --by-model on a Codex session (#56)", () => {
   });
 });
 
+describe("show --by-model table", () => {
+  it("prints every column, in order", () => {
+    const store = storeWith(DEMO);
+    const r = agit(["show", "demo", "--by-model", "--dir", store]);
+    expect(r.code).toBe(0);
+    const header = r.out.split("\n").find((l) => l.includes("MODEL"));
+    expect(
+      header
+        ?.trim()
+        .split(/\s{2,}/)
+        .map((s) => s.trim()),
+    ).toEqual(["MODEL", "CALLS", "IN", "OUT", "CACHE READ", "FILES"]);
+  });
+});
+
 describe("export-html --at and size (#59)", () => {
   it("exports a prefix, names it, and reports the size", () => {
     const store = storeWith(DEMO);

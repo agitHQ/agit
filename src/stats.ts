@@ -46,6 +46,13 @@ export interface StatsResult {
   totals: StatsRow;
   /** Sessions excluded by --since. */
   skippedBySince: number;
+  /**
+   * Sessions counted in `totals` that appear in no row. Grouping by model or
+   * by day can only place a session that recorded a cost event, so a runtime
+   * that records none (Codex today) leaves the rows summing to less than the
+   * total. Saying so beats letting the reader find the gap themselves.
+   */
+  unattributedSessions: number;
   currency?: string;
 }
 
@@ -161,6 +168,7 @@ export function computeStats(
 
   const cutoff = opts.sinceMs === undefined ? null : (opts.now ?? Date.now()) - opts.sinceMs;
   let skippedBySince = 0;
+  let unattributedSessions = 0;
 
   for (const { id, events } of sessions) {
     if (events.length === 0) continue;
@@ -226,8 +234,14 @@ export function computeStats(
     }
 
     // A session with no cost events still belongs somewhere, and saying "no
-    // cost recorded" is the honest version of a row of zeros.
-    if (!sawCost && sessionKey !== null) bucket(sessionKey);
+    // cost recorded" is the honest version of a row of zeros. Grouping by
+    // model or by day has no such somewhere — the key comes off the cost
+    // event itself — so the session lands in no row and only the total sees
+    // it. Count those rather than let the columns quietly fail to add up.
+    if (!sawCost) {
+      if (sessionKey !== null) bucket(sessionKey);
+      else unattributedSessions++;
+    }
   }
 
   const toRow = (b: Bucket): StatsRow => ({
@@ -286,5 +300,11 @@ export function computeStats(
     }
   }
 
-  return { rows, totals, skippedBySince, ...(opts.prices ? { currency: opts.prices.currency } : {}) };
+  return {
+    rows,
+    totals,
+    skippedBySince,
+    unattributedSessions,
+    ...(opts.prices ? { currency: opts.prices.currency } : {}),
+  };
 }
