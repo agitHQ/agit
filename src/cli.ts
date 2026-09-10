@@ -104,17 +104,13 @@ usage:
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
   agit import --latest                 import the most recently written session
-  agit ls [--tag T] [--runtime R]       list imported sessions; --sort orders by
-         [--project P] [--sort KEY]     started (default), events, files or id
+  agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
+         [--project P] [--sort KEY]    started (default), events, files or id
   agit tag <id> <tag>                  tag a session (--remove <tag> to drop one)
   agit note <id> "<text>"              attach a note (--clear to remove it)
   agit rm <id> [--yes]                 delete a session from the store
   agit gc --older-than 90d             delete sessions older than a cutoff;
          [--keep-tagged] [--yes]       --keep-tagged spares anything tagged
-  agit ls                              list imported sessions
-  agit rm <id> --yes                   permanently delete a session from the store
-  agit stats [--by model|runtime]      usage across every imported session —
-             [--json]                 tokens and API calls, grouped
   agit show <id> [--by-model]          summarize one session; --by-model splits
                                        cost and file edits per model
   agit verify <id | events.jsonl>      validate the hash chain — of a stored
@@ -138,17 +134,19 @@ usage:
                                        file paths only, --regex, -s case-sensitive
   agit export <id> [--json]            write the event log to stdout — JSONL, or a
                                        JSON array with --json — for other tools
+  agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
+  agit export <id> --atif              an ATIF trajectory (Harbor's format)
   agit export-html <id> [--out FILE]   write a self-contained, offline HTML session
                        [--at N]        viewer; --at N exports the prefix up to event N
   agit fork <id> --at N [--out DIR]    branch at event N: reconstruct the file tree
                                        (hash-verified) and write a context seed
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
                                        its parent from the fork point
-  agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back
-                       [--session <id>] (base = fork point), via git merge-file;
-                                       --session honours the fork's deletions
-                                       (base = fork point). Uses git merge-file
-                                       when present, a built-in merge otherwise
+  agit merge <fork-dir> [--into DIR]   three-way merge a fork's files back,
+                     [--session <id>]  base = the fork point; --session honours
+                                       the deletions the fork recorded. Uses git
+                                       merge-file when present, a built-in merge
+                                       otherwise (--no-git forces the built-in)
   agit pr <id> [--at N] [--out DIR]    handoff bundle for a colleague: log +
                                        meta + verified tree + context seed
   agit share <id | native.jsonl>       share a session through a relay — live if it
@@ -161,8 +159,6 @@ usage:
   agit push <id> [--relay <url>]       publish a session to a relay and exit
   agit pull <link | share-id>          adopt a published session over HTTP,
                                        verifying the chain before storing
-  agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
-  agit export <id> --atif              an ATIF trajectory (Harbor / OpenHands)
   agit sign <id> --key <file>          sign this head with an ed25519 key, so
                                        the log proves who recorded it
   agit mcp                             serve the store to an agent over MCP
@@ -194,15 +190,11 @@ options:
   --store <dir>    relay: where to persist shares (default: memory only)
   --force          push: publish again even if this session was pushed before
   --since <dur>    import --all / stats: window of 7d / 24h / 30m
-  --yes, -y        rm: confirm the deletion (there is no interactive prompt)
   --by <group>     stats: day (default), model, runtime or project
   --price <file>   stats: a local rate table; without it no money is shown
   --json           ls/show/verify/grep/diff/export: machine-readable output
                    instead of the human-formatted default (grep: one JSON
                    object per line, NDJSON; everything else: one document)
-  --no-redact      import: store the session verbatim, skipping credential
-                   scanning (SPEC §8) — meta.json remembers this
-  --allow-unredacted  share/pr: proceed anyway on a --no-redact session
   --type <t>       grep: only this event type (tool.call, file.diff, ...)
   --path           grep: match file.diff paths instead of rendered lines
   --regex          grep: treat the pattern as a regular expression
