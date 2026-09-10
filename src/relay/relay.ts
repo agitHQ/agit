@@ -20,6 +20,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createTlsServer } from "node:https";
 import { SHARE_PAGE } from "./page.js";
+import { openRelayStore, type RelayStore } from "./store.js";
 
 export interface RelayOptions {
   port?: number;
@@ -35,6 +36,13 @@ export interface RelayOptions {
    * same routes, same tokens, same SSE framing.
    */
   tls?: { cert: string; key: string };
+  /**
+   * Directory to persist shares in (#72). Without it the relay is in-memory
+   * and a restart drops everything, which is the difference between a relay
+   * and a remote. The writer token is stored here, so the directory is a
+   * credential store — see src/relay/store.ts.
+   */
+  store?: string;
 }
 
 interface Share {
@@ -90,6 +98,29 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
   const defaultTtl = opts.defaultTtlMs ?? 24 * 3600_000;
   const maxTtl = opts.maxTtlMs ?? 7 * 24 * 3600_000;
   const trustedProxies = new Set(opts.trustedProxies ?? []);
+  const store: RelayStore | null = opts.store === undefined ? null : openRelayStore(opts.store);
+
+  // Rehydrate before serving, so a restart is invisible to anyone holding a
+  // link. Viewers and inboxes are per-connection and deliberately not stored.
+  if (store !== null) {
+    for (const { meta, events } of store.load(Date.now())) {
+      shares.set(meta.id, {
+        id: meta.id,
+        writerToken: meta.writerToken,
+        createdAt: meta.createdAt,
+        ttlMs: meta.ttlMs,
+        ended: meta.ended,
+        events,
+        // Recompute from what actually loaded rather than trusting the
+        // recorded head: a truncated events file must not claim a head it
+        // cannot serve, or the next push would extend a chain with a hole.
+        lastHash: lastHashOf(events),
+        viewers: new Set(),
+        inboxes: new Set(),
+        msgTimes: new Map(),
+      });
+    }
+  }
 
   const reaper = setInterval(() => {
     const now = Date.now();
@@ -98,6 +129,7 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
       if (now - s.createdAt > s.ttlMs + grace) {
         for (const res of [...s.viewers, ...s.inboxes]) res.end();
         shares.delete(id);
+        store?.remove(id);
       }
     }
   }, 60_000);
@@ -149,6 +181,14 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         msgTimes: new Map(),
       };
       shares.set(share.id, share);
+      store?.create({
+        id: share.id,
+        writerToken: share.writerToken,
+        createdAt: share.createdAt,
+        ttlMs: share.ttlMs,
+        ended: false,
+        lastHash: null,
+      });
       return json(res, 201, {
         shareId: share.id,
         writerToken: share.writerToken,
@@ -193,6 +233,7 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
       if (verb === "end" && req.method === "POST") {
         if (!authed(req, share)) return json(res, 401, { error: "bad writer token" });
         share.ended = true;
+        store?.setEnded(share.id, true);
         broadcast(share, "info", infoOf(share));
         return json(res, 200, { ended: true });
       }
@@ -285,9 +326,29 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
     }
     for (const { line } of parsed) share.events.push(line);
     share.lastHash = last;
+    // Written before the broadcast: a viewer must never see an event that
+    // would vanish on restart.
+    store?.append(
+      share.id,
+      parsed.map((x) => x.line),
+      last,
+    );
     for (const v of share.viewers) {
       for (let i = share.events.length - parsed.length; i < share.events.length; i++)
         sendEvent(v, i, share.events[i]!);
+    }
+    return null;
+  }
+
+  /** The hash of the last parseable event, so a truncated file cannot claim a head. */
+  function lastHashOf(events: string[]): string | null {
+    for (let i = events.length - 1; i >= 0; i--) {
+      try {
+        const h = (JSON.parse(events[i]!) as { hash?: unknown }).hash;
+        if (typeof h === "string") return h;
+      } catch {
+        continue;
+      }
     }
     return null;
   }
