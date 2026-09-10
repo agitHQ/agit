@@ -1215,6 +1215,15 @@ interface LsRow {
   durationMs?: number;
   events?: number;
   files?: number;
+  /**
+   * Always true, and a field rather than documentation on purpose: `files`
+   * counts only paths a structured edit touched (SPEC 5.7), so a shell-driven
+   * change is invisible to it. The table prints that caveat under every
+   * listing; a consumer reading the JSON has to be able to render the same
+   * thing, and a constant it must acknowledge is harder to overlook than a
+   * sentence in a doc it will not read.
+   */
+  filesAreLowerBound?: boolean;
   runtime?: string;
   /** Tags attached locally; they annotate a session and never touch its chain. */
   tags: string[];
@@ -1274,6 +1283,7 @@ function cmdLs(opts: Opts): number {
       durationMs: Date.parse(last.ts) - Date.parse(first.ts),
       events: events.length,
       files: fileStateAt(events).size,
+      filesAreLowerBound: true,
       runtime: runtimeRaw,
       tags,
     };
@@ -1402,6 +1412,11 @@ function cmdShow(opts: Opts): number {
           tools: Object.fromEntries(tools),
           usage: { ...u, models: [...u.models] },
           files: [...fileStateAt(events).values()],
+          // The list holds every file a structured edit touched, which is not
+          // every file the session changed (SPEC 5.7). `show` says so in prose
+          // above the table; this is the same statement in a form a script can
+          // read.
+          filesAreLowerBound: true,
           redactions: meta?.redactions ?? {},
           // {} alone is ambiguous: a --no-redact import (#79) also leaves it
           // empty, so a consumer gating on redaction needs this to tell
@@ -1486,24 +1501,41 @@ function cmdShow(opts: Opts): number {
   return 0;
 }
 
-/** usageByModel's ModelUsage carries a Set — swap it for an array/count so JSON.stringify needs no help. */
+/**
+ * usageByModel's ModelUsage carries a Set, so swap it for an array before
+ * JSON.stringify quietly renders it as {}.
+ *
+ * Each row also states whether any cost was recorded for it. Without that,
+ * a session whose runtime logs no cost events at all (Codex today) emits
+ * `apiMessages: 0, inputTokens: 0, ...`, which reads as "this model was free"
+ * rather than "nothing was recorded" — and those are opposite claims. The
+ * table refuses to print that row for exactly this reason; the JSON should
+ * not quietly assert what the table declines to.
+ *
+ * `costRecorded` is the same field name `stats --json` uses for the same
+ * distinction, so a consumer learns the convention once.
+ */
 function usageByModelJson(events: AgitEvent[]): {
   model: string;
+  costRecorded: boolean;
   apiMessages: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
   files: string[];
+  filesAreLowerBound: boolean;
 }[] {
   return usageByModel(events).map((r) => ({
     model: r.model,
+    costRecorded: r.apiMessages > 0,
     apiMessages: r.apiMessages,
     inputTokens: r.inputTokens,
     outputTokens: r.outputTokens,
     cacheReadInputTokens: r.cacheReadInputTokens,
     cacheCreationInputTokens: r.cacheCreationInputTokens,
     files: [...r.files],
+    filesAreLowerBound: true,
   }));
 }
 

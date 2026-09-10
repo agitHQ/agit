@@ -33,6 +33,12 @@ export interface StatsRow {
   apiCalls: number;
   sessions: number;
   files: number;
+  /**
+   * Always true. `files` counts only paths a structured edit touched (SPEC
+   * 5.7); the table prints that caveat under every report, and a consumer
+   * reading the JSON needs the same statement in a form it can act on.
+   */
+  filesAreLowerBound: boolean;
   /** False when nothing in this group recorded a cost event; the token columns are then unknown, not zero. */
   costRecorded: boolean;
   /** Populated only when a rate table covers every model in the group. */
@@ -253,6 +259,7 @@ export function computeStats(
     apiCalls: b.apiCalls,
     sessions: b.sessions.size,
     files: b.files.size,
+    filesAreLowerBound: true,
     costRecorded: b.apiCalls > 0,
     // A group holding any unpriced model gets no cost at all. A partial sum
     // presented as the cost of the row would understate it, and understating
