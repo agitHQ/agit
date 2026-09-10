@@ -7,6 +7,28 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit push`, `agit pull`, `relay --store` and `share --detach`** (#72)
+  turn the relay into a remote without changing the local model: a remote is
+  just a relay someone else runs. `push` publishes a verified session and
+  exits with a link; `pull` adopts it elsewhere over HTTP. Pull is the same
+  code path as adopting a `pr` bundle, deliberately — the chain is verified
+  before anything is stored and the events land byte for byte with the hashes
+  the origin published, so **nothing here trusts the relay**: one altered byte
+  produces a log that fails verification, which is the whole reason the chain
+  exists, and there is a test that alters one. Pushing twice reuses the same
+  link unless `--force` says otherwise, and pushing a session that does not
+  verify is refused like every other publishing verb. `agit relay --store
+  <dir>` persists shares across a restart as two flat files each, metadata
+  rewritten whole and events appended — not a database, because agit has no
+  runtime dependencies and `node:sqlite` needs Node 22 against a package that
+  supports 20. The TTL survives a restart rather than resetting, a corrupt
+  share costs one share instead of the relay's startup, and the head is
+  recomputed from the events that actually loaded so a truncated file cannot
+  claim a head it can no longer serve. That directory holds writer tokens and
+  is documented as a credential store. `share --static --detach` prints the
+  link and exits for CI; detaching from a *live* share is refused, since
+  nothing would be left tailing the log.
+
 - **`agit export --otel` and `agit export --atif`** (#69) turn a verified
   session into the shapes other tools already ingest. `--otel` emits OTLP/JSON
   spans following the OpenTelemetry GenAI semantic conventions — an

@@ -254,3 +254,37 @@ export async function readSse(
     }
   }
 }
+
+/**
+ * Fetch a published share's whole event log (#72, `agit pull`).
+ *
+ * No writer token: this is the same bytes any viewer can download from the
+ * share page, which is the point — pulling is adopting what was published,
+ * not privileged access to it. The caller verifies the chain before storing
+ * anything, exactly as adopting a `pr` bundle does.
+ */
+export async function fetchShareLog(relayUrl: string, shareId: string): Promise<string[]> {
+  const res = await relayFetch(relayUrl, `/api/shares/${shareId}/events.jsonl`);
+  if (res.status === 404) {
+    throw new Error(`no such share on ${relayUrl} — it may have expired (shares have a TTL)`);
+  }
+  if (!res.ok) throw new Error(`relay refused the log: ${res.status} ${await res.text()}`);
+  return (await res.text()).split("\n").filter((l) => l.trim() !== "");
+}
+
+/**
+ * Split a share link into the relay it lives on and the id on it, so
+ * `agit pull <url>` needs no second flag. A bare id falls back to --relay.
+ */
+export function parseShareRef(ref: string, fallbackRelay: string): { relay: string; shareId: string } {
+  if (/^https?:\/\//i.test(ref)) {
+    const u = new URL(ref);
+    const m = /^\/s\/([A-Za-z0-9_-]{10,})\/?$/.exec(u.pathname);
+    if (!m) throw new Error(`that URL is not a share link (expected .../s/<id>): ${ref}`);
+    return { relay: u.origin, shareId: m[1]! };
+  }
+  if (!/^[A-Za-z0-9_-]{10,}$/.test(ref)) {
+    throw new Error(`not a share id or link: ${JSON.stringify(ref)}`);
+  }
+  return { relay: fallbackRelay, shareId: ref };
+}

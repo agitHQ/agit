@@ -66,7 +66,7 @@ src/redact.ts            credential redaction, runs at import before hashing
 src/store.ts             the .agit/ directory
 src/state.ts             folds over event logs (file state, usage, rendering)
 src/share.ts             live follower + relay client
-src/relay/               the relay server and the share page
+src/relay/               the relay server, the share page, and optional disk storage
 src/mcp.ts               read-only MCP server over the store (stdio JSON-RPC)
 src/sign.ts              ed25519 signatures over a head (SPEC §12)
 src/interop.ts           OpenTelemetry GenAI and ATIF exports
