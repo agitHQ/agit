@@ -30,6 +30,13 @@ npm run build     # tsc -> dist/
 npm test          # vitest — same suite CI runs
 ```
 
+`npm ci` installs straight from the lockfile and needs no flags. Changing a
+dependency is where it gets awkward: npm 10's resolver crashes with `Cannot
+read properties of null (reading 'edgesOut')` on vitest's optional peers,
+which peer-depend back on vitest. Regenerate the lock with `npm install
+--legacy-peer-deps` when that happens. The flag only affects generating the
+lock — installing from it, which is all CI ever does, stays plain `npm ci`.
+
 Try it on your own data (Claude Code writes session logs under
 `~/.claude/projects/<project-slug>/*.jsonl`):
 

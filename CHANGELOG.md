@@ -129,6 +129,17 @@ Notable changes to agit. The event format itself is versioned separately
   runtime`, which can always place them. `--json` carries the count as
   `unattributedSessions`.
 
+### Changed
+
+- vitest 3 → 4.1.11, clearing the two open advisories against `@vitest/mocker`
+  (path traversal via redirect mocks, GHSA; no fix exists on the 3.x line).
+  agit ships zero runtime dependencies, so no released version was ever
+  affected and the suite uses no mocking at all — but a dev toolchain with a
+  known hole is still one worth closing. vitest 4 accepts Node
+  `^20 || ^22 || >=24`, so `engines: ">=20"` is unchanged and CI still tests
+  Node 20 and 22 on Linux and Windows. The build moved off esbuild and rollup
+  onto rolldown as a result, which is vitest's own change, not a config one.
+
 ## 0.5.0 — 2026-09-09
 
 ### Changed
