@@ -53,6 +53,17 @@ export interface SessionMeta {
   source: { path: string; sha256: string; bytes: number; records: number };
   skipped: Record<string, number>;
   redactions: Record<string, number>;
+  /**
+   * A base tree supplied at import (#85), so `show` can say where an update's
+   * verification came from. Absent means no base was given.
+   */
+  base?: { kind: "git" | "dir"; ref: string; cwd: string | null; files: number };
+  /**
+   * What redaction did at import (#70). Optional: logs imported before this
+   * existed simply do not carry it, and absence means "the built-in patterns
+   * ran", which is what those imports did.
+   */
+  redaction?: { enabled: boolean; customPatterns: number; allowRules: number };
   eventCount: number;
   headHash: string;
 }

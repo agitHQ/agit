@@ -33,6 +33,7 @@
 import { createHash } from "node:crypto";
 import { applyUpdate, parseApplyPatch, type PatchHunk } from "./openclaw-patch.js";
 import type { DraftEvent, Json } from "../format/events.js";
+import { seedKnownFromBase } from "../base.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "openclaw";
@@ -374,6 +375,9 @@ export const openclawAdapter: Adapter = {
         if (!sessionId && typeof record.id === "string") {
           sessionId = record.id;
           cwd = typeof record.cwd === "string" ? record.cwd : undefined;
+          // Candidate pre-edit content for files that predate the session
+          // (#85), keyed the way OpenClaw reports paths.
+          seedKnownFromBase(known, opts?.base, cwd ?? null);
           sessionFormatVersion = typeof record.version === "number" ? record.version : null;
         }
         continue;

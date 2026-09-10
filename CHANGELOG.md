@@ -3,6 +3,113 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`agit blame`, `agit why` and `agit link`** (#65) connect a line of code
+  back to the moment it was written. `blame` attributes each line to the
+  session and event that last wrote it; `why <file>:<line>` adds the prompt
+  that asked for it and what the assistant said. Attribution stops at the
+  first edit whose content contradicts what the log holds — proof the file
+  changed outside structured edits (SPEC §5.7) — and says so rather than
+  guessing past it. `link` prints an `Agit-Session: <id>@<seq> <hash>`
+  trailer for a commit message, naming a real hash-chained event that
+  `agit verify` can check.
+- **`agit import --base <git-ref | dir>`** (#85) closes the verification
+  window on files that predate a session. Codex and OpenClaw record a diff
+  rather than the file when they update one, so agit could only verify an
+  update to a file the session itself created; pointing `--base` at the
+  commit or tree the session started from supplies the missing content, and
+  the update verifies against real bytes. A base that does not match is
+  refused, not assumed: the diff simply fails to apply and the edit is
+  skipped and counted exactly as before, so a wrong `--base` can never
+  produce a hash. `meta.json` records which base was used, and `show`
+  reports it.
+- **Redaction controls** (#70): custom patterns and an allowlist in
+  `.agit/redact.json` (or `--redact-patterns <file>`), and `agit redact
+  --check <log>` as a dry run that says what would be removed — event type,
+  field path, which pattern matched, and a truncated preview rather than the
+  secret itself — before anything is stored. After redacting, agit re-scans
+  its own output and reports anything still matching, so the count can never
+  read lower than the truth. The allowlist is what keeps a documented example
+  key or a test fixture from being rewritten on import. `meta.json` records
+  the posture a session was imported under — whether redaction ran, and how
+  many custom patterns and allow rules were in force.
+- **Store management** (#71): `agit tag`, `agit note`, `agit gc
+  --older-than`, and `ls --tag/--runtime/--project/--sort`. Tags and notes
+  live in a sidecar beside the session, never in the chain — they annotate a
+  session without changing what it says. `ls` now shows the shortest unique
+  id prefix, git-style, and filters apply to `--json` as well as the table so
+  a script narrowing by tag sees the same set a human would. `rm` and `gc`
+  say what will be lost first — event counts, tags, and the fact that a fork
+  of a deleted session loses its merge base — then ask; `--yes` answers for
+  a script, and with no terminal to ask on they refuse rather than assume.
+- **`agit merge --session <id>` honours deletions** (#88). Schema v2 gave the
+  log `file.delete`; a fork's own session now tells `merge` which files it
+  removed after the fork point, so a deletion survives the round trip instead
+  of reading as "untouched". Each one is checked against the fork point's
+  content hash before anything is removed, a path the target changed since
+  the fork is kept and reported as a conflict rather than deleted, and
+  without `--session` the old rule stands: absence means untouched.
+- **`agit merge` no longer needs git on PATH** (#89). A built-in line-based
+  three-way merge takes over when `git merge-file` is missing, and `--no-git`
+  forces it. git is still preferred where present, because its output is what
+  everyone's expectations are calibrated against — and the two are now pinned
+  to each other by differential tests covering conflicts, deletions,
+  adjacent edits, a missing trailing newline and CRLF files.
+- **Relay TLS** (#87): `agit relay --cert <pem> --key <pem>` serves HTTPS,
+  and share links carry `https://` accordingly. Binding beyond loopback
+  without TLS is refused unless `--insecure` says the network is trusted,
+  and that case prints what it costs rather than passing silently. The
+  whole `127.0.0.0/8` block counts as loopback, so a relay on `127.0.0.2`
+  is treated as privately as the default.
+- **Codex renames are recorded** (#86) as a `file.delete` of the old path
+  plus a `file.diff` create of the new one — what the filesystem saw, and
+  the same shape the OpenClaw adapter emits, so no view needs a
+  Codex-specific case. A rename whose base content is not in the log is
+  still skipped and counted rather than hashed on a guess.
+- **`agit rm <id> --yes`** (#71) removes a session from the store. The flag
+  is the confirmation — there is no prompt a script could answer — and
+  without it `rm` reports what it would delete, including when the log is
+  too corrupt to summarize, and exits 2. It does not attempt to find forks
+  that point at the session: they live in whatever directory `--out` named
+  and there is no registry to scan, so the command says so instead of
+  guessing.
+- **`agit stats`** (#67) — usage across the whole store, grouped `--by
+  model` (default) or `--by runtime`, with `--json`. A fold over the `cost`
+  events sessions already carry: no new event types, nothing recorded that
+  was not already there. A runtime that logs no cost events shows as zeros
+  rather than being dropped, and unreadable sessions are counted and named
+  in the output instead of silently narrowing the totals. `--since` windows
+  the scan and `--price <file>` costs it against a rate table you supply —
+  agit ships no prices, and a model missing from the table is left uncosted
+  rather than counted as free, which also leaves the total uncosted rather
+  than presenting a partial sum as a whole one. Groups by `day` (default),
+  `model`, `runtime` or `project`.
+- **`--json` on every read verb** (#73): `ls`, `show`, `show --by-model`,
+  `verify`, `grep` and `diff` emit the structures the code already builds —
+  full session ids, ISO timestamps and real numbers rather than the padded
+  display strings — so what a script reads is what the table renders.
+  `grep --json` is NDJSON, one hit per line; everything else is one
+  document. Exit codes and human output are unchanged, and errors stay on
+  stderr so a pipe into `jq` is always clean. `ls --json` reports
+  `readable` rather than a `corrupt` flag that never consults the hash
+  chain, and carries the reason when a log cannot be read; `show --json`
+  reports `redactionSkipped`, because a `--no-redact` import also leaves
+  `redactions` empty and a consumer gating on it needs to tell the two
+  apart.
+- **`agit import --no-redact`** (#70) stores a session verbatim when the
+  credential patterns would mangle content you need intact. `meta.json`
+  records that the scan was skipped, and `share`, `pr` and `export-html`
+  refuse such a session until `--allow-unredacted` says you have read it
+  yourself. Adopting a bundle from a `--no-redact` origin says so plainly —
+  the recipient has the least context and adoption is the one moment agit
+  speaks to them. Re-importing the same file with the mode flipped now
+  actually re-imports: the "already imported" check compares redaction mode
+  as well as the source bytes, so re-importing without the flag is the cure
+  for an accidental `--no-redact` rather than a no-op that reports success.
+
 ## 0.5.0 — 2026-09-09
 
 ### Changed

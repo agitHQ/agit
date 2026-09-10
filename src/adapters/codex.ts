@@ -39,6 +39,7 @@
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
 import { applyUnifiedDiff } from "../patch.js";
+import { seedKnownFromBase } from "../base.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 export const CODEX_ADAPTER_NAME = "codex";
@@ -128,6 +129,9 @@ export const codexAdapter: Adapter = {
 
       if (rec.type === "session_meta") {
         sessionId = typeof p.id === "string" ? p.id : null;
+        // A supplied base becomes candidate pre-edit content, keyed the way
+        // Codex reports paths. Nothing here reaches the log by itself.
+        seedKnownFromBase(known, opts?.base, str(p.cwd));
         startDraft = {
           ts,
           type: "session.start",
@@ -410,9 +414,42 @@ function emitFileDiffs(args: {
         continue;
       }
       if (typeof c.move_path === "string" && c.move_path !== "") {
-        // A rename is two paths and no agit event says so; recording only the
-        // content change would silently lose the move.
-        skip("patch_apply:update(rename)");
+        // Before schema v2 a rename had no honest encoding: two paths, and no
+        // event type that said one became the other. file.delete gives it one,
+        // so record what the filesystem saw -- the old path gone, the new one
+        // created with the updated content. Same shape the OpenClaw adapter
+        // emits (#52), so views need no Codex-specific case.
+        const movedFrom = known.get(path);
+        if (movedFrom === undefined) {
+          // The file predates the session, so neither path has a base we could
+          // hash. Skipping keeps the rule: never assert an unverified hash.
+          skip("patch_apply:update(rename, base content not in log)");
+          continue;
+        }
+        let moved: string;
+        try {
+          moved = applyUnifiedDiff(movedFrom, c.unified_diff);
+        } catch {
+          skip("patch_apply:update(rename, diff did not apply)");
+          continue;
+        }
+        body.push({
+          ts,
+          type: "file.delete",
+          payload: {
+            path,
+            beforeHash: sha256Utf8(movedFrom),
+            toolUseId: callId,
+            source: "apply_patch",
+          },
+        });
+        body.push({
+          ts,
+          type: "file.diff",
+          payload: fileDiffPayload(c.move_path, null, moved, null, callId, "apply_patch"),
+        });
+        known.delete(path);
+        known.set(c.move_path, moved);
         continue;
       }
       const before = known.get(path);
