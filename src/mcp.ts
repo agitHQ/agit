@@ -462,17 +462,33 @@ function doGrep(dir: string, params: Record<string, unknown>): unknown {
  *
  * Exported so the protocol can be tested without a subprocess and a pipe.
  */
-export function handleMessage(dir: string, msg: JsonRpcRequest): JsonRpcResponse | null {
-  const id = msg.id ?? null;
-  const isNotification = msg.id === undefined;
+export function handleMessage(dir: string, msg: unknown): JsonRpcResponse | null {
+  // Anything that is not a request object is an Invalid Request, and gets an
+  // error with a null id. It is not a notification: both lack an id, but only
+  // one of them earns silence, and treating them alike left a client that
+  // sent a malformed request (or a batch, which MCP 2025-06-18 dropped)
+  // waiting for a reply that was never coming.
+  if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+    return err(null, INVALID_REQUEST, "expected a JSON-RPC 2.0 request object");
+  }
+  const req = msg as JsonRpcRequest;
+  const id = req.id ?? null;
+  const isNotification = req.id === undefined;
 
-  if (msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
-    return isNotification ? null : err(id, INVALID_REQUEST, "expected a JSON-RPC 2.0 request with a method");
+  if (req.jsonrpc !== "2.0" || typeof req.method !== "string") {
+    return err(id, INVALID_REQUEST, "expected a JSON-RPC 2.0 request with a method");
   }
 
-  switch (msg.method) {
+  // A notification carries no id and gets no reply, whatever it asks for.
+  // Deciding that here rather than per method is the point: only two methods
+  // used to honour it, so a notification to `ping`, `tools/list`, `initialize`
+  // or `tools/call` was answered with an unsolicited `id: null` response, and
+  // a strict client treats an unexpected response as a protocol error.
+  if (isNotification) return null;
+
+  switch (req.method) {
     case "initialize": {
-      const asked = str((msg.params as Record<string, unknown> | undefined)?.protocolVersion);
+      const asked = str((req.params as Record<string, unknown> | undefined)?.protocolVersion);
       const version =
         asked !== undefined && KNOWN_PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSION;
       return ok(id, {
@@ -487,10 +503,12 @@ export function handleMessage(dir: string, msg: JsonRpcRequest): JsonRpcResponse
       });
     }
 
-    // Notifications carry no id and get no response, per JSON-RPC.
+    // Reached only when a client sent one of these WITH an id, which some do.
+    // It asked for a response by carrying an id, so it gets one rather than
+    // hanging; the id-less form returned above.
     case "notifications/initialized":
     case "notifications/cancelled":
-      return null;
+      return ok(id, {});
 
     case "ping":
       return ok(id, {});
@@ -499,7 +517,7 @@ export function handleMessage(dir: string, msg: JsonRpcRequest): JsonRpcResponse
       return ok(id, { tools: TOOLS });
 
     case "tools/call": {
-      const p = (msg.params ?? {}) as Record<string, unknown>;
+      const p = (req.params ?? {}) as Record<string, unknown>;
       const name = str(p.name);
       const args = (p.arguments ?? {}) as Record<string, unknown>;
       if (name === undefined) return err(id, INVALID_PARAMS, "tools/call requires a tool name");
@@ -532,7 +550,7 @@ export function handleMessage(dir: string, msg: JsonRpcRequest): JsonRpcResponse
     default:
       return isNotification
         ? null
-        : err(id, METHOD_NOT_FOUND, `unknown method ${JSON.stringify(msg.method)}`);
+        : err(id, METHOD_NOT_FOUND, `unknown method ${JSON.stringify(req.method)}`);
   }
 }
 
@@ -555,15 +573,22 @@ export function setServerVersion(v: string): void {
  * stdout carries protocol frames and nothing else — anything human goes to
  * stderr — because a stray log line on stdout is a parse error at the client.
  */
+/** A message's id when it has a usable one, for error replies. Never throws. */
+function idOf(msg: unknown): string | number | null {
+  if (msg === null || typeof msg !== "object" || Array.isArray(msg)) return null;
+  const v = (msg as { id?: unknown }).id;
+  return typeof v === "string" || typeof v === "number" ? v : null;
+}
+
 export function serveMcp(dir: string, input: Readable, output: Writable): Promise<void> {
   return new Promise((resolve) => {
     const rl = createInterface({ input, crlfDelay: Infinity });
     rl.on("line", (line) => {
       const text = line.trim();
       if (text === "") return;
-      let msg: JsonRpcRequest;
+      let msg: unknown;
       try {
-        msg = JSON.parse(text) as JsonRpcRequest;
+        msg = JSON.parse(text);
       } catch {
         output.write(JSON.stringify(err(null, PARSE_ERROR, "invalid JSON")) + "\n");
         return;
@@ -572,8 +597,11 @@ export function serveMcp(dir: string, input: Readable, output: Writable): Promis
       try {
         response = handleMessage(dir, msg);
       } catch (e) {
-        // A bug here must not take the server down mid-conversation.
-        response = err(msg.id ?? null, INVALID_REQUEST, e instanceof Error ? e.message : String(e));
+        // A bug here must not take the server down mid-conversation. Reading
+        // the id has to be safe for that to hold: `msg.id` on a line that
+        // parsed to `null` threw inside this very handler, which killed the
+        // process and left every later request on the pipe unanswered.
+        response = err(idOf(msg), INVALID_REQUEST, e instanceof Error ? e.message : String(e));
       }
       if (response !== null) output.write(JSON.stringify(response) + "\n");
     });

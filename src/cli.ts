@@ -40,6 +40,7 @@ import {
   type RedactionConfig,
   type RedactionCounts,
 } from "./redact.js";
+import { toAtif, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
 import { startRelay } from "./relay/relay.js";
@@ -49,6 +50,8 @@ import {
   getShareHead,
   openInbox,
   pushEvents,
+  fetchShareLog,
+  parseShareRef,
   SessionFollower,
   StabilityError,
   type ShareInfo,
@@ -96,7 +99,6 @@ usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
                        [--base REF]    adopt an agit log or pr bundle as-is;
                                        --base seeds pre-session file content
-                                       adopt an agit log or pr bundle as-is
   agit import <session> --no-redact    skip credential scanning; share/pr later
                                        refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
@@ -155,6 +157,12 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
+  agit relay --store <dir>             persist shares, so a restart keeps them
+  agit push <id> [--relay <url>]       publish a session to a relay and exit
+  agit pull <link | share-id>          adopt a published session over HTTP,
+                                       verifying the chain before storing
+  agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
+  agit export <id> --atif              an ATIF trajectory (Harbor / OpenHands)
   agit sign <id> --key <file>          sign this head with an ed25519 key, so
                                        the log proves who recorded it
   agit mcp                             serve the store to an agent over MCP
@@ -182,6 +190,9 @@ options:
   --session <id>   merge: the fork's own imported session, so deletions it
                    recorded after the fork point are honoured
   --no-git         merge: use the built-in three-way merge, not git merge-file
+  --detach         share --static: print the link and exit, holding nothing open
+  --store <dir>    relay: where to persist shares (default: memory only)
+  --force          push: publish again even if this session was pushed before
   --since <dur>    import --all / stats: window of 7d / 24h / 30m
   --yes, -y        rm: confirm the deletion (there is no interactive prompt)
   --by <group>     stats: day (default), model, runtime or project
@@ -250,6 +261,11 @@ interface Opts {
   noGit: boolean;
   cert?: string;
   key?: string;
+  otel?: boolean;
+  atif?: boolean;
+  detach?: boolean;
+  force?: boolean;
+  store?: string;
   insecure: boolean;
   args: string[];
 }
@@ -281,62 +297,93 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
   };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a === "--dir") opts.dir = resolve(argv[++i] ?? ".");
-    else if (a === "--at") opts.at = Number(argv[++i]);
+    const raw = argv[i]!;
+    // `--flag=value` is the way to pass a value that itself looks like a flag,
+    // which `need` below otherwise refuses.
+    const eq = raw.startsWith("--") ? raw.indexOf("=") : -1;
+    const a = eq === -1 ? raw : raw.slice(0, eq);
+    const inline = eq === -1 ? undefined : raw.slice(eq + 1);
+
+    /**
+     * The value belonging to a flag.
+     *
+     * Reading `argv[++i]` directly meant a flag with no value silently
+     * swallowed whatever came next, including the next flag. `agit ls --dir`
+     * with the path missing resolved to the current directory and listed a
+     * different store, exit 0, with nothing to say the flag had been ignored:
+     * the shape a script hits when the variable holding the path is empty.
+     */
+    const need = (flag: string): string => {
+      if (inline !== undefined) return inline;
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith("--")) {
+        console.error(`${flag} needs a value${v === undefined ? "" : `, but the next argument is ${v}`}`);
+        console.error(`pass one as \`${flag} <value>\`, or \`${flag}=<value>\` if the value starts with --`);
+        process.exit(2);
+      }
+      i++;
+      return v;
+    };
+    if (a === "--dir") opts.dir = resolve(need("--dir"));
+    else if (a === "--at") opts.at = Number(need("--at"));
     else if (a === "--timeline") opts.timeline = true;
     else if (a === "--state") opts.state = true;
     else if (a === "--by-model") opts.byModel = true;
     else if (a === "--all") opts.all = true;
     else if (a === "--latest") opts.latest = true;
     else if (a === "--since") {
-      const ms = parseSince(argv[++i] ?? "");
+      const ms = parseSince(need(a));
       if (ms === null) {
         console.error("--since takes a duration like 7d, 24h or 30m");
         process.exit(2);
       }
       opts.since = ms;
-    } else if (a === "--type") opts.grepType = argv[++i];
+    } else if (a === "--type") opts.grepType = need("--type");
     else if (a === "--path") opts.grepPath = true;
     else if (a === "--regex") opts.grepRegex = true;
     else if (a === "-s") opts.caseSensitive = true;
     else if (a === "-i") opts.caseSensitive = false;
-    else if (a === "--out") opts.out = argv[++i];
-    else if (a === "--into") opts.into = argv[++i];
-    else if (a === "--summary") opts.summary = argv[++i];
+    else if (a === "--out") opts.out = need("--out");
+    else if (a === "--into") opts.into = need("--into");
+    else if (a === "--summary") opts.summary = need("--summary");
     else if (a === "--json") opts.json = true;
     else if (a === "--yes" || a === "-y") opts.yes = true;
     else if (a === "--no-redact") opts.noRedact = true;
     else if (a === "--allow-unredacted") opts.allowUnredacted = true;
-    else if (a === "--relay") opts.relay = argv[++i] ?? opts.relay;
-    else if (a === "--ttl") opts.ttlHours = Number(argv[++i]);
+    else if (a === "--relay") opts.relay = need("--relay");
+    else if (a === "--ttl") opts.ttlHours = Number(need("--ttl"));
     else if (a === "--static") opts.static = true;
     else if (a === "--resume") opts.resume = true;
-    else if (a === "--port") opts.port = Number(argv[++i]);
-    else if (a === "--host") opts.host = argv[++i];
-    else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
-    else if (a === "--base") opts.base = argv[++i];
-    else if (a === "--redact-patterns") opts.redactPatterns = argv[++i];
+    else if (a === "--port") opts.port = Number(need("--port"));
+    else if (a === "--host") opts.host = need("--host");
+    else if (a === "--trusted-proxy") opts.trustedProxies.push(need("--trusted-proxy"));
+    else if (a === "--base") opts.base = need("--base");
+    else if (a === "--redact-patterns") opts.redactPatterns = need("--redact-patterns");
     else if (a === "--check") opts.check = true;
-    else if (a === "--tag") opts.tag = argv[++i];
-    else if (a === "--runtime") opts.runtime = argv[++i];
-    else if (a === "--project") opts.project = argv[++i];
-    else if (a === "--sort") opts.sort = argv[++i];
+    else if (a === "--tag") opts.tag = need("--tag");
+    else if (a === "--runtime") opts.runtime = need("--runtime");
+    else if (a === "--project") opts.project = need("--project");
+    else if (a === "--sort") opts.sort = need("--sort");
     else if (a === "--keep-tagged") opts.keepTagged = true;
     else if (a === "--older-than") {
-      const ms = parseSince(argv[++i] ?? "");
+      const ms = parseSince(need(a));
       if (ms === null) {
         console.error("--older-than takes a duration like 90d, 24h or 30m");
         process.exit(2);
       }
       opts.olderThan = ms;
-    } else if (a === "--by") opts.by = argv[++i];
-    else if (a === "--price") opts.price = argv[++i];
-    else if (a === "--session") opts.session = argv[++i];
+    } else if (a === "--by") opts.by = need("--by");
+    else if (a === "--price") opts.price = need("--price");
+    else if (a === "--session") opts.session = need("--session");
     else if (a === "--no-git") opts.noGit = true;
-    else if (a === "--cert") opts.cert = argv[++i];
-    else if (a === "--key") opts.key = argv[++i];
+    else if (a === "--cert") opts.cert = need("--cert");
+    else if (a === "--key") opts.key = need("--key");
     else if (a === "--insecure") opts.insecure = true;
+    else if (a === "--detach") opts.detach = true;
+    else if (a === "--force") opts.force = true;
+    else if (a === "--store") opts.store = argv[++i];
+    else if (a === "--otel") opts.otel = true;
+    else if (a === "--atif") opts.atif = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -394,6 +441,10 @@ async function main(): Promise<number> {
       return cmdPr(opts);
     case "share":
       return cmdShare(opts);
+    case "push":
+      return cmdPush(opts);
+    case "pull":
+      return cmdPull(opts);
     case "relay":
       return cmdRelay(opts);
     case "mcp":
@@ -1652,12 +1703,25 @@ function cmdVerify(opts: Opts): number {
     at: s.at,
     ...verifySignature(s, head),
   }));
+  // A signature that does not match is a failure even when the chain is
+  // intact: something claimed this head and the claim does not hold.
+  const signaturesOk = sigs.every((s) => s.ok);
+  const verdict = res.ok && signaturesOk;
 
   if (opts.json) {
     process.stdout.write(
       JSON.stringify(
         {
           ...res,
+          // `ok` is the same answer the exit code gives. It used to carry the
+          // chain result alone, so a session with an intact chain and a
+          // signature that did not match reported `ok: true` and exited 1 --
+          // opposite answers in one run, from the one verb whose entire job is
+          // to say whether this can be trusted. The two halves stay available
+          // under their own names.
+          ok: verdict,
+          chainOk: res.ok,
+          signaturesOk,
           hasMeta: meta !== undefined,
           signed: sigs.length > 0,
           signatures: sigs,
@@ -1666,19 +1730,19 @@ function cmdVerify(opts: Opts): number {
         2,
       ) + "\n",
     );
-    // A signature that does not match is a failure even when the chain is
-    // intact: something claimed this head and the claim does not hold.
-    return res.ok && sigs.every((s) => s.ok) ? 0 : 1;
+    return verdict ? 0 : 1;
   }
   if (res.ok) {
-    console.log(
-      `ok: ${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`,
-    );
+    const chain = `${res.events} events, chain intact${meta ? ", matches meta.json head" : " (no meta.json — truncation not checkable)"}`;
+    // Leading with "ok:" on a run that exits 1 reads as a pass, whatever the
+    // line under it says.
+    if (signaturesOk) console.log(`ok: ${chain}`);
+    else console.log(`NOT OK: ${chain}, but a signature does not match:`);
     for (const line of signatureLines(meta, meta?.sessionId ?? "")) {
       if (line.startsWith("SIGNATURE DOES NOT MATCH")) console.error(line);
       else console.log(line);
     }
-    return sigs.every((s) => s.ok) ? 0 : 1;
+    return verdict ? 0 : 1;
   }
   console.error(`BROKEN at seq ${res.firstBroken!.seq}: ${res.firstBroken!.reason}`);
   console.error(`${res.events} events verified before the break`);
@@ -2337,6 +2401,23 @@ function cmdGrep(opts: Opts): number {
 function cmdExport(opts: Opts): number {
   const id = requireId(opts);
   if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
+
+  // Interop views (#69). Both are folds over the events already stored, and
+  // both refuse an unverified session for the same reason `export` does:
+  // feeding an eval or a dashboard from a log agit cannot vouch for is how a
+  // verified pipeline quietly stops being one.
+  if (opts.otel || opts.atif) {
+    if (opts.otel && opts.atif) {
+      console.error("--otel and --atif are different formats; pick one");
+      return 2;
+    }
+    const events = readSessionEvents(opts.dir, id);
+    const meta = readSessionMeta(opts.dir, id);
+    const doc = opts.otel ? toOtlpJson(events, meta) : toAtif(events, meta);
+    process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
+    return 0;
+  }
+
   if (opts.json) {
     process.stdout.write(JSON.stringify(readSessionEvents(opts.dir, id), null, 2) + "\n");
   } else {
@@ -2465,6 +2546,7 @@ async function cmdRelay(opts: Opts): Promise<number> {
       host: opts.host,
       trustedProxies: opts.trustedProxies,
       tls,
+      ...(opts.store !== undefined ? { store: resolve(opts.store) } : {}),
     });
   } catch (err) {
     if ((err as { code?: string }).code === "EADDRINUSE") {
@@ -2490,6 +2572,137 @@ async function cmdRelay(opts: Opts): Promise<number> {
   await waitForSigint();
   await handle.close();
   return 0;
+}
+
+/**
+ * `agit push <id>` (#72) — publish a stored session to a relay and exit.
+ *
+ * `pr` + `adopt` is the manual version of this. A remote is just a relay
+ * someone else runs, so push is a static share that ends immediately: the
+ * whole verified chain, published once, no process left holding it open.
+ *
+ * The share is ended rather than left live because there is nothing more
+ * coming. An ended share still serves its log until the TTL expires, which is
+ * what `agit pull` reads.
+ */
+async function cmdPush(opts: Opts): Promise<number> {
+  const target = opts.args[0];
+  if (target === undefined) {
+    console.error("usage: agit push <session-id> [--relay <url>]");
+    return 2;
+  }
+  const id = resolveSessionId(opts.dir, target);
+  // Publishing verbs share one bar: never publish a chain agit cannot vouch
+  // for, and never publish a log nobody scanned without being told to.
+  if (!refuseUnlessVerified(opts, id, "push", "nothing was published")) return 1;
+  if (!refuseUnredacted(opts, id, "push")) return 1;
+
+  const previous = readRemote(opts.dir, id);
+  if (previous !== null && !opts.force) {
+    console.log(`${id} was already pushed to:
+
+  ${previous.viewUrl}
+`);
+    console.log("that link serves the log until the relay's TTL expires.");
+    console.log("push it again with --force to publish a fresh copy at a new link.");
+    return 0;
+  }
+
+  const events = readSessionEvents(opts.dir, id);
+  const ttlMs =
+    opts.ttlHours !== undefined && Number.isFinite(opts.ttlHours) ? opts.ttlHours * 3600_000 : undefined;
+  const share = await createShare(opts.relay, ttlMs);
+  await pushAll(opts.relay, share, events);
+  await endShare(opts.relay, share);
+  writeRemote(opts.dir, id, { shareId: share.shareId, viewUrl: share.viewUrl, relay: opts.relay });
+
+  console.log(`pushed ${id} — ${events.length} events
+`);
+  console.log(`  ${share.viewUrl}
+`);
+  console.log(
+    `  anyone with the link can read it until ${new Date(Date.now() + share.ttlMs).toLocaleString()}.`,
+  );
+  console.log(`  pull it elsewhere with:  agit pull ${share.viewUrl}`);
+  return 0;
+}
+
+/**
+ * `agit pull <share-link | share-id>` (#72) — adopt a published log over HTTP.
+ *
+ * This is `adopt` with a download in front of it, and deliberately the same
+ * code path: the chain is verified before anything is stored, a broken log is
+ * refused, and the events land byte for byte so their hashes stay the ones
+ * the origin published. Nothing here trusts the relay — a relay that altered
+ * a single byte produces a log that fails verification, which is the whole
+ * reason the chain exists.
+ */
+async function cmdPull(opts: Opts): Promise<number> {
+  const ref = opts.args[0];
+  if (ref === undefined) {
+    console.error("usage: agit pull <share-link | share-id> [--relay <url>]");
+    return 2;
+  }
+  let where: { relay: string; shareId: string };
+  try {
+    where = parseShareRef(ref, opts.relay);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+
+  let lines: string[];
+  try {
+    lines = await fetchShareLog(where.relay, where.shareId);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
+  if (lines.length === 0) {
+    console.error("that share has no events yet — nothing to pull");
+    return 1;
+  }
+
+  console.log(`pulled ${lines.length} events from ${where.relay}`);
+  // A path that does not exist: adoptBundle only uses it to look for a
+  // sibling meta.json, and a downloaded share has none. The origin's meta is
+  // not published with the log, so the adopted session carries none either —
+  // which is honest, rather than inventing one here.
+  const fakePath = join(opts.dir, `${where.shareId}.pulled.jsonl`);
+  return adoptBundle(opts, fakePath, lines.join("\n") + "\n");
+}
+
+/** Where a session was last pushed, so pushing twice does not scatter links. */
+interface RemoteRecord {
+  shareId: string;
+  viewUrl: string;
+  relay: string;
+}
+
+function remotesPath(dir: string): string {
+  return join(agitDir(dir), "remotes.json");
+}
+
+function readRemote(dir: string, id: string): RemoteRecord | null {
+  try {
+    const all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
+    return all[id] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
+  let all: Record<string, RemoteRecord> = {};
+  try {
+    all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
+  } catch {
+    /* first push */
+  }
+  all[id] = rec;
+  // Sorted: this file is read by humans and diffed by git often enough.
+  const sorted = Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b)));
+  writeFileSync(remotesPath(dir), JSON.stringify(sorted, null, 2) + "\n", "utf8");
 }
 
 async function cmdShare(opts: Opts): Promise<number> {
@@ -2524,7 +2737,6 @@ async function cmdShare(opts: Opts): Promise<number> {
       // the one that must never publish a chain that does not verify — or
       // one that was imported with --no-redact and never scanned.
       if (!refuseUnlessVerified(opts, id, "share", "nothing was published")) return 1;
-      if (!refuseUnredacted(opts, id, "share")) return 1;
       if (!refuseUnredacted(opts, id, "share")) return 1;
       staticEvents = readSessionEvents(opts.dir, id);
     }
@@ -2570,10 +2782,26 @@ async function cmdShare(opts: Opts): Promise<number> {
       : "  Ctrl+C ends the share.\n",
   );
 
+  // A live share is a tail: detaching would end it the moment the process
+  // exits, so it is refused rather than silently producing a one-event link.
+  if (opts.detach && nativePath !== null) {
+    console.error("--detach cannot follow a live session: nothing would be left tailing the log.");
+    console.error("Pass --static to publish what exists now and exit, or drop --detach to keep following.");
+    await endShare(opts.relay, share);
+    return 2;
+  }
+
   const inbox = openShareInbox(opts.relay, share);
   try {
     if (staticEvents) {
       await pushAll(opts.relay, share, staticEvents);
+      if (opts.detach) {
+        // Print the link and go (#72). CI and scripts want the URL, not a
+        // process that lives forever to keep a viewer count updated.
+        console.log(`pushed ${staticEvents.length} events (static, detached).`);
+        console.log("the relay serves this link until its TTL expires; nothing is holding it open here.");
+        return 0;
+      }
       console.log(`pushed ${staticEvents.length} events (static). Holding the share open…`);
       await waitForSigint();
       return 0;

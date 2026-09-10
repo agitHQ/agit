@@ -66,7 +66,19 @@ bits, base64url).
 
 ## Lifecycle and limits
 
-Shares live in relay memory only; nothing touches disk. A share dies at its
+Shares live in relay memory by default; nothing touches disk. `agit relay
+--store <dir>` changes that: two flat files per share, metadata rewritten
+whole and events appended, so a restart keeps every link working. Not a
+database — agit has no runtime dependencies, and `node:sqlite` needs Node 22
+while the package supports 20. The TTL applies across a restart: a share that
+expired while the relay was down stays gone rather than getting a fresh
+clock, and the head is recomputed from the events that actually loaded so a
+truncated file cannot claim a head it can no longer serve. **The writer token
+is stored in that directory**, so it is a credential store: created `0700`,
+files `0600`, and on Windows those modes are advisory, which makes the choice
+of directory the real protection.
+
+A share dies at its
 TTL (default 24h, max 7d), or 30 minutes after the sharer ends it (grace for
 late viewers), whichever comes first — the reaper closes all streams and
 drops the buffer. Defaults: 200 concurrent shares, 200k events per share,
