@@ -116,6 +116,88 @@ export function deleteSession(base: string, id: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Session notes: tags and a free-text note, in a sidecar beside the log.
+//
+// Deliberately NOT in the chain. The chain is what the runtime did; a tag is
+// what you thought about it afterwards, and it changes. Putting it in the log
+// would either break the hashes or require rewriting history to rename a tag.
+// The sidecar is ordinary mutable JSON, ignored by verify.
+
+export interface SessionNotes {
+  tags: string[];
+  note: string | null;
+}
+
+const EMPTY_NOTES: SessionNotes = { tags: [], note: null };
+
+export function notesPath(base: string, id: string): string {
+  return join(sessionDir(base, id), "notes.json");
+}
+
+export function readNotes(base: string, id: string): SessionNotes {
+  const p = notesPath(base, id);
+  if (!existsSync(p)) return { ...EMPTY_NOTES };
+  try {
+    const doc = JSON.parse(readFileSync(p, "utf8")) as Partial<SessionNotes>;
+    return {
+      tags: Array.isArray(doc.tags) ? doc.tags.filter((t): t is string => typeof t === "string") : [],
+      note: typeof doc.note === "string" ? doc.note : null,
+    };
+  } catch {
+    // A corrupt sidecar must never take down a read verb; the log is the data.
+    return { ...EMPTY_NOTES };
+  }
+}
+
+export function writeNotes(base: string, id: string, notes: SessionNotes): void {
+  assertSafeSessionId(id);
+  writeFileSync(notesPath(base, id), JSON.stringify(notes, null, 2) + "\n", "utf8");
+}
+
+/** Tags are a set, kept sorted so the sidecar does not churn. */
+export function addTag(base: string, id: string, tag: string): SessionNotes {
+  const notes = readNotes(base, id);
+  const next = { ...notes, tags: [...new Set([...notes.tags, tag])].sort() };
+  writeNotes(base, id, next);
+  return next;
+}
+
+export function removeTag(base: string, id: string, tag: string): SessionNotes {
+  const notes = readNotes(base, id);
+  const next = { ...notes, tags: notes.tags.filter((t) => t !== tag) };
+  writeNotes(base, id, next);
+  return next;
+}
+
+export function setNote(base: string, id: string, note: string | null): SessionNotes {
+  const next = { ...readNotes(base, id), note };
+  writeNotes(base, id, next);
+  return next;
+}
+
+/** Remove a session's directory entirely. The caller is responsible for confirming. */
+export function removeSession(base: string, id: string): void {
+  assertSafeSessionId(id);
+  const dir = sessionDir(base, id);
+  if (!existsSync(dir)) throw new Error(`no such session directory: ${dir}`);
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * The shortest prefix of each id that is unique in the store, git-style.
+ * Never shorter than 4, so ids stay recognisable when the store is small.
+ */
+export function minimalPrefixes(ids: string[], min = 4): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const id of ids) {
+    let n = Math.min(min, id.length);
+    while (n < id.length && ids.some((other) => other !== id && other.slice(0, n) === id.slice(0, n))) n++;
+    out.set(id, id.slice(0, n));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Share state: credentials for resuming a live share after a crash. Written
 // when a live share starts, deleted when it ends cleanly — so a surviving
 // file means "resumable". Contains the writer token in plaintext; it lives

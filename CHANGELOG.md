@@ -7,6 +7,15 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Store management** (#71): `agit tag`, `agit note`, `agit gc
+  --older-than`, and `ls --tag/--runtime/--project/--sort`. Tags and notes
+  live in a sidecar beside the session, never in the chain — they annotate a
+  session without changing what it says. `ls` now shows the shortest unique
+  id prefix, git-style, and filters apply to `--json` as well as the table so
+  a script narrowing by tag sees the same set a human would. `rm` and `gc`
+  say what will be lost first — event counts, tags, and the fact that a fork
+  of a deleted session loses its merge base — then ask; `--yes` answers for
+  a script, and with no terminal to ask on they refuse rather than assume.
 - **`agit merge --session <id>` honours deletions** (#88). Schema v2 gave the
   log `file.delete`; a fork's own session now tells `merge` which files it
   removed after the fork point, so a deletion survives the round trip instead

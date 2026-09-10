@@ -54,6 +54,19 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   Deterministic: the same input always produces byte-identical output.
   Credential-looking strings are redacted on the way in (see
   [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
+- **`agit ls`** — list imported sessions: start, duration, events, files
+  touched, and tags. Ids show as the shortest prefix still unique in the
+  store. Narrow with `--tag`, `--runtime` or `--project`, order with
+  `--sort started|events|files|id`.
+- **`agit tag <id> <tag>` / `agit note <id> "<text>"`** — what you thought
+  about a session afterwards. Both live in a sidecar (`notes.json`) beside
+  the log and never enter the chain: the chain is what the runtime did, and a
+  tag changes. `agit verify` neither sees nor is affected by them.
+- **`agit rm <id>`** and **`agit gc --older-than 90d [--keep-tagged]`** —
+  retention. Both confirm before deleting, and refuse outright when there is
+  no terminal to ask unless `--yes` is passed. `rm` warns first that any fork
+  of the session loses its merge base, since `agit merge` reconstructs that
+  from the log.
   `--no-redact` stores a session verbatim when redaction would mangle it;
   `share`, `pr` and `export-html` then refuse that session until you pass
   `--allow-unredacted`, and re-importing without the flag puts redaction back.

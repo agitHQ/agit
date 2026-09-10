@@ -37,20 +37,30 @@ function sessionPath(store: string): string {
 }
 
 describe("agit rm", () => {
-  it("refuses without --yes, names the session, and deletes nothing", () => {
+  it("refuses without confirmation, names the session, and deletes nothing", () => {
     const store = storeWithSimple();
     const r = agit(["rm", "fixture-simple-0001", "--dir", store]);
-    expect(r.code).toBe(2);
-    expect(r.out).toContain("permanently delete session fixture-simple-0001");
+    // Tests have no terminal, so the prompt cannot be answered and rm stops.
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("fixture-simple-0001");
     expect(r.out).toContain("--yes");
+    expect(r.out).toContain("nothing deleted");
     expect(existsSync(sessionPath(store))).toBe(true);
+  });
+
+  it("says what will be lost before asking", () => {
+    const store = storeWithSimple();
+    const r = agit(["rm", "fixture-simple-0001", "--dir", store]);
+    expect(r.out).toContain("18 events");
+    // A fork keeps only the session id, so deleting the log strands it.
+    expect(r.out).toContain("merge base");
   });
 
   it("deletes the session with --yes", () => {
     const store = storeWithSimple();
     const r = agit(["rm", "fixture-simple-0001", "--dir", store, "--yes"]);
     expect(r.code).toBe(0);
-    expect(r.out).toContain("removed fixture-simple-0001");
+    expect(r.out).toContain("fixture-simple-0001");
     expect(existsSync(sessionPath(store))).toBe(false);
   });
 
@@ -92,8 +102,10 @@ describe("agit rm", () => {
       join(sessionPath(store), "events.jsonl"),
     ]);
     const r = agit(["rm", "fixture-simple-0001", "--dir", store]);
-    expect(r.code).toBe(2);
-    expect(r.out).toContain("unreadable/corrupt");
+    expect(r.code).toBe(1);
+    // The session rm is pointed at is often the one ls cannot summarize, so
+    // the corruption must not stop rm from naming what it is about to delete.
+    expect(r.out).toContain("fixture-simple-0001");
     // And --yes still removes it, since that's exactly the case rm exists for.
     const removed = agit(["rm", "fixture-simple-0001", "--dir", store, "--yes"]);
     expect(removed.code).toBe(0);
