@@ -109,6 +109,15 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   flat row per hit for piping onward.
 - **`agit verify <id>`** — validate the hash chain; reports the first broken
   link, and detects truncation via `meta.json`.
+- **`agit blame <file>`** and **`agit why <file>:<line>`** — from a line of
+  code back to the session and event that wrote it, and from there back to
+  the prompt that asked for it. Verifiable rather than merely recorded: the
+  line traces to a hash-chained event, and every replayed step had to
+  reproduce its own content hash. It inherits the §5.7 limit and says so —
+  lines a shell command wrote read `(no structured edit)`, and where a file
+  changed outside structured edits, blame stops at that point and names it
+  instead of guessing past it. **`agit link`** prints the
+  `Agit-Session: <id>@<seq> <hash>` trailer to anchor a commit to a session.
 - **Redaction controls** — the built-in patterns (SPEC §8) can be extended
   and narrowed per project via `.agit/redact.json` (or `--redact-patterns`):
 

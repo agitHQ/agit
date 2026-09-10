@@ -7,6 +7,15 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit blame`, `agit why` and `agit link`** (#65) connect a line of code
+  back to the moment it was written. `blame` attributes each line to the
+  session and event that last wrote it; `why <file>:<line>` adds the prompt
+  that asked for it and what the assistant said. Attribution stops at the
+  first edit whose content contradicts what the log holds — proof the file
+  changed outside structured edits (SPEC §5.7) — and says so rather than
+  guessing past it. `link` prints an `Agit-Session: <id>@<seq> <hash>`
+  trailer for a commit message, naming a real hash-chained event that
+  `agit verify` can check.
 - **`agit import --base <git-ref | dir>`** (#85) closes the verification
   window on files that predate a session. Codex and OpenClaw record a diff
   rather than the file when they update one, so agit could only verify an
