@@ -35,6 +35,7 @@
  * of the same bytes differ (SPEC §7).
  */
 
+import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
 import type { Adapter, ConvertResult } from "./adapter.js";
 
@@ -77,6 +78,22 @@ function messageText(v: Json | undefined): string {
     .join("\n");
 }
 
+/**
+ * Is this schema version newer than the one the adapter was written against?
+ *
+ * Compared numerically, not as strings: `ATIF-v1.10` sorts *below*
+ * `ATIF-v1.8` lexically, so a string comparison would go quiet at exactly the
+ * point the format outgrew one digit.
+ */
+export function isNewerThanKnown(version: string): boolean {
+  const parse = (v: string): number[] =>
+    (/^ATIF-v(\d+)\.(\d+)$/.exec(v) ?? []).slice(1).map((n) => Number(n));
+  const a = parse(version);
+  const b = parse(ATIF_KNOWN_VERSION);
+  if (a.length !== 2 || b.length !== 2) return false; // unrecognized shape: not a claim either way
+  return a[0]! > b[0]! || (a[0] === b[0] && a[1]! > b[1]!);
+}
+
 function parseDocument(lines: string[]): Rec | undefined {
   // One JSON document, however it happens to be wrapped across lines.
   try {
@@ -110,6 +127,8 @@ export const atifAdapter: Adapter = {
       skipped[what] = (skipped[what] ?? 0) + n;
     };
 
+    if (steps.length === 0) throw new Error("this ATIF trajectory has no steps");
+
     // A trajectory with no timestamp anywhere cannot be dated without reading
     // the clock, which would break determinism (SPEC §7).
     const anyTs = steps.some((s) => str(s.timestamp) !== null);
@@ -122,7 +141,24 @@ export const atifAdapter: Adapter = {
 
     const agent = asRec(t.agent) ?? {};
     const runtime = str(agent.name) ?? "atif";
-    const sessionId = str(t.trajectory_id) ?? str(t.session_id) ?? `atif-${runtime}`;
+
+    // A trajectory that names itself keeps its own id. One that does not gets
+    // a stable id derived from its bytes, not from the agent's name: two
+    // different unnamed trajectories from the same agent would otherwise
+    // collide on one id, and the second import would be refused as "already
+    // exists with different content".
+    const declaredId = str(t.trajectory_id) ?? str(t.session_id);
+    const sessionId =
+      declaredId ??
+      `atif-${runtime}-${createHash("sha256").update(lines.join("\n"), "utf8").digest("hex").slice(0, 12)}`;
+
+    // Newer than what this adapter was written against. Read it anyway —
+    // ATIF has been additive — but never silently, because a field this
+    // adapter cannot see is a field it is dropping.
+    const declaredVersion = str(t.schema_version);
+    if (declaredVersion !== null && isNewerThanKnown(declaredVersion)) {
+      skip(`schema-newer-than-${ATIF_KNOWN_VERSION}:${declaredVersion}`);
+    }
 
     const drafts: DraftEvent[] = [];
     let ts = steps.find((s) => str(s.timestamp) !== null)!.timestamp as string;

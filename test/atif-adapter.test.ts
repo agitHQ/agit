@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { atifAdapter } from "../src/adapters/atif.js";
+import { atifAdapter, isNewerThanKnown } from "../src/adapters/atif.js";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { codexAdapter } from "../src/adapters/codex.js";
 import { openclawAdapter } from "../src/adapters/openclaw.js";
@@ -168,6 +168,82 @@ describe("what it declines, and says it declined", () => {
     const doc = JSON.parse(readFileSync(ATIF, "utf8")) as { steps: Record<string, unknown>[] };
     for (const s of doc.steps) delete s.timestamp;
     expect(() => atifAdapter.convert([JSON.stringify(doc)])).toThrow(/no timestamps/);
+  });
+});
+
+describe("trajectories that name themselves badly, or not at all", () => {
+  const doc = (extra: Record<string, unknown>, message = "hello"): string[] => [
+    JSON.stringify({
+      schema_version: "ATIF-v1.8",
+      agent: { name: "anon", version: "1" },
+      steps: [{ step_id: 1, timestamp: "2026-01-01T00:00:00.000Z", source: "user", message }],
+      ...extra,
+    }),
+  ];
+
+  it("keeps a trajectory's own id when it has one", () => {
+    expect(atifAdapter.convert(doc({ trajectory_id: "mine" })).sessionId).toBe("mine");
+    expect(atifAdapter.convert(doc({ session_id: "also-mine" })).sessionId).toBe("also-mine");
+  });
+
+  it("gives two anonymous trajectories from one agent different ids", () => {
+    // Deriving the id from the agent's name alone would collide, and the
+    // second import would be refused as "already exists with different
+    // content" — the wrong error for two genuinely different sessions.
+    const a = atifAdapter.convert(doc({}, "first")).sessionId;
+    const b = atifAdapter.convert(doc({}, "second")).sessionId;
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^atif-anon-[0-9a-f]{12}$/);
+    // Still deterministic: the same bytes give the same id.
+    expect(atifAdapter.convert(doc({}, "first")).sessionId).toBe(a);
+  });
+
+  it("reads a newer schema version, and says that it did", () => {
+    // ATIF has been additive, so refusing would be unhelpful. Staying quiet
+    // would hide that fields this adapter cannot see were dropped.
+    const r = atifAdapter.convert(doc({ schema_version: "ATIF-v2.0" }));
+    expect(r.skipped["schema-newer-than-ATIF-v1.8:ATIF-v2.0"]).toBe(1);
+    expect(atifAdapter.convert(doc({})).skipped["schema-newer-than-ATIF-v1.8:ATIF-v1.8"]).toBeUndefined();
+  });
+
+  it("compares versions numerically, not as strings", () => {
+    // "ATIF-v1.10" sorts below "ATIF-v1.8" lexically, so a string comparison
+    // goes quiet exactly when the format outgrows one digit.
+    expect(isNewerThanKnown("ATIF-v1.10")).toBe(true);
+    expect(isNewerThanKnown("ATIF-v1.9")).toBe(true);
+    expect(isNewerThanKnown("ATIF-v2.0")).toBe(true);
+    expect(isNewerThanKnown("ATIF-v1.8")).toBe(false);
+    expect(isNewerThanKnown("ATIF-v1.0")).toBe(false);
+    expect(isNewerThanKnown("ATIF-vNonsense")).toBe(false);
+  });
+
+  it("refuses a trajectory with no steps rather than importing an empty session", () => {
+    expect(() => atifAdapter.convert([JSON.stringify({ schema_version: "ATIF-v1.8", steps: [] })])).toThrow(
+      /no steps/,
+    );
+  });
+
+  it("survives fields that are the wrong type instead of the right one", () => {
+    // A foreign producer will get something wrong eventually; one bad field
+    // should cost that field, not the import.
+    const rough = JSON.stringify({
+      schema_version: "ATIF-v1.8",
+      agent: {},
+      steps: [
+        {
+          step_id: 1,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          source: "agent",
+          message: null,
+          tool_calls: "not-an-array",
+          observation: { results: "not-an-array" },
+          metrics: "not-an-object",
+        },
+      ],
+    });
+    const r = atifAdapter.convert([rough]);
+    expect(r.drafts[0]!.type).toBe("session.start");
+    expect(r.drafts.some((d) => d.type === "tool.call")).toBe(false);
   });
 });
 
