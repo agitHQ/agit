@@ -180,6 +180,26 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+- **`agit export <id> --otel | --atif`** — feed the tools you already run,
+  with a log that verifies. `--otel` emits OTLP/JSON spans following the
+  OpenTelemetry GenAI semantic conventions: an `invoke_agent` root, `chat`
+  children per model call with token counts, `execute_tool` children per tool.
+  `--atif` emits a Harbor Agent Trajectory Interchange Format document, the
+  shape the OpenHands and SWE-rebench trajectory datasets use for evals and
+  fine-tuning. Both are folds over events already stored; neither changes
+  SPEC.
+
+  **Span ids are the leading bytes of the event hash they came from**, so a
+  trace in Grafana points back at a specific line of a log you can `agit
+  verify`; the full hash rides along as an attribute, because 8 bytes is a
+  convenience and not a proof. Output is deterministic — no random ids, no
+  wall clock — and an unverified session is refused, since feeding an eval
+  from a log agit cannot vouch for is how a verified pipeline quietly stops
+  being one. The GenAI conventions are at Development stability and have
+  never cut a release, so the emitted schema URL ends in `-dev` and this will
+  need updating; `file.diff` has no home in either schema, so edits ride in
+  each format's own extension field with the SPEC §5.7 lower bound stated
+  beside them.
 - **`agit sign <id> --key <file>`** — bind a head to a key. The chain proves
   a log was not modified after it was chained; it says nothing about *who*
   chained it, because anyone can rebuild a perfectly valid chain over edited

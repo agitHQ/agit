@@ -40,6 +40,7 @@ import {
   type RedactionConfig,
   type RedactionCounts,
 } from "./redact.js";
+import { toAtif, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
 import { startRelay } from "./relay/relay.js";
@@ -155,6 +156,8 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
+  agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
+  agit export <id> --atif              an ATIF trajectory (Harbor / OpenHands)
   agit sign <id> --key <file>          sign this head with an ed25519 key, so
                                        the log proves who recorded it
   agit mcp                             serve the store to an agent over MCP
@@ -250,6 +253,8 @@ interface Opts {
   noGit: boolean;
   cert?: string;
   key?: string;
+  otel?: boolean;
+  atif?: boolean;
   insecure: boolean;
   args: string[];
 }
@@ -337,6 +342,8 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--cert") opts.cert = argv[++i];
     else if (a === "--key") opts.key = argv[++i];
     else if (a === "--insecure") opts.insecure = true;
+    else if (a === "--otel") opts.otel = true;
+    else if (a === "--atif") opts.atif = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -2305,6 +2312,23 @@ function cmdGrep(opts: Opts): number {
 function cmdExport(opts: Opts): number {
   const id = requireId(opts);
   if (!refuseUnlessVerified(opts, id, "export", "nothing was written")) return 1;
+
+  // Interop views (#69). Both are folds over the events already stored, and
+  // both refuse an unverified session for the same reason `export` does:
+  // feeding an eval or a dashboard from a log agit cannot vouch for is how a
+  // verified pipeline quietly stops being one.
+  if (opts.otel || opts.atif) {
+    if (opts.otel && opts.atif) {
+      console.error("--otel and --atif are different formats; pick one");
+      return 2;
+    }
+    const events = readSessionEvents(opts.dir, id);
+    const meta = readSessionMeta(opts.dir, id);
+    const doc = opts.otel ? toOtlpJson(events, meta) : toAtif(events, meta);
+    process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
+    return 0;
+  }
+
   if (opts.json) {
     process.stdout.write(JSON.stringify(readSessionEvents(opts.dir, id), null, 2) + "\n");
   } else {

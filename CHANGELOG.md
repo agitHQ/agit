@@ -7,6 +7,26 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit export --otel` and `agit export --atif`** (#69) turn a verified
+  session into the shapes other tools already ingest. `--otel` emits OTLP/JSON
+  spans following the OpenTelemetry GenAI semantic conventions — an
+  `invoke_agent` root, `chat` children carrying token counts, `execute_tool`
+  children — and `--atif` emits a Harbor Agent Trajectory Interchange Format
+  document (ATIF-v1.8), the shape the OpenHands and SWE-rebench trajectory
+  datasets use. Both are pure views over stored events; SPEC is unchanged.
+  Span ids are the first eight bytes of the event hash they came from, so a
+  trace points back at a line of a log that can be verified, with the full
+  hash alongside as an attribute. Output is deterministic, and an unverified
+  session is refused for the same reason `export` refuses one. The GenAI
+  conventions are at Development stability, moved repositories during 2026 and
+  have never cut a release, so the export targets the current names
+  (`gen_ai.provider.name`, not the renamed-away `gen_ai.system`;
+  `cache_write`, not `cache_creation`) and emits the only schema URL that
+  exists, which ends in `-dev`. `file.diff` has no equivalent in either
+  format, so edits ride in each one's own extension field rather than being
+  dropped or bent into a shape that means something else, with the SPEC §5.7
+  lower bound stated beside them.
+
 - **`agit sign <id> --key <file>`** (#68) binds a head to an Ed25519 key, and
   **SPEC §12** documents the signed payload so other implementations can
   verify without agit. The chain proves a log was not modified after it was
