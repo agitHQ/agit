@@ -4,6 +4,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
 import { codexAdapter } from "./adapters/codex.js";
@@ -39,6 +40,7 @@ import {
   type RedactionConfig,
   type RedactionCounts,
 } from "./redact.js";
+import { serveMcp, setServerVersion } from "./mcp.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -151,6 +153,9 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
+  agit mcp                             serve the store to an agent over MCP
+                                       (stdio, read-only: grep/show/replay/
+                                       diff/verify/list)
 
 options:
   --base <ref|dir> import: a git ref or directory holding the files as they
@@ -385,6 +390,8 @@ async function main(): Promise<number> {
       return cmdShare(opts);
     case "relay":
       return cmdRelay(opts);
+    case "mcp":
+      return cmdMcp(opts);
     case "help":
       console.log(USAGE);
       return 0;
@@ -2237,6 +2244,41 @@ function isLoopback(host: string): boolean {
   // in the warning would be untrue.
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
   return host === "localhost" || host === "::1" || host === "[::1]";
+}
+
+/**
+ * Serve the store to an agent over MCP (issue #66), stdio, read-only.
+ *
+ * Every human-facing word goes to stderr: stdout is the protocol frame
+ * stream, and one stray line on it is a parse error at the client.
+ */
+async function cmdMcp(opts: Opts): Promise<number> {
+  if (!existsSync(agitDir(opts.dir))) {
+    // Not fatal. A client may start the server before anything is imported,
+    // and the tools answer "no sessions" perfectly well from an empty store.
+    console.error(`no .agit/ in ${opts.dir} yet — the tools will report an empty store until you import one`);
+  }
+  setServerVersion(packageVersion());
+  console.error(`agit mcp: read-only over ${agitDir(opts.dir)} — waiting for a client on stdio`);
+  await serveMcp(opts.dir, process.stdin, process.stdout);
+  return 0;
+}
+
+/** The published version, for MCP's serverInfo. Falls back rather than throwing. */
+function packageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // dist/cli.js -> the package root is one level up; running from src, two.
+    for (const rel of ["../package.json", "../../package.json"]) {
+      const p = resolve(here, rel);
+      if (!existsSync(p)) continue;
+      const v = (JSON.parse(readFileSync(p, "utf8")) as { version?: string }).version;
+      if (typeof v === "string") return v;
+    }
+  } catch {
+    /* fall through */
+  }
+  return "0.0.0";
 }
 
 async function cmdRelay(opts: Opts): Promise<number> {

@@ -180,6 +180,24 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
+- **`agit mcp`** — serve the store to an agent over MCP, so the agent can
+  ask its own verified history "have I solved this before?" instead of that
+  being something only a human can do with `grep`. Six read-only tools:
+  `agit_list`, `agit_grep`, `agit_show`, `agit_replay`, `agit_diff` and
+  `agit_verify`. Claude Code, Codex, Cursor, Gemini and Cline all speak MCP,
+  so one server covers every runtime agit imports from. Point a client at it:
+
+  ```json
+  { "mcpServers": { "agit": { "command": "agit", "args": ["mcp", "--dir", "/path/to/project"] } } }
+  ```
+
+  **Read-only by design.** There is no tool that writes, and nothing arriving
+  over this transport reaches `import`, `tag`, `rm` or the redaction config.
+  Every answer carries whether that session's chain verifies, and
+  `agit_verify` asks directly, so an agent knows what it is trusting. Session
+  logs are untrusted input, so each payload is labelled as recorded data
+  rather than direction — a label, not a sandbox, and worth the same
+  scepticism as redaction.
 
 **`--json`** on `ls`, `show`, `show --by-model`, `verify`, `grep`, `diff`
 and `export` emits the structures agit already builds, so a script reads
