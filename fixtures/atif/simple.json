@@ -1,0 +1,94 @@
+{
+  "schema_version": "ATIF-v1.8",
+  "session_id": "atif-fixture-session",
+  "trajectory_id": "atif-fixture-0001",
+  "notes": "Synthetic ATIF trajectory, hand-built from the format's RFC and Pydantic models. Exercises every path the adapter maps, plus the ones it deliberately declines.",
+  "agent": {
+    "name": "harbor-terminus",
+    "version": "2.0.0",
+    "model_name": "some-model-v1"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "timestamp": "2026-04-01T10:00:00.000Z",
+      "source": "system",
+      "message": "You are a helpful coding agent."
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-04-01T10:00:05.000Z",
+      "source": "user",
+      "message": "Add a retry helper and use it in the fetch path."
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-04-01T10:00:09.000Z",
+      "source": "agent",
+      "model_name": "some-model-v1",
+      "reasoning_content": "Write the helper first, then wire it in.",
+      "message": "I'll add the helper.",
+      "llm_call_count": 2,
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1",
+          "function_name": "file_write",
+          "arguments": { "path": "src/retry.ts", "content": "export const retry = 3;\n" }
+        },
+        {
+          "tool_call_id": "call_2",
+          "function_name": "run_tests",
+          "arguments": { "cmd": "npm test" }
+        }
+      ],
+      "observation": {
+        "results": [
+          { "source_call_id": "call_1", "content": "File created successfully" },
+          { "source_call_id": "call_2", "content": "1 failing", "extra": { "isError": true } }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 1200,
+        "completion_tokens": 340,
+        "cached_tokens": 900,
+        "cost_usd": 0.021
+      }
+    },
+    {
+      "step_id": 4,
+      "source": "agent",
+      "model_name": "some-model-v1",
+      "message": [
+        { "type": "text", "text": "Here is the diagram I was given." },
+        { "type": "image", "source": { "media_type": "image/png", "path": "diagram.png" } }
+      ]
+    },
+    {
+      "step_id": 5,
+      "timestamp": "2026-04-01T10:00:31.000Z",
+      "source": "user",
+      "message": "Looks right, ship it."
+    }
+  ],
+  "final_metrics": {
+    "total_steps": 5,
+    "total_prompt_tokens": 1200,
+    "total_completion_tokens": 340,
+    "total_cached_tokens": 900
+  },
+  "subagent_trajectories": [
+    {
+      "schema_version": "ATIF-v1.8",
+      "trajectory_id": "atif-fixture-sub-0001",
+      "agent": { "name": "harbor-terminus", "version": "2.0.0" },
+      "steps": [
+        {
+          "step_id": 1,
+          "timestamp": "2026-04-01T10:00:12.000Z",
+          "source": "user",
+          "message": "Check the lint rules."
+        }
+      ]
+    }
+  ]
+}
