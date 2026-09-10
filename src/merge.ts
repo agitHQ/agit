@@ -41,6 +41,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type { AgitEvent, Json } from "./format/events.js";
 import { sha256Hex } from "./format/hash.js";
 import { reconstructTree, treeRelativePath } from "./fork.js";
+import { merge3 } from "./merge3.js";
 
 export type MergeOutcome =
   | "unchanged" // fork == base: nothing to do
@@ -141,7 +142,14 @@ export function mergeFork(opts: {
    * fork point are the only thing that can make a merge remove a file (#88).
    */
   forkEvents?: AgitEvent[];
-}): { results: MergeFileResult[]; conflicts: number; deleted: number } {
+  /** Force the built-in three-way merge even where git is available (#89). */
+  noGit?: boolean;
+}): {
+  results: MergeFileResult[];
+  conflicts: number;
+  deleted: number;
+  engines: ("git" | "builtin")[];
+} {
   const info = readForkInfo(opts.forkDir);
   if (opts.sourceEvents[info.atSeq]?.hash !== info.atHash) {
     throw new Error(
@@ -154,6 +162,7 @@ export function mergeFork(opts: {
   const intoRoot = resolve(opts.intoDir);
 
   const results: MergeFileResult[] = [];
+  const enginesUsed = new Set<"git" | "builtin">();
   let conflicts = 0;
   let deleted = 0;
 
@@ -226,7 +235,8 @@ export function mergeFork(opts: {
       writeFileSync(target, theirs, "utf8");
       outcome = "took-fork";
     } else {
-      const merged = gitMergeFile(baseContent ?? "", ours, theirs);
+      const merged = mergeFileContents(baseContent ?? "", ours, theirs, { noGit: opts.noGit });
+      enginesUsed.add(merged.engine);
       writeFileSync(target, merged.content, "utf8");
       outcome = merged.clean ? "clean-merge" : "conflict";
       if (!merged.clean) conflicts++;
@@ -243,6 +253,9 @@ export function mergeFork(opts: {
         sourceSession: info.sourceSession,
         atSeq: info.atSeq,
         summary: opts.summary ?? null,
+        // Which implementation resolved the content merges, so a merge that
+        // ran without git is identifiable after the fact.
+        engine: enginesUsed.size === 0 ? null : [...enginesUsed].sort().join("+"),
         results,
         conflicts,
         deleted,
@@ -252,7 +265,48 @@ export function mergeFork(opts: {
     ) + "\n",
     "utf8",
   );
-  return { results, conflicts, deleted };
+  return { results, conflicts, deleted, engines: [...enginesUsed] };
+}
+
+/** Raised when `git merge-file` is not on PATH, so the caller can fall back rather than fail. */
+export class GitNotFound extends Error {
+  constructor() {
+    super("git merge-file was not found on PATH");
+  }
+}
+
+export interface MergeEngineResult {
+  content: string;
+  clean: boolean;
+  /** Which implementation produced this, so the CLI can say so. */
+  engine: "git" | "builtin";
+}
+
+/**
+ * Three-way merge one file, preferring git.
+ *
+ * git is the implementation everyone's expectations are calibrated against,
+ * so results stay identical to what people are used to wherever it exists.
+ * The built-in diff3 is the fallback (#89): without it, a machine with no git
+ * on PATH turns `agit merge` into a hard failure at the last step of a
+ * handoff. `noGit` forces the fallback, which is also how its behaviour is
+ * tested against git's on the same inputs.
+ */
+export function mergeFileContents(
+  base: string,
+  ours: string,
+  theirs: string,
+  opts: { noGit?: boolean } = {},
+): MergeEngineResult {
+  if (!opts.noGit) {
+    try {
+      return { ...gitMergeFile(base, ours, theirs), engine: "git" };
+    } catch (err) {
+      if (!(err instanceof GitNotFound)) throw err;
+    }
+  }
+  const r = merge3(base, ours, theirs);
+  return { content: r.content, clean: r.clean, engine: "builtin" };
 }
 
 /** Ordinary git three-way merge on one file. Markers labeled ours/base/fork. */
@@ -281,11 +335,7 @@ export function gitMergeFile(
       return { content: readFileSync(o, "utf8"), clean: true };
     } catch (err) {
       const e = err as { status?: number | null; code?: string };
-      if (e.code === "ENOENT") {
-        throw new Error("git is required for three-way merges (`git merge-file`) and was not found on PATH", {
-          cause: err,
-        });
-      }
+      if (e.code === "ENOENT") throw new GitNotFound();
       // git merge-file exits with the number of conflicts; the file it wrote
       // holds the merged content with markers.
       if (typeof e.status === "number" && e.status > 0 && e.status < 128) {
