@@ -3,7 +3,14 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
-## Unreleased
+## 0.7.0 — 2026-09-10
+
+### Changed
+
+- The test suite's timeout ceiling is 30s rather than vitest's 5s default.
+  Most suites drive the real CLI, so one test can spawn twenty processes, and
+  a loaded machine was failing tests that were doing nothing wrong. A real
+  hang still fails, just later.
 
 ### Added
 
