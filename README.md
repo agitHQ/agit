@@ -203,7 +203,13 @@ Said plainly:
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
   from earlier in the same session. An edit to a file that predates the
-  session is skipped and counted, never hashed on a guess.
+  session is skipped and counted, never hashed on a guess — unless you supply
+  the base yourself: `agit import <log> --base <git-ref | directory>` seeds
+  the pre-session content from the commit the session started from, or a copy
+  of the tree. It is checked, not trusted: the runtime's own diff still has to
+  apply to it and the result still has to hash, so a wrong base skips exactly
+  as no base does. Only files the runtime actually edited are consulted;
+  nothing else enters the log, and `meta.json` records which base was used.
 - **OpenClaw has the same window**: `apply_patch` records the patch, not
   the file, so an update is verifiable only for a file the session created.
 - **Codex renames are recorded as a delete plus a create** — schema v2 gives

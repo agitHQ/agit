@@ -1,3 +1,4 @@
+import type { BaseTree } from "../base.js";
 import type { DraftEvent } from "../format/events.js";
 
 /** What an adapter produces from one native session log. Payloads are not yet redacted or chained — the import pipeline does both. */
@@ -19,6 +20,13 @@ export interface ConvertOptions {
    * equal the final import's prefix.
    */
   live?: boolean;
+  /**
+   * Content the user supplied for files that predate the session (#85), so an
+   * update to one has a verifiable base. Only a candidate: the runtime's diff
+   * still has to apply and the result still has to hash, so a wrong base
+   * skips exactly as no base does.
+   */
+  base?: BaseTree;
 }
 
 export interface Adapter {

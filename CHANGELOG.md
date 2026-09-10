@@ -7,6 +7,16 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`agit import --base <git-ref | dir>`** (#85) closes the verification
+  window on files that predate a session. Codex and OpenClaw record a diff
+  rather than the file when they update one, so agit could only verify an
+  update to a file the session itself created; pointing `--base` at the
+  commit or tree the session started from supplies the missing content, and
+  the update verifies against real bytes. A base that does not match is
+  refused, not assumed: the diff simply fails to apply and the edit is
+  skipped and counted exactly as before, so a wrong `--base` can never
+  produce a hash. `meta.json` records which base was used, and `show`
+  reports it.
 - **Redaction controls** (#70): custom patterns and an allowlist in
   `.agit/redact.json` (or `--redact-patterns <file>`), and `agit redact
   --check <log>` as a dry run that says what would be removed — event type,
