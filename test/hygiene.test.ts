@@ -84,7 +84,9 @@ describe("show --by-model on a Codex session (#56)", () => {
     expect(r.code).toBe(0);
     expect(r.out).not.toContain("(unattributed)");
     // The fixture records no cost events, so tokens cannot be split — say so.
-    expect(r.out).toMatch(/no cost events in this session — 5 files touched, credited to gpt-5\.5/);
+    // Six paths, not five, since the fixture's rename now lands its
+    // destination as a file of its own (#86).
+    expect(r.out).toMatch(/no cost events in this session — 6 files touched, credited to gpt-5\.5/);
   });
 });
 

@@ -7,6 +7,11 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Codex renames are recorded** (#86) as a `file.delete` of the old path
+  plus a `file.diff` create of the new one — what the filesystem saw, and
+  the same shape the OpenClaw adapter emits, so no view needs a
+  Codex-specific case. A rename whose base content is not in the log is
+  still skipped and counted rather than hashed on a guess.
 - **`agit rm <id> --yes`** (#71) removes a session from the store. The flag
   is the confirmation — there is no prompt a script could answer — and
   without it `rm` reports what it would delete, including when the log is
