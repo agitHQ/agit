@@ -36,7 +36,7 @@ describe("agit import --no-redact", () => {
     const store = freshStore();
     const r = agit(["import", SIMPLE, "--no-redact", "--dir", store]);
     expect(r.code).toBe(0);
-    expect(r.out).toContain("redacted    SKIPPED (--no-redact)");
+    expect(r.out).toContain("redacted    DISABLED (--no-redact)");
     const jsonl = readFileSync(
       join(store, ".agit", "sessions", "fixture-simple-0001", "events.jsonl"),
       "utf8",
@@ -44,12 +44,12 @@ describe("agit import --no-redact", () => {
     expect(jsonl).not.toContain("REDACTED");
     const meta = JSON.parse(
       readFileSync(join(store, ".agit", "sessions", "fixture-simple-0001", "meta.json"), "utf8"),
-    ) as { redactionSkipped?: boolean; redactions: Record<string, number> };
-    expect(meta.redactionSkipped).toBe(true);
+    ) as { redaction?: { enabled: boolean }; redactions: Record<string, number> };
+    expect(meta.redaction?.enabled).toBe(false);
     expect(meta.redactions).toEqual({});
   });
 
-  it("a normal import (no flag) still redacts, and carries no redactionSkipped marker", () => {
+  it("a normal import (no flag) still redacts, and records redaction as enabled", () => {
     const store = freshStore();
     expect(agit(["import", SIMPLE, "--dir", store]).code).toBe(0);
     const jsonl = readFileSync(
@@ -59,8 +59,8 @@ describe("agit import --no-redact", () => {
     expect(jsonl).toContain("REDACTED:anthropic-key");
     const meta = JSON.parse(
       readFileSync(join(store, ".agit", "sessions", "fixture-simple-0001", "meta.json"), "utf8"),
-    ) as { redactionSkipped?: boolean };
-    expect(meta.redactionSkipped).toBeUndefined();
+    ) as { redaction?: { enabled: boolean } };
+    expect(meta.redaction?.enabled).toBe(true);
   });
 
   it("show reports the skip plainly", () => {
@@ -75,7 +75,7 @@ describe("agit import --no-redact", () => {
     agit(["import", SIMPLE, "--no-redact", "--dir", store]);
     const r = agit(["pr", "fixture-simple-0001", "--dir", store, "--out", join(store, "bundle")]);
     expect(r.code).toBe(1);
-    expect(r.out).toContain("never scanned for credentials");
+    expect(r.out).toContain("never went through");
     expect(r.out).toContain("--allow-unredacted");
   });
 
@@ -109,7 +109,7 @@ describe("agit import --no-redact", () => {
     // network call, not that the relay happened to be reachable.
     const r = agit(["share", "fixture-simple-0001", "--static", "--dir", store]);
     expect(r.code).toBe(1);
-    expect(r.out).toContain("never scanned for credentials");
+    expect(r.out).toContain("never went through");
   });
 });
 
@@ -121,18 +121,18 @@ describe("switching redaction mode on an already-imported file", () => {
   // changing nothing.
   it("re-importing without the flag actually undoes an accidental --no-redact", () => {
     const store = freshStore();
-    expect(agit(["import", SIMPLE, "--no-redact", "--dir", store]).out).toContain("SKIPPED (--no-redact)");
+    expect(agit(["import", SIMPLE, "--no-redact", "--dir", store]).out).toContain("DISABLED (--no-redact)");
     const metaPath = join(store, ".agit", "sessions", "fixture-simple-0001", "meta.json");
     const logPath = join(store, ".agit", "sessions", "fixture-simple-0001", "events.jsonl");
     expect(readFileSync(logPath, "utf8")).not.toContain("[REDACTED:");
-    expect(JSON.parse(readFileSync(metaPath, "utf8")).redactionSkipped).toBe(true);
+    expect(JSON.parse(readFileSync(metaPath, "utf8")).redaction.enabled).toBe(false);
 
     const cure = agit(["import", SIMPLE, "--dir", store]);
     expect(cure.code).toBe(0);
     expect(cure.out).not.toContain("nothing to do");
     expect(cure.out).toContain("redaction was OFF (--no-redact) for the stored copy; it is now ON");
     expect(readFileSync(logPath, "utf8")).toContain("[REDACTED:");
-    expect(JSON.parse(readFileSync(metaPath, "utf8")).redactionSkipped).toBeUndefined();
+    expect(JSON.parse(readFileSync(metaPath, "utf8")).redaction.enabled).toBe(true);
   });
 
   it("--no-redact on an already-redacted session takes effect instead of no-opping", () => {
@@ -170,7 +170,7 @@ describe("handing an unredacted session onward", () => {
     const out = join(store, "page.html");
     const r = agit(["export-html", "fixture-simple-0001", "--out", out, "--dir", store]);
     expect(r.code).toBe(1);
-    expect(r.out).toContain("never scanned for credentials");
+    expect(r.out).toContain("never went through");
     expect(existsSync(out)).toBe(false);
 
     const allowed = agit([

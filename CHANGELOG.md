@@ -7,6 +7,16 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Redaction controls** (#70): custom patterns and an allowlist in
+  `.agit/redact.json` (or `--redact-patterns <file>`), and `agit redact
+  --check <log>` as a dry run that says what would be removed — event type,
+  field path, which pattern matched, and a truncated preview rather than the
+  secret itself — before anything is stored. After redacting, agit re-scans
+  its own output and reports anything still matching, so the count can never
+  read lower than the truth. The allowlist is what keeps a documented example
+  key or a test fixture from being rewritten on import. `meta.json` records
+  the posture a session was imported under — whether redaction ran, and how
+  many custom patterns and allow rules were in force.
 - **Store management** (#71): `agit tag`, `agit note`, `agit gc
   --older-than`, and `ls --tag/--runtime/--project/--sort`. Tags and notes
   live in a sidecar beside the session, never in the chain — they annotate a

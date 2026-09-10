@@ -109,6 +109,23 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   flat row per hit for piping onward.
 - **`agit verify <id>`** — validate the hash chain; reports the first broken
   link, and detects truncation via `meta.json`.
+- **Redaction controls** — the built-in patterns (SPEC §8) can be extended
+  and narrowed per project via `.agit/redact.json` (or `--redact-patterns`):
+
+  ```json
+  { "patterns": [{ "label": "acme-token", "regex": "acme_[A-Za-z0-9]{20,}" }],
+    "allow": ["sk-ant-EXAMPLE00000000000000", { "regex": "^sk-ant-example-" }] }
+  ```
+
+  Custom patterns catch internal token formats the built-ins cannot know
+  about; the allowlist keeps documented example keys and test fixtures from
+  being rewritten on import. `agit redact --check <log>` is a dry run: it
+  prints what would be redacted, by event type and payload path, with every
+  sample masked, then re-scans the redacted result so the count can never
+  under-report. `--no-redact` stores a log exactly as the runtime wrote it —
+  for local-only stores; `share` and `pr` refuse such a session unless
+  `--allow-unredacted` is passed. Redaction still happens once, before
+  hashing, at import: the chain never holds both versions of a string.
 - **`agit replay <id>`** — step through events (`n`/`p`/`g N`), inspect any
   event, and show cumulative file state at any point (`s`, or `--at N
   --state` non-interactively). `--at N` jumps straight to event N;
