@@ -25,6 +25,7 @@ import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
 import { discoverSessionLogs, parseSince } from "./discover.js";
 import { buildMatcher, grepEvents, GrepPatternError, renderHit } from "./grep.js";
 import { mergeFork, readForkInfo } from "./merge.js";
+import { loadBaseTree, BaseTreeError, type BaseTree } from "./base.js";
 import { redactDeep, type RedactionCounts } from "./redact.js";
 import { startRelay } from "./relay/relay.js";
 import {
@@ -60,7 +61,8 @@ const USAGE = `agit — git for running agents
 
 usage:
   agit import <session | bundle>       ingest a native session into .agit/, or
-                                       adopt an agit log or pr bundle as-is
+                       [--base REF]    adopt an agit log or pr bundle as-is;
+                                       --base seeds pre-session file content
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
   agit import --latest                 import the most recently written session
@@ -95,6 +97,9 @@ usage:
   agit relay                           run a relay (self-hosted, in-memory)
 
 options:
+  --base <ref|dir> import: a git ref or directory holding the files as they
+                   were before the session, so updates to files that predate
+                   it can be verified instead of skipped
   --dir <path>     where .agit/ lives (default: current directory)
   --out <dir>      fork/pr: where to write the fork or bundle
   --into <dir>     merge: target directory (default: current directory)
@@ -137,6 +142,7 @@ interface Opts {
   port?: number;
   host?: string;
   trustedProxies: string[];
+  base?: string;
   args: string[];
 }
 
@@ -191,6 +197,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--port") opts.port = Number(argv[++i]);
     else if (a === "--host") opts.host = argv[++i];
     else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
+    else if (a === "--base") opts.base = argv[++i];
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -318,6 +325,35 @@ function knownSources(dir: string): Map<string, string> {
   return known;
 }
 
+/** The cwd the session recorded, which is what a supplied base was resolved against. */
+function cwdOf(events: AgitEvent[]): string | null {
+  const cwd = (events[0]?.payload as { cwd?: unknown } | undefined)?.cwd;
+  return typeof cwd === "string" && cwd !== "" ? cwd : null;
+}
+
+/**
+ * Resolve --base once per run. Returns undefined when the flag is absent and
+ * null when it was given but could not be read, so the caller can stop.
+ */
+function baseTreeFor(opts: Opts): BaseTree | null | undefined {
+  if (opts.base === undefined) return undefined;
+  try {
+    const tree = loadBaseTree(opts.base, opts.dir);
+    if (tree.files.size === 0) {
+      console.error(`--base ${opts.base}: resolved to an empty tree; nothing to verify updates against`);
+      return null;
+    }
+    return tree;
+  } catch (err) {
+    console.error(
+      err instanceof BaseTreeError
+        ? `--base ${opts.base}: ${err.message}`
+        : `--base ${opts.base}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
 /** Convert one native log into the store. Prints nothing; callers decide how much to say. */
 function importNativeLog(
   opts: Opts,
@@ -325,6 +361,7 @@ function importNativeLog(
   raw: string,
   lines: string[],
   known: Map<string, string>,
+  base?: BaseTree,
 ): ImportOutcome {
   const sha256 = sha256Hex(raw);
   const knownId = known.get(sha256);
@@ -333,7 +370,7 @@ function importNativeLog(
   const adapter = ADAPTERS.find((a) => a.detect(lines));
   if (!adapter) return { status: "unrecognized" };
 
-  const converted = adapter.convert(lines);
+  const converted = adapter.convert(lines, base ? { base } : undefined);
   const redactions: RedactionCounts = {};
   for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
   const events = buildChain(converted.sessionId, converted.drafts);
@@ -350,6 +387,16 @@ function importNativeLog(
     source: { path, sha256, bytes: statSync(path).size, records: converted.records },
     skipped: converted.skipped,
     redactions,
+    ...(base
+      ? {
+          base: {
+            kind: base.kind,
+            ref: base.ref,
+            cwd: cwdOf(events),
+            files: base.files.size,
+          },
+        }
+      : {}),
     eventCount: events.length,
     headHash: events[events.length - 1]!.hash,
   };
@@ -448,7 +495,9 @@ function importPath(opts: Opts, target: string): number {
   // rewrite a log this path promises to store byte for byte.
   if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, raw);
 
-  return printImportReport(opts, importNativeLog(opts, path, raw, lines, knownSources(opts.dir)));
+  const base = baseTreeFor(opts);
+  if (base === null) return 2;
+  return printImportReport(opts, importNativeLog(opts, path, raw, lines, knownSources(opts.dir), base));
 }
 
 function ago(mtimeMs: number): string {
@@ -480,6 +529,8 @@ function cmdImportDiscovered(opts: Opts): number {
     );
     return 1;
   }
+  const discoveredBase = baseTreeFor(opts);
+  if (discoveredBase === null) return 2;
   const cutoff = opts.since !== undefined ? Date.now() - opts.since : null;
   const candidates = cutoff === null ? logs : logs.filter((l) => l.mtimeMs >= cutoff);
   if (candidates.length === 0) {
@@ -519,7 +570,7 @@ function cmdImportDiscovered(opts: Opts): number {
       const lines = raw.split("\n").filter((l) => l.trim() !== "");
       outcome = looksLikeAgitLog(lines)
         ? { status: "unrecognized" }
-        : importNativeLog(opts, log.path, raw, lines, known);
+        : importNativeLog(opts, log.path, raw, lines, known, discoveredBase);
     } catch (err) {
       tally.failed++;
       console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -700,6 +751,11 @@ function cmdShow(opts: Opts): number {
   console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
   if (meta)
     console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+  if (meta?.base) {
+    console.log(
+      `  base        ${meta.base.kind} ${meta.base.ref} (${meta.base.files} files) — updates to files predating the session were verified against it`,
+    );
+  }
 
   const byType = new Map<string, number>();
   const tools = new Map<string, number>();

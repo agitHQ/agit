@@ -39,6 +39,7 @@
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
 import { applyUnifiedDiff } from "../patch.js";
+import { seedKnownFromBase } from "../base.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 export const CODEX_ADAPTER_NAME = "codex";
@@ -128,6 +129,9 @@ export const codexAdapter: Adapter = {
 
       if (rec.type === "session_meta") {
         sessionId = typeof p.id === "string" ? p.id : null;
+        // A supplied base becomes candidate pre-edit content, keyed the way
+        // Codex reports paths. Nothing here reaches the log by itself.
+        seedKnownFromBase(known, opts?.base, str(p.cwd));
         startDraft = {
           ts,
           type: "session.start",
