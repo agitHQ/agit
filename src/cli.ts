@@ -281,61 +281,87 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
   };
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
-    if (a === "--dir") opts.dir = resolve(argv[++i] ?? ".");
-    else if (a === "--at") opts.at = Number(argv[++i]);
+    const raw = argv[i]!;
+    // `--flag=value` is the way to pass a value that itself looks like a flag,
+    // which `need` below otherwise refuses.
+    const eq = raw.startsWith("--") ? raw.indexOf("=") : -1;
+    const a = eq === -1 ? raw : raw.slice(0, eq);
+    const inline = eq === -1 ? undefined : raw.slice(eq + 1);
+
+    /**
+     * The value belonging to a flag.
+     *
+     * Reading `argv[++i]` directly meant a flag with no value silently
+     * swallowed whatever came next, including the next flag. `agit ls --dir`
+     * with the path missing resolved to the current directory and listed a
+     * different store, exit 0, with nothing to say the flag had been ignored:
+     * the shape a script hits when the variable holding the path is empty.
+     */
+    const need = (flag: string): string => {
+      if (inline !== undefined) return inline;
+      const v = argv[i + 1];
+      if (v === undefined || v.startsWith("--")) {
+        console.error(`${flag} needs a value${v === undefined ? "" : `, but the next argument is ${v}`}`);
+        console.error(`pass one as \`${flag} <value>\`, or \`${flag}=<value>\` if the value starts with --`);
+        process.exit(2);
+      }
+      i++;
+      return v;
+    };
+    if (a === "--dir") opts.dir = resolve(need("--dir"));
+    else if (a === "--at") opts.at = Number(need("--at"));
     else if (a === "--timeline") opts.timeline = true;
     else if (a === "--state") opts.state = true;
     else if (a === "--by-model") opts.byModel = true;
     else if (a === "--all") opts.all = true;
     else if (a === "--latest") opts.latest = true;
     else if (a === "--since") {
-      const ms = parseSince(argv[++i] ?? "");
+      const ms = parseSince(need(a));
       if (ms === null) {
         console.error("--since takes a duration like 7d, 24h or 30m");
         process.exit(2);
       }
       opts.since = ms;
-    } else if (a === "--type") opts.grepType = argv[++i];
+    } else if (a === "--type") opts.grepType = need("--type");
     else if (a === "--path") opts.grepPath = true;
     else if (a === "--regex") opts.grepRegex = true;
     else if (a === "-s") opts.caseSensitive = true;
     else if (a === "-i") opts.caseSensitive = false;
-    else if (a === "--out") opts.out = argv[++i];
-    else if (a === "--into") opts.into = argv[++i];
-    else if (a === "--summary") opts.summary = argv[++i];
+    else if (a === "--out") opts.out = need("--out");
+    else if (a === "--into") opts.into = need("--into");
+    else if (a === "--summary") opts.summary = need("--summary");
     else if (a === "--json") opts.json = true;
     else if (a === "--yes" || a === "-y") opts.yes = true;
     else if (a === "--no-redact") opts.noRedact = true;
     else if (a === "--allow-unredacted") opts.allowUnredacted = true;
-    else if (a === "--relay") opts.relay = argv[++i] ?? opts.relay;
-    else if (a === "--ttl") opts.ttlHours = Number(argv[++i]);
+    else if (a === "--relay") opts.relay = need("--relay");
+    else if (a === "--ttl") opts.ttlHours = Number(need("--ttl"));
     else if (a === "--static") opts.static = true;
     else if (a === "--resume") opts.resume = true;
-    else if (a === "--port") opts.port = Number(argv[++i]);
-    else if (a === "--host") opts.host = argv[++i];
-    else if (a === "--trusted-proxy") opts.trustedProxies.push(argv[++i] ?? "");
-    else if (a === "--base") opts.base = argv[++i];
-    else if (a === "--redact-patterns") opts.redactPatterns = argv[++i];
+    else if (a === "--port") opts.port = Number(need("--port"));
+    else if (a === "--host") opts.host = need("--host");
+    else if (a === "--trusted-proxy") opts.trustedProxies.push(need("--trusted-proxy"));
+    else if (a === "--base") opts.base = need("--base");
+    else if (a === "--redact-patterns") opts.redactPatterns = need("--redact-patterns");
     else if (a === "--check") opts.check = true;
-    else if (a === "--tag") opts.tag = argv[++i];
-    else if (a === "--runtime") opts.runtime = argv[++i];
-    else if (a === "--project") opts.project = argv[++i];
-    else if (a === "--sort") opts.sort = argv[++i];
+    else if (a === "--tag") opts.tag = need("--tag");
+    else if (a === "--runtime") opts.runtime = need("--runtime");
+    else if (a === "--project") opts.project = need("--project");
+    else if (a === "--sort") opts.sort = need("--sort");
     else if (a === "--keep-tagged") opts.keepTagged = true;
     else if (a === "--older-than") {
-      const ms = parseSince(argv[++i] ?? "");
+      const ms = parseSince(need(a));
       if (ms === null) {
         console.error("--older-than takes a duration like 90d, 24h or 30m");
         process.exit(2);
       }
       opts.olderThan = ms;
-    } else if (a === "--by") opts.by = argv[++i];
-    else if (a === "--price") opts.price = argv[++i];
-    else if (a === "--session") opts.session = argv[++i];
+    } else if (a === "--by") opts.by = need("--by");
+    else if (a === "--price") opts.price = need("--price");
+    else if (a === "--session") opts.session = need("--session");
     else if (a === "--no-git") opts.noGit = true;
-    else if (a === "--cert") opts.cert = argv[++i];
-    else if (a === "--key") opts.key = argv[++i];
+    else if (a === "--cert") opts.cert = need("--cert");
+    else if (a === "--key") opts.key = need("--key");
     else if (a === "--insecure") opts.insecure = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
