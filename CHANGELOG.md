@@ -3,7 +3,7 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
-## Unreleased
+## 0.8.0 — 2026-09-11
 
 ### Added
 
