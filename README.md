@@ -277,11 +277,12 @@ fall out of that chain.
 
 Said plainly:
 
-- **Four adapters, with different limits.** Claude Code is the reference;
+- **Five adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
-  matching rules. ATIF is a standard rather than a runtime, and carries no
-  file content at all — see below.
+  matching rules. ATIF is a standard rather than a runtime, and Cline's SDK
+  format is a published contract; neither carries file content agit can
+  hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -341,6 +342,18 @@ Said plainly:
   work with on such a session; everything else does. What the import cannot
   carry is counted and named rather than passed over, including edits that
   agit itself exported as hashes.
+- **A Cline SDK import has no file history either, for a sharper reason.**
+  `agit import <id>.messages.json` reads the format new Cline sessions land
+  in from 4.0 (`~/.cline/data/sessions/`), which Cline documents as "the
+  canonical replay/export artifact" for exactly this purpose. The `editor`
+  tool's create path converts LF to CRLF when, and only when, the operating
+  system Cline ran on is Windows — and the log does not record which OS that
+  was. A hash over the recorded content would be right on Linux and wrong on
+  Windows, which is a hash agit did not compute over bytes it holds, so none
+  is emitted. Edit results carry only a diff the runtime truncates at 200
+  lines. Every `editor` and `apply_patch` call is counted in the import report
+  as an edit agit cannot verify. The older VS Code globalStorage layout is
+  undocumented and unversioned and is deliberately not read.
 - **A signature does not prove when, and does not prove truth.**
   `agit sign` binds a head to a key, which is what the chain alone could
   never do. The timestamp inside it is signed, so it cannot be edited
