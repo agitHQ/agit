@@ -2806,7 +2806,7 @@ async function cmdShare(opts: Opts): Promise<number> {
       await waitForSigint();
       return 0;
     }
-    const follower = followerFor(nativePath!);
+    const follower = followerFor(nativePath!, shareCfg);
     if (!follower) return 1;
     const initial = follower.poll();
     await pushAll(opts.relay, share, initial);
@@ -2868,7 +2868,12 @@ async function cmdShareResume(opts: Opts): Promise<number> {
     console.error(`source file is gone: ${state.nativePath}`);
     return 1;
   }
-  const follower = followerFor(state.nativePath);
+  // The resumed chain has to reproduce the original one exactly, so it must
+  // redact by the same rules; a different config here would change the events
+  // and the head hash would stop matching the relay's.
+  const resumeCfg = redactionConfigFor(opts);
+  if (resumeCfg === null) return 2;
+  const follower = followerFor(state.nativePath, resumeCfg);
   if (!follower) return 1;
   const all = follower.poll();
   if (all.length < head.events) {
@@ -2918,13 +2923,13 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   }
 }
 
-function followerFor(nativePath: string): SessionFollower | null {
+function followerFor(nativePath: string, redaction: RedactionConfig): SessionFollower | null {
   const adapter = pickAdapterFor(nativePath);
   if (!adapter) {
     console.error("no adapter recognizes this file");
     return null;
   }
-  return new SessionFollower(nativePath, adapter);
+  return new SessionFollower(nativePath, adapter, redaction);
 }
 
 function openShareInbox(relayUrl: string, share: ShareInfo): AbortController {
