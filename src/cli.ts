@@ -615,10 +615,17 @@ function importNativeLog(
 
   const converted = adapter.convert(lines, base ? { base } : undefined);
   const redactions: RedactionCounts = {};
+  // One pass, with the project's config. `redactCfg` is already the disabled
+  // config under --no-redact, so redaction is off by that route rather than by
+  // skipping a second call.
+  //
+  // There used to be a second, config-less pass here: #79 guarded the original
+  // line with `if (!opts.noRedact)` and #98 added a config-aware one above it,
+  // and the merge kept both. Running the built-ins again over the result
+  // undid the one thing an allowlist exists to do, so a documented example key
+  // survived the pass that honoured the config and was rewritten by the pass
+  // that did not.
   for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions, redactCfg);
-  if (!opts.noRedact) {
-    for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions);
-  }
   const events = buildChain(converted.sessionId, converted.drafts);
   // Same id already stored means the source grew (a resumed session) or changed.
   const previous = listSessionIds(opts.dir).includes(converted.sessionId)
