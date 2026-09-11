@@ -54,6 +54,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   Deterministic: the same input always produces byte-identical output.
   Credential-looking strings are redacted on the way in (see
   [SPEC.md section 8](SPEC.md) for exactly what is and isn't caught).
+  `--no-redact` stores a session verbatim when redaction would mangle it;
+  `share`, `pr` and `export-html` then refuse that session until you pass
+  `--allow-unredacted`, and re-importing without the flag puts redaction back.
 - **`agit ls`** — list imported sessions: start, duration, events, files
   touched, and tags. Ids show as the shortest prefix still unique in the
   store. Narrow with `--tag`, `--runtime` or `--project`, order with
@@ -66,11 +69,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   retention. Both confirm before deleting, and refuse outright when there is
   no terminal to ask unless `--yes` is passed. `rm` warns first that any fork
   of the session loses its merge base, since `agit merge` reconstructs that
-  from the log.
-  `--no-redact` stores a session verbatim when redaction would mangle it;
-  `share`, `pr` and `export-html` then refuse that session until you pass
-  `--allow-unredacted`, and re-importing without the flag puts redaction back.
-- **`agit ls`** — list imported sessions: start, duration, events, files touched.
+  from the log — it cannot know whether such a fork exists, since forks live
+  wherever `--out` put them with no registry to consult, and says so rather
+  than guessing.
 - **`agit show <id>`** — one-session summary: model, tools, token totals,
   per-file diffstat. `--by-model` splits it: what each model cost and how
   many files its edits touched. Tokens are exact; file attribution credits
@@ -91,17 +92,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `agit stats --by model --price rates.json`. A model missing from the table
   is reported as unpriced, never costed at zero, and a group whose runtime
   records no cost events at all says so rather than showing a row of zeros.
-- **`agit rm <id> --yes`** — delete a session from the store. `--yes` is the
-  confirmation: there is no interactive prompt for a script to answer, so the
-  flag is it. Without it, `rm` says what it would remove and stops. It does
-  not know whether a fork somewhere still points at the session — forks live
-  wherever `--out` put them, with no registry to consult — and says so rather
-  than guessing.
-- **`agit stats`** — token and API-call totals across every imported
-  session, grouped `--by model` (default) or `--by runtime`. A fold over the
-  `cost` events each session already carries, so it needs no new data — and
-  it says how many sessions it could not read rather than quietly leaving
-  them out. `--json` for scripts.
+  A fold over the `cost` events each session already carries, so it needs no
+  new data, and it says how many sessions it could not read rather than
+  quietly leaving them out. `--json` for scripts.
 - **`agit grep <pattern>`** — search every imported session at once:
   "which session touched auth.py" (`--path`), "where did I run pytest"
   (`--type tool.call`). Matches the same one-line rendering `replay
