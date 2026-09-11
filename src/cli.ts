@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
+import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
 import type { Adapter } from "./adapters/adapter.js";
@@ -91,7 +92,7 @@ import {
   type StatsRow,
 } from "./stats.js";
 
-const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter, atifAdapter];
+const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter, atifAdapter, clineSdkAdapter];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
 const USAGE = `agit — git for running agents

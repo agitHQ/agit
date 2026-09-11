@@ -3,6 +3,39 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Cline SDK import** (#63), the second adapter after ATIF that reads a
+  published contract rather than one runtime's private layout. `agit import
+  <id>.messages.json` ingests the format new Cline sessions land in from 4.0,
+  which Cline documents as "the canonical replay/export artifact" and ships
+  with a golden fixture and contract tests. Every field name is from that
+  document and checked against that fixture: conversation, thinking, tool
+  calls matched to results by id, and per-turn metrics including cache reads
+  and writes.
+
+  **It emits no `file.diff`, for a reason more specific than ATIF's.** The
+  `editor` tool's create path converts LF to CRLF when, and only when, the
+  operating system Cline ran on is Windows, and the log does not record which
+  OS that was. A hash over `new_text` would be right on Linux and wrong on
+  Windows — a hash agit did not compute over bytes it holds. Edit results
+  carry only a diff the runtime truncates at 200 lines. So `editor` and
+  `apply_patch` calls are recorded as the tool calls they are and counted as
+  edits agit cannot verify; `blame`, `why`, `fork`, `merge` and `diff` have
+  nothing to work with, and everything else does.
+
+  The contract says consumers should tolerate unknown keys; tolerated here
+  means counted, so an unknown content block is named in the report rather
+  than vanishing. A contract version other than 1 is refused, since the
+  contract bumps it only for breaking changes and reading one would mean
+  guessing at what broke. The system prompt is counted, since agit has no
+  system-message event; messages without a timestamp inherit the last seen
+  and are counted; a file with none anywhere is refused rather than dated
+  from the clock. The older VS Code globalStorage layout is undocumented and
+  unversioned and is deliberately not read.
+
 ## 0.7.1 — 2026-09-11
 
 ### Fixed

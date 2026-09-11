@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-02T09:14:22.000Z",
+  "agent": "lead",
+  "sessionId": "cline-fixture-0001",
+  "taskType": "act",
+  "system_prompt": "You are a careful coding agent working in /work/app.",
+  "messages": [
+    {
+      "id": "msg_user_1",
+      "role": "user",
+      "content": [{ "type": "text", "text": "Add a retry helper and use it in the fetch path." }]
+    },
+    {
+      "id": "msg_assistant_1",
+      "role": "assistant",
+      "ts": 1777713262000,
+      "modelInfo": { "id": "some-model-v1", "provider": "example", "family": "some-model" },
+      "content": [
+        { "type": "thinking", "thinking": "Read the fetch module before touching it." },
+        { "type": "tool_use", "id": "call_1", "name": "read_files", "input": { "files": [{ "path": "/work/app/src/fetch.ts" }] } }
+      ]
+    },
+    {
+      "id": "msg_user_2",
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "call_1", "content": "export async function get(url: string) { return fetch(url); }\n", "is_error": false }
+      ]
+    },
+    {
+      "id": "msg_assistant_2",
+      "role": "assistant",
+      "ts": 1777713271000,
+      "modelInfo": { "id": "some-model-v1", "provider": "example", "family": "some-model" },
+      "content": [
+        { "type": "text", "text": "Adding the helper, then wiring it in." },
+        { "type": "tool_use", "id": "call_2", "name": "editor", "input": { "path": "/work/app/src/retry.ts", "new_text": "export const retries = 3;\n" } },
+        { "type": "tool_use", "id": "call_3", "name": "run_commands", "input": { "commands": [{ "command": "npm", "args": ["test"] }] } }
+      ]
+    },
+    {
+      "id": "msg_user_3",
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "call_2", "content": "File created successfully at: /work/app/src/retry.ts", "is_error": false },
+        { "type": "tool_result", "tool_use_id": "call_3", "content": [{ "type": "text", "text": "1 failing" }], "is_error": true },
+        { "type": "image", "source": { "media_type": "image/png", "data": "" } }
+      ]
+    },
+    {
+      "id": "msg_assistant_3",
+      "role": "assistant",
+      "ts": 1777713290000,
+      "modelInfo": { "id": "some-model-v1", "provider": "example", "family": "some-model" },
+      "content": [{ "type": "text", "text": "One test still fails; the helper is in place." }],
+      "metrics": { "inputTokens": 1200, "outputTokens": 340, "cacheReadTokens": 900, "cacheWriteTokens": 40, "cost": 0.021 }
+    }
+  ]
+}
