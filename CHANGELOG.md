@@ -3,6 +3,33 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## 0.7.1 — 2026-09-11
+
+### Fixed
+
+Two redaction gaps, both found by @thegoodengineer, both in paths that put a
+log in front of other people.
+
+- **A live share redacted by the built-in patterns alone** (#113). A live
+  share re-converts from the native log rather than reading the store, so the
+  follower did its own redaction and never saw `.agit/redact.json`. On the
+  same log with the same config, `import` redacted a custom token and the
+  live share published it verbatim. A custom pattern exists precisely because
+  the built-ins cannot know an internal token format, and share is the path
+  that shows the result to others — so that was the one place it had to apply
+  and the one place it did not. The follower now takes the project's config,
+  and `share --resume` passes the same one deliberately: resume regenerates
+  the chain against the head the relay holds, so a different rule there would
+  change the bytes and break the prefix match.
+- **The allowlist was undone by a second redaction pass on import** (#114).
+  Import ran `redactDeep` twice, and the second call took no config, so it was
+  the built-in list. A documented example key survived the pass that honoured
+  the allowlist and was rewritten by the pass that did not. A merge artifact:
+  #79 guarded the original line for `--no-redact` and #98 added a
+  config-aware call above it, and both survived. The guard was redundant too,
+  since `--no-redact` already flows through the config. One pass now, and each
+  redaction is counted once.
+
 ## 0.7.0 — 2026-09-10
 
 ### Fixed
