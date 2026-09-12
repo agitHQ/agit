@@ -50,4 +50,11 @@ export interface Adapter {
    */
   detectBytes?(bytes: Uint8Array): boolean;
   convertBytes?(bytes: Uint8Array, opts?: ConvertOptions): ConvertResult;
+  /**
+   * The native ids of every session a binary file holds, in a stable order,
+   * each usable as `ConvertOptions.select`. The import path imports them
+   * all unless told which one; `convertBytes` without `select` is only for
+   * a file that holds exactly one.
+   */
+  sessionsIn?(bytes: Uint8Array): string[];
 }

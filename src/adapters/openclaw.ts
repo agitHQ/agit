@@ -27,10 +27,25 @@
  * to files that predate the session, failed patches, no-ops and unparseable
  * input are skipped and counted, never guessed.
  *
- * Still to be exercised against a real OpenClaw transcript (#6): a real log
- * that disagrees names its unmapped records in `agit import` output.
+ * Validated against a real OpenClaw 2026.9.3 transcript (#46): every record
+ * mapped or was named in the import report, and `apply_patch` records
+ * carried the path/kind/diff shapes this adapter reads.
+ *
+ * **The same transcript from the agent database.** OpenClaw persists a
+ * session's transcript in `<state dir>/agents/<agent>/agent/openclaw-agent.sqlite`
+ * (src/state/openclaw-agent-db.paths.ts), in a `transcript_events` table of
+ * `(session_id, seq, event_json, created_at)` (src/state/openclaw-agent-schema.sql),
+ * and reads it back as `SELECT event_json … WHERE session_id = ? ORDER BY seq`
+ * (src/config/sessions/session-accessor.sqlite-read.ts). `agit import` on
+ * that file does the same read, with the in-tree SQLite reader, and hands
+ * each session's rows to the JSONL mapping above — the rows *are* the JSONL,
+ * one line per row. Every session in the file is imported unless
+ * `--thread <id>` names one. Nothing else in the database is read: the
+ * active-event projection, archives and watermarks are the runtime's own
+ * bookkeeping over the same rows.
  */
 import { createHash } from "node:crypto";
+import { looksLikeSqlite, rowsOf, SqliteFile, type SqliteValue } from "../sqlite.js";
 import { applyUpdate, parseApplyPatch, type PatchHunk } from "./openclaw-patch.js";
 import type { DraftEvent, Json } from "../format/events.js";
 import { seedKnownFromBase } from "../base.js";
@@ -593,4 +608,73 @@ export const openclawAdapter: Adapter = {
 
     return { sessionId, drafts, records, skipped };
   },
+
+  /** The agent database: a SQLite file with OpenClaw's `transcript_events` table. */
+  detectBytes(bytes: Uint8Array): boolean {
+    if (!looksLikeSqlite(bytes)) return false;
+    try {
+      const t = new SqliteFile(bytes).table("transcript_events");
+      return t !== undefined && ["session_id", "seq", "event_json"].every((c) => t.columns.includes(c));
+    } catch {
+      return false;
+    }
+  },
+
+  sessionsIn(bytes: Uint8Array): string[] {
+    return [...transcriptRows(bytes).keys()].sort();
+  },
+
+  /**
+   * One session's rows, in `seq` order, are its JSONL; the mapping is the
+   * one above. Rowid order is not trusted: the runtime's own reader orders
+   * by `seq`, and so does this.
+   */
+  convertBytes(bytes: Uint8Array, opts?: ConvertOptions): ConvertResult {
+    const bySession = transcriptRows(bytes);
+    const ids = [...bySession.keys()].sort();
+    if (ids.length === 0) throw new Error("this OpenClaw agent database holds no transcript events");
+    let sessionId: string;
+    if (opts?.select !== undefined) {
+      if (!bySession.has(opts.select)) {
+        throw new Error(
+          `no session ${JSON.stringify(opts.select)} in this database; sessions: ${ids.join(", ")}`,
+        );
+      }
+      sessionId = opts.select;
+    } else if (ids.length === 1) {
+      sessionId = ids[0]!;
+    } else {
+      throw new Error(
+        `this database holds ${ids.length} sessions; pass --thread <id> to pick one: ${ids.join(", ")}`,
+      );
+    }
+    const rows = bySession.get(sessionId)!.sort((a, b) => a.seq - b.seq);
+    return openclawAdapter.convert(
+      rows.map((r) => r.json),
+      opts,
+    );
+  },
 };
+
+/** `transcript_events` grouped by session: the rows OpenClaw's reader would page through. */
+function transcriptRows(bytes: Uint8Array): Map<string, { seq: number; json: string }[]> {
+  const db = new SqliteFile(bytes);
+  const table = db.table("transcript_events");
+  if (table === undefined)
+    throw new Error("this SQLite database has no `transcript_events` table; not an OpenClaw agent database");
+  const out = new Map<string, { seq: number; json: string }[]>();
+  for (const r of rowsOf(db, table)) {
+    const sid = r.session_id;
+    const json = r.event_json;
+    if (typeof sid !== "string" || typeof json !== "string") continue;
+    const seq = seqOf(r.seq ?? null);
+    const list = out.get(sid) ?? [];
+    list.push({ seq, json });
+    out.set(sid, list);
+  }
+  return out;
+}
+
+function seqOf(v: SqliteValue): number {
+  return typeof v === "number" ? v : typeof v === "bigint" ? Number(v) : Number.NaN;
+}

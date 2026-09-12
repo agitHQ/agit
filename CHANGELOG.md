@@ -7,6 +7,19 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **OpenClaw's agent database imports directly.** OpenClaw persists a
+  session's transcript in `<state dir>/agents/<agent>/agent/openclaw-agent.sqlite`
+  (`transcript_events`: `session_id`, `seq`, `event_json`), which is where
+  the one real-log validation so far (#46) had to extract JSONL from by
+  hand. `agit import openclaw-agent.sqlite` now reads the rows the way
+  OpenClaw's own reader does — one session's `event_json` in `seq` order —
+  and hands them to the same mapping the JSONL goes through, so a session
+  imported from the database has the same chain as one imported from its
+  transcript file. `import --all` finds the database beside the sessions
+  directory. A database holds sessions rather than a session: every one in
+  it is imported, one line each, and `--thread <id>` names one (this
+  applies to LangGraph databases too, which previously refused without
+  `--thread`).
 - **LangGraph adapter.** `agit import <checkpoints.sqlite>` reads the
   database `langgraph-checkpoint-sqlite` writes and imports one thread's
   current history — human, AI (with tool calls and usage), and tool messages

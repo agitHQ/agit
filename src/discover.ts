@@ -8,7 +8,13 @@
  *  - Claude Code  ~/.claude/projects/<project>/<session>.jsonl
  *  - Codex        ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl
  *  - OpenClaw     $OPENCLAW_STATE_DIR (default ~/.openclaw)/agents/<id>/sessions/<session>.jsonl
- *                 — src/config/state-dir.ts and src/config/sessions/paths.ts.
+ *                 — src/config/state-dir.ts and src/config/sessions/paths.ts —
+ *                 and the agent database beside it,
+ *                 agents/<id>/agent/openclaw-agent.sqlite
+ *                 (src/state/openclaw-agent-db.paths.ts), which holds every
+ *                 session's transcript rows and is where newer OpenClaw
+ *                 versions keep them; the incognito database beside it is
+ *                 process-held and deliberately not read.
  *                 Skipped on purpose, per src/config/sessions/artifacts.ts:
  *                 compaction checkpoints (`<id>.checkpoint.<uuid>.jsonl`, which
  *                 carry the same session id and would overwrite the real one),
@@ -92,9 +98,14 @@ function scanCodex(root: string, out: DiscoveredLog[], depth = 0): void {
   }
 }
 
-/** OpenClaw: agents/<id>/sessions/<session>.jsonl, minus the artifacts that share a session's id. */
+/**
+ * OpenClaw: agents/<id>/sessions/<session>.jsonl, minus the artifacts that
+ * share a session's id, plus agents/<id>/agent/openclaw-agent.sqlite.
+ */
 function scanOpenClaw(agentsRoot: string, out: DiscoveredLog[]): void {
   for (const agent of listDir(agentsRoot)) {
+    const db = join(agentsRoot, agent, "agent", "openclaw-agent.sqlite");
+    if (isFile(db)) record("openclaw", db, out);
     const sessions = join(agentsRoot, agent, "sessions");
     if (!isDir(sessions)) continue;
     for (const name of listDir(sessions)) {

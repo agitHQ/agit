@@ -58,11 +58,12 @@
  * the `writes` table walked the way the saver does it, and a wrong walk is
  * a wrong history.
  *
- * **One thread per session.** A database can hold many threads. With one,
- * it is imported; with several, the import refuses and lists them, and
- * `--thread <id>` picks one (`ConvertOptions.select`). The session id is the
- * thread id when SPEC §1 allows it as a directory name, and a hash-suffixed
- * form otherwise. A thread that is still being written keeps its newest
+ * **One thread per session.** A database can hold many threads; `sessionsIn`
+ * lists them and `agit import` takes each in turn unless `--thread <id>`
+ * names one (`ConvertOptions.select`). `convertBytes` without a selection
+ * serves a database holding exactly one thread and refuses, naming them,
+ * otherwise. The session id is the thread id when SPEC §1 allows it as a
+ * directory name, and a hash-suffixed form otherwise. A thread that is still being written keeps its newest
  * pages in the `-wal` sidecar until the process checkpoints them; the CLI
  * refuses such a file rather than read a stale main file as current.
  */
@@ -271,6 +272,10 @@ export const langgraphAdapter: Adapter = {
     }
   },
 
+  sessionsIn(bytes: Uint8Array): string[] {
+    return [...new Set(readCheckpoints(new SqliteFile(bytes)).map((r) => r.threadId))].sort();
+  },
+
   convertBytes(bytes: Uint8Array, opts?: ConvertOptions): ConvertResult {
     const skipped: Record<string, number> = {};
     const skip = (what: string, n = 1): void => {
@@ -306,8 +311,6 @@ export const langgraphAdapter: Adapter = {
       );
     }
     const mine = all.filter((r) => r.threadId === threadId);
-    const others = all.length - mine.length;
-    if (others > 0) skip("checkpoint-in-other-thread", others);
 
     // The root namespace is the graph itself; a subgraph checkpoints under
     // its own namespace, and its messages reach the parent's state through

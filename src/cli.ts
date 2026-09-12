@@ -124,9 +124,10 @@ usage:
                                        refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
-  agit import <checkpoints.sqlite>     import a LangGraph thread from its
-                       [--thread ID]   checkpoint database (one thread per
-                                       session; --thread picks among several)
+  agit import <db.sqlite> [--thread ID]
+                                       import every session in a LangGraph
+                                       checkpoint database or an OpenClaw
+                                       agent database; --thread picks one
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
          [--project P] [--sort KEY]    started (default), events, files or id
@@ -685,12 +686,13 @@ function importNativeLog(
   known: Map<string, KnownSource>,
   redactCfg: RedactionConfig,
   base?: BaseTree,
+  select?: string,
 ): ImportOutcome {
   const sha256 =
     input.kind === "text"
       ? sha256Hex(input.raw)
       : sha256Hex(Buffer.from(input.bytes.buffer, input.bytes.byteOffset, input.bytes.byteLength));
-  const key = sourceKey(sha256, opts.thread);
+  const key = sourceKey(sha256, select);
   const hit = known.get(key);
   // The source bytes alone stopped being a complete identity the moment
   // --no-redact made the stored output depend on a flag too. Re-import when
@@ -701,10 +703,7 @@ function importNativeLog(
     return { status: "unchanged", id: hit.id };
   }
 
-  const convertOpts = {
-    ...(base ? { base } : {}),
-    ...(opts.thread !== undefined ? { select: opts.thread } : {}),
-  };
+  const convertOpts = { ...(base ? { base } : {}), ...(select !== undefined ? { select } : {}) };
   let adapter: Adapter | undefined;
   let converted;
   if (input.kind === "bytes") {
@@ -748,7 +747,7 @@ function importNativeLog(
       sha256,
       bytes: statSync(path).size,
       records: converted.records,
-      ...(opts.thread !== undefined ? { select: opts.thread } : {}),
+      ...(select !== undefined ? { select } : {}),
     },
     skipped: converted.skipped,
     redactions,
@@ -950,6 +949,63 @@ function cmdImport(opts: Opts): number {
   return importPath(opts, resolve(src));
 }
 
+/**
+ * Which sessions of a binary file to import: the one named, else every one
+ * the adapter lists, else (an adapter that cannot list) the file as a whole.
+ */
+function sessionsToImport(
+  adapter: Adapter,
+  bytes: Uint8Array,
+  named: string | undefined,
+): (string | undefined)[] {
+  if (adapter.sessionsIn === undefined) return [named];
+  const ids = adapter.sessionsIn(bytes);
+  if (named !== undefined) {
+    if (!ids.includes(named))
+      throw new Error(`no session ${JSON.stringify(named)} in this file; it holds: ${ids.join(", ")}`);
+    return [named];
+  }
+  if (ids.length === 0) throw new Error("this file holds no sessions");
+  return ids;
+}
+
+interface ImportTally {
+  imported: number;
+  updated: number;
+  unchanged: number;
+  unrecognized: number;
+  failed: number;
+}
+
+function newTally(): ImportTally {
+  return { imported: 0, updated: 0, unchanged: 0, unrecognized: 0, failed: 0 };
+}
+
+/** One line per outcome, the shape `import --all` has always printed. */
+function printTallyLine(tally: ImportTally, outcome: ImportOutcome, runtime: string, where: string): void {
+  tally[outcome.status]++;
+  const id = (outcome.id ?? "").slice(0, 20).padEnd(20);
+  if (outcome.status === "imported") {
+    console.log(
+      `  imported   ${id} ${runtime.padEnd(12)} ${String(outcome.events).padStart(6)} events   ${where}`,
+    );
+  } else if (outcome.status === "updated") {
+    console.log(
+      `  updated    ${id} ${runtime.padEnd(12)} ${outcome.previousEvents} → ${outcome.events} events   ${where}`,
+    );
+  } else if (outcome.status === "unrecognized") {
+    console.log(`  skipped    ${where}: no adapter recognizes this file`);
+  }
+}
+
+function printTallySummary(opts: Opts, tally: ImportTally): number {
+  const total = listSessionIds(opts.dir).length;
+  console.log(
+    `\n${tally.imported} imported, ${tally.updated} updated, ${tally.unchanged} unchanged, ${tally.unrecognized} skipped, ${tally.failed} failed — ${total} session${total === 1 ? "" : "s"} in ${join(opts.dir, ".agit")}`,
+  );
+  return tally.failed > 0 ? 1 : 0;
+}
+
 /** One path: a pr bundle directory, an agit log, or a native session log. */
 function importPath(opts: Opts, target: string): number {
   let path = target;
@@ -966,10 +1022,13 @@ function importPath(opts: Opts, target: string): number {
     }
     path = inner;
   }
-  // A runtime whose log is not text (a LangGraph checkpoint database) is
-  // recognized from its bytes, before anything tries to read it as UTF-8.
+  // A runtime whose log is not text (a LangGraph checkpoint database, an
+  // OpenClaw agent database) is recognized from its bytes, before anything
+  // tries to read it as UTF-8. Such a file may hold several sessions; every
+  // one is imported unless --thread names one.
   const bytes = readFileSync(path);
-  if (ADAPTERS.some((a) => a.detectBytes?.(bytes))) {
+  const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
+  if (binary !== undefined) {
     const stale = walSidecarWarning(path);
     if (stale !== null) {
       console.error(stale);
@@ -977,10 +1036,34 @@ function importPath(opts: Opts, target: string): number {
     }
     const redactCfg = redactionConfigFor(opts);
     if (redactCfg === null) return 2;
-    return printImportReport(
-      opts,
-      importNativeLog(opts, path, { kind: "bytes", bytes }, knownSources(opts.dir), redactCfg),
-    );
+    let selections: (string | undefined)[];
+    try {
+      selections = sessionsToImport(binary, bytes, opts.thread);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      return 1;
+    }
+    const known = knownSources(opts.dir);
+    if (selections.length === 1) {
+      return printImportReport(
+        opts,
+        importNativeLog(opts, path, { kind: "bytes", bytes }, known, redactCfg, undefined, selections[0]),
+      );
+    }
+    console.log(`${path}: ${selections.length} sessions\n`);
+    const tally = newTally();
+    for (const select of selections) {
+      let outcome: ImportOutcome;
+      try {
+        outcome = importNativeLog(opts, path, { kind: "bytes", bytes }, known, redactCfg, undefined, select);
+      } catch (err) {
+        tally.failed++;
+        console.log(`  failed     ${select}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      printTallyLine(tally, outcome, binary.name, select ?? path);
+    }
+    return printTallySummary(opts, tally);
   }
 
   const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
@@ -1064,12 +1147,49 @@ function cmdImportDiscovered(opts: Opts): number {
   }
 
   const known = knownSources(opts.dir);
-  const tally = { imported: 0, updated: 0, unchanged: 0, unrecognized: 0, failed: 0 };
+  const tally = newTally();
   console.log("");
   for (const log of candidates) {
+    const bytes = readFileSync(log.path);
+    const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
+    if (binary !== undefined) {
+      // A database holds sessions, not a session: one line each, as the
+      // path import prints them. A stale one (unapplied WAL frames) is a
+      // failure to name, not a file to read as if it were current.
+      const stale = walSidecarWarning(log.path);
+      let selections: (string | undefined)[];
+      try {
+        if (stale !== null) throw new Error(stale);
+        selections = sessionsToImport(binary, bytes, undefined);
+      } catch (err) {
+        tally.failed++;
+        console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      for (const select of selections) {
+        try {
+          const outcome = importNativeLog(
+            opts,
+            log.path,
+            { kind: "bytes", bytes },
+            known,
+            redactCfg,
+            undefined,
+            select,
+          );
+          printTallyLine(tally, outcome, log.runtime, `${log.path} ${select ?? ""}`.trimEnd());
+        } catch (err) {
+          tally.failed++;
+          console.log(
+            `  failed     ${log.path} ${select ?? ""}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      continue;
+    }
     let outcome: ImportOutcome;
     try {
-      const raw = readNativeLog(log.path);
+      const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
       const lines = raw.split("\n").filter((l) => l.trim() !== "");
       outcome = looksLikeAgitLog(lines)
         ? { status: "unrecognized" }
@@ -1079,25 +1199,9 @@ function cmdImportDiscovered(opts: Opts): number {
       console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
       continue;
     }
-    tally[outcome.status]++;
-    const id = (outcome.id ?? "").slice(0, 20).padEnd(20);
-    if (outcome.status === "imported") {
-      console.log(
-        `  imported   ${id} ${log.runtime.padEnd(12)} ${String(outcome.events).padStart(6)} events   ${log.path}`,
-      );
-    } else if (outcome.status === "updated") {
-      console.log(
-        `  updated    ${id} ${log.runtime.padEnd(12)} ${outcome.previousEvents} → ${outcome.events} events   ${log.path}`,
-      );
-    } else if (outcome.status === "unrecognized") {
-      console.log(`  skipped    ${log.path}: no adapter recognizes this file`);
-    }
+    printTallyLine(tally, outcome, log.runtime, log.path);
   }
-  const total = listSessionIds(opts.dir).length;
-  console.log(
-    `\n${tally.imported} imported, ${tally.updated} updated, ${tally.unchanged} unchanged, ${tally.unrecognized} skipped, ${tally.failed} failed — ${total} session${total === 1 ? "" : "s"} in ${join(opts.dir, ".agit")}`,
-  );
-  return tally.failed > 0 ? 1 : 0;
+  return printTallySummary(opts, tally);
 }
 
 /**
