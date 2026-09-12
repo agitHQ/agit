@@ -74,6 +74,85 @@ and each reproduction is now a test.
   duplicate, and the next push landed after a gap. The store is written
   first now; if it throws, nothing has changed and the retry is right.
 
+Forty-five medium and low findings from the same review, one fixer per
+file group, each reproduced against the built CLI before being changed and
+each now guarded by a test that fails without its fix. By area:
+
+- **ATIF import.** Observation results with no `source_call_id`, results
+  naming a call that is not on their step, non-object steps, wrong-typed
+  `tool_calls` / `observation.results` / `metrics`, and
+  `subagent_trajectory_ref` were all dropped without a count; every one is
+  counted now, and `records` is the length of the raw `steps` array. Steps
+  marked `is_copied_context` are another trajectory's work and are left out
+  and counted, with `continued_trajectory_ref` kept on `session.start` so
+  the other file can be found. An agent name with a space or slash broke
+  the derived id (sanitised now), an empty-string `trajectory_id` shadowed a
+  real `session_id`, several id-less calls on one step shared a fallback id
+  (it carries the call's position now), and `cost_usd: null` was hashed in
+  as `costUsd: 0` (left out unless a finite number).
+- **Cline SDK import.** `convert()` ignored `live`, so a live share of a
+  running Cline session broke on the first update; it honours it now, which
+  also means `updated_at` no longer enters the chain — **the hash of every
+  Cline import changes relative to 0.8.0** (a field that changes on every
+  write cannot sit in a prefix-stable log). The invented `"(missing)"` tool
+  id, which paired unrelated calls and results in exports, is gone: a block
+  without an id is recorded with `toolUseId: null` and counted. Timestamps
+  outside the ISO range no longer abort the import or emit extended years;
+  non-object content entries and wrong-typed text blocks are counted;
+  non-numeric `metrics.cost` is left out rather than recorded as 0.
+- **Exports (`--otel`, `--atif`).** Results and edits are paired with their
+  call by position, not by id alone, so a second call under a duplicate id
+  no longer inherits the first one's result; a result that names no call is
+  kept unpaired — ATIF as an observation result without `source_call_id`,
+  OTLP by naming the events on the root span — instead of being guessed at
+  or dropped. Edits no call claims stay in both exports (OTLP root gains
+  `agit.files.recorded` and `agit.files.lower_bound`; ATIF steps gain
+  `agitFileEditsWithoutCall`). A zone-less `ts` is read as the UTC the SPEC
+  declares, so the same log exports the same trace on every machine. Token
+  counts beyond int64 or non-integer are refused rather than emitted into
+  documents both validators reject. `agitSigned` now means "present and
+  every signature verifies", with `agitSignatures` listing each verdict.
+  **The OTLP root span id is now `sha256("agit-root:" + firstHash)[0:16]`**
+  rather than the first event's own prefix, which collided with that
+  event's child span when seq 0 was not `session.start`; child span ids are
+  unchanged. An ATIF export with zero steps, which Harbor rejects, is
+  refused; `--otel` no longer crashes on an adopted `meta.json` without
+  `adapter`.
+- **MCP server.** `agit_diff` reports a file whose path sanitises to
+  nothing instead of failing the whole call; `agit_grep` rejects an unknown
+  `type` (and `path` with a non-file type) by name instead of answering "no
+  hits"; `agit_list` carries `verified` like every other answer; an unknown
+  tool is `-32602` as the MCP spec files it, not `-32601`; JSON-RPC batches
+  are accepted under the 2025-03-26 revision the server negotiates.
+- **CLI.** `pull` no longer reads the project's own `meta.json` as the
+  pulled session's; a `remotes.json` that is not an object no longer crashes
+  `push` after publishing; `push` to a second `--relay` publishes there
+  instead of being a silent no-op; `verify` and `sign` report a malformed
+  `signatures` field instead of a bare TypeError, and `sign` refuses to add a
+  name next to junk; `share --detach` on a live target is refused before a
+  share exists, not after the link and the writer token were written;
+  `relay --store` says at startup where shares are written and that the
+  directory holds writer tokens.
+- **Live follower.** The (size, mtime) pair is remembered only once settled,
+  so a rewrite in the same tick as the first read cannot slip past the
+  digest; a UTF-8 BOM is stripped so a live share stays byte-identical to
+  its import; stat is committed only after a successful read, so one
+  transient error no longer hides an appended tail; `pull` reads a bounded
+  body instead of whatever a hostile relay sends.
+- **Signing.** The OpenSSH loader derives the public key from the seed
+  instead of trusting the file's copy, so a mismatched key file cannot
+  produce a signature that never verifies; the raw key length is checked
+  (a padded key line used to verify under a different fingerprint);
+  small-order public keys are refused; the encrypted-key message no longer
+  suggests an `ssh-keygen` command that would strip the passphrase from the
+  original in place; README's sample output matches what `verify` prints.
+- **Relay.** The reaper can no longer delete a share while a push is still
+  reading its body (the push then answered 200 and recreated an orphan file
+  in the store); `maxShares` is enforced after the body is read, so
+  concurrent creates cannot overshoot it; store metadata is validated on
+  load, so a file without numeric `createdAt`/`ttlMs` no longer loads as a
+  share that never expires and throws on every stream.
+
 ## 0.8.0 — 2026-09-11
 
 ### Added
