@@ -44,7 +44,7 @@ import {
   type RedactionConfig,
   type RedactionCounts,
 } from "./redact.js";
-import { toAtif, toOtlpJson } from "./interop.js";
+import { toAtif, toMarkdown, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
 import { walSidecarWarning } from "./sqlite.js";
@@ -161,6 +161,7 @@ usage:
                                        JSON array with --json — for other tools
   agit export <id> --otel              OTLP/JSON spans (OpenTelemetry GenAI)
   agit export <id> --atif              an ATIF trajectory (Harbor's format)
+  agit export <id> --markdown          structured Markdown audit report
   agit export-html <id> [--out FILE]   write a self-contained, offline HTML session
                        [--at N]        viewer; --at N exports the prefix up to event N
   agit fork <id> --at N [--out DIR]    branch at event N: reconstruct the file tree
@@ -290,6 +291,7 @@ interface Opts {
   key?: string;
   otel?: boolean;
   atif?: boolean;
+  markdown?: boolean;
   detach?: boolean;
   force?: boolean;
   store?: string;
@@ -422,6 +424,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--config") opts.config = true;
     else if (a === "--otel") opts.otel = true;
     else if (a === "--atif") opts.atif = true;
+    else if (a === "--markdown" || a === "-md") opts.markdown = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
     else rest.push(a);
   }
@@ -2735,6 +2738,13 @@ function cmdExport(opts: Opts): number {
     const meta = readSessionMeta(opts.dir, id);
     const doc = opts.otel ? toOtlpJson(events, meta) : toAtif(events, meta);
     process.stdout.write(JSON.stringify(doc, null, 2) + "\n");
+    return 0;
+  }
+
+  if (opts.markdown) {
+    const events = readSessionEvents(opts.dir, id);
+    const meta = readSessionMeta(opts.dir, id);
+    process.stdout.write(toMarkdown(events, meta));
     return 0;
   }
 
