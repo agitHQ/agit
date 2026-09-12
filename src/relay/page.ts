@@ -68,7 +68,9 @@ export const SHARE_PAGE = `<!doctype html>
   input, button { background: var(--chip); color: var(--fg); border: 1px solid var(--border);
                   border-radius: 4px; padding: 5px 8px; font: inherit; }
   input:focus { outline: 1px solid var(--accent); }
-  #name { width: 90px; } #text { flex: 1; }
+  #name { width: 90px; } #text { flex: 1; } #key { width: 110px; display: none; }
+  #chat.steer #key { display: inline-block; }
+  .m .to { color: var(--dim); }
   button { cursor: pointer; } button:hover { border-color: var(--accent); }
   label.auto { margin-left: auto; color: var(--dim); font-size: 12px; user-select: none; }
   .hint { color: var(--dim); font-size: 12px; margin-top: 4px; }
@@ -94,6 +96,7 @@ export const SHARE_PAGE = `<!doctype html>
         <div id="msgs"></div>
         <form id="mform">
           <input id="name" placeholder="name" maxlength="40" autocomplete="off">
+          <input id="key" type="password" placeholder="steer key" maxlength="64" autocomplete="off">
           <input id="text" placeholder="lands in their terminal — not injected into the agent" maxlength="4000" autocomplete="off">
           <button>send</button>
         </form>
@@ -252,6 +255,13 @@ es.addEventListener("info", function (m) {
     s.className = info.live ? "live" : "ended";
     s.textContent = info.live ? "live" : "ended";
     $("viewers").textContent = info.viewers + " watching";
+    // The sharer opted into steering: with the steer key they issued, a
+    // message reaches the agent at its next turn boundary. Without one it
+    // is still terminal-only, exactly as before.
+    if (info.steer) {
+      $("chat").classList.add("steer");
+      $("text").placeholder = "with the steer key: reaches the agent at its next turn; without: their terminal only";
+    }
   } catch (e) {}
 });
 es.addEventListener("msg", function (m) {
@@ -261,6 +271,7 @@ es.addEventListener("msg", function (m) {
     var row = el("div", "m", "");
     row.appendChild(el("span", "when", msg.ts.slice(11, 19) + " "));
     row.appendChild(el("span", "who", msg.name + ": "));
+    if (msg.steer) row.appendChild(el("span", "to", "⇢ agent "));
     row.appendChild(el("span", "", msg.text));
     box.appendChild(row);
     box.scrollTop = box.scrollHeight;
@@ -279,10 +290,13 @@ $("mform").onsubmit = function (ev) {
   if (!text) return;
   var name = $("name").value.trim() || "viewer";
   try { localStorage.setItem("agit-name", name); } catch (e) {}
+  var body = { name: name, text: text };
+  var key = $("key").value;
+  if (key) body.key = key; // never stored: a steer key is a capability, not a preference
   fetch(api + "/message", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: name, text: text }),
+    body: JSON.stringify(body),
   }).then(function (r) { if (r.ok) $("text").value = ""; });
 };
 </script>

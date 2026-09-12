@@ -163,6 +163,8 @@ export interface ShareInfo {
   writerToken: string;
   ttlMs: number;
   viewUrl: string;
+  /** The relay accepted steering for this share (see src/steer.ts). */
+  steer?: boolean;
 }
 
 /** fetch() that turns "fetch failed" into an actionable first-run message. */
@@ -187,11 +189,15 @@ async function relayFetch(relayUrl: string, path: string, init?: RequestInit): P
  */
 const SHARE_ID = /^[A-Za-z0-9_-]{10,64}$/;
 
-export async function createShare(relayUrl: string, ttlMs?: number): Promise<ShareInfo> {
+export async function createShare(
+  relayUrl: string,
+  ttlMs?: number,
+  opts: { steer?: boolean } = {},
+): Promise<ShareInfo> {
   const res = await relayFetch(relayUrl, "/api/shares", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(ttlMs ? { ttlMs } : {}),
+    body: JSON.stringify({ ...(ttlMs ? { ttlMs } : {}), ...(opts.steer ? { steer: true } : {}) }),
   });
   if (!res.ok) throw new Error(`relay refused share creation: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as {
@@ -199,6 +205,7 @@ export async function createShare(relayUrl: string, ttlMs?: number): Promise<Sha
     writerToken?: unknown;
     ttlMs?: unknown;
     path?: unknown;
+    steer?: unknown;
   };
   if (typeof body.shareId !== "string" || !SHARE_ID.test(body.shareId)) {
     throw new Error(
@@ -213,11 +220,18 @@ export async function createShare(relayUrl: string, ttlMs?: number): Promise<Sha
   }
   const ttl =
     typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) && body.ttlMs > 0 ? body.ttlMs : 0;
+  // Steering was asked for and the relay did not echo it back: an older
+  // relay that ignored the flag would forward no keys, and a share that
+  // promised steering without it would be a lie — the caller refuses.
+  if (opts.steer && body.steer !== true) {
+    throw new Error("this relay does not support steering (it predates --steer); upgrade it or drop --steer");
+  }
   return {
     shareId: body.shareId,
     writerToken: body.writerToken,
     ttlMs: ttl,
     viewUrl: new URL(body.path, relayUrl).toString(),
+    steer: body.steer === true,
   };
 }
 
@@ -253,8 +267,17 @@ export async function endShare(relayUrl: string, share: ShareInfo): Promise<void
   }).catch(() => undefined); // best effort — TTL reaps it regardless
 }
 
+export interface InboxMessage {
+  name: string;
+  text: string;
+  ts: string;
+  /** The viewer claimed to steer; `key` is what they offered (writer inbox only). */
+  steer?: boolean;
+  key?: string;
+}
+
 export interface InboxHandlers {
-  onMessage?: (msg: { name: string; text: string; ts: string }) => void;
+  onMessage?: (msg: InboxMessage) => void;
   onInfo?: (info: { live: boolean; viewers: number; events: number }) => void;
 }
 
