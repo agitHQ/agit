@@ -124,7 +124,19 @@ export function openRelayStore(dir: string): RelayStore {
         let meta: PersistedShare;
         try {
           meta = JSON.parse(readFileSync(metaPath(id), "utf8")) as PersistedShare;
-          if (typeof meta.id !== "string" || typeof meta.writerToken !== "string") throw new Error("shape");
+          // Every field the relay computes with has to be the right type.
+          // Checking only id and writerToken let a meta with no createdAt or
+          // ttlMs through: the TTL comparison below was NaN (false), so the
+          // share loaded and the reaper never expired it, and every /end and
+          // /stream on it threw "Invalid time value" from new Date(NaN).
+          if (
+            typeof meta.id !== "string" ||
+            typeof meta.writerToken !== "string" ||
+            !Number.isFinite(meta.createdAt) ||
+            !Number.isFinite(meta.ttlMs) ||
+            typeof meta.ended !== "boolean"
+          )
+            throw new Error("shape");
         } catch {
           // One unreadable file costs one share, not the relay's startup.
           console.error(`relay store: skipping ${name} (unreadable)`);

@@ -1,9 +1,10 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { buildChain } from "../src/format/hash.js";
 import type { AgitEvent } from "../src/format/events.js";
@@ -183,7 +184,166 @@ describe("relay --store keeps shares across a restart (#72)", () => {
     });
     expect(readdirSync(dir)).toHaveLength(0);
   });
+
+  it("skips a meta whose clock fields are missing or the wrong type", () => {
+    // A meta with no createdAt or ttlMs used to load: the TTL comparison was
+    // NaN, so the reaper never expired it, and every /end and /stream on it
+    // threw "Invalid time value". The header promises one bad file costs one
+    // share, skipped with a warning, not a share that is half broken forever.
+    const dir = storeDir();
+    const bad: Record<string, unknown>[] = [
+      { id: "noclock-aaaaaaaaaaaa", writerToken: "t", ended: false, lastHash: null },
+      { id: "strttl-bbbbbbbbbbbbb", writerToken: "t", createdAt: Date.now(), ttlMs: "1h", ended: false },
+      { id: "nanat-cccccccccccccc", writerToken: "t", createdAt: null, ttlMs: 3600_000, ended: false },
+      { id: "strend-dddddddddddd", writerToken: "t", createdAt: Date.now(), ttlMs: 3600_000, ended: "no" },
+    ];
+    for (const meta of bad)
+      writeFileSync(join(dir, `${meta.id as string}.json`), JSON.stringify(meta) + "\n", "utf8");
+    const store = openRelayStore(dir);
+    store.create({
+      id: "goodshare-aaaaaaaaaa",
+      writerToken: "t",
+      createdAt: Date.now(),
+      ttlMs: 3600_000,
+      ended: false,
+      lastHash: null,
+    });
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(store.load(Date.now()).map((l) => l.meta.id)).toEqual(["goodshare-aaaaaaaaaa"]);
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("skipping"))).toHaveLength(
+        bad.length,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
+
+describe("relay limits hold across an awaited body", () => {
+  it("refuses a push whose share the reaper removed while the body was still arriving", async () => {
+    const dir = storeDir();
+    const ticks = captureIntervals();
+    let base: string;
+    try {
+      ({ base } = await relayWith(dir));
+    } finally {
+      ticks.restore();
+    }
+    const share = await createShare(base);
+    await pushEvents(base, share, EVENTS.slice(0, 2));
+
+    // Headers and half the body, then hold the request open: a slow uplink.
+    const slow = slowPost(base, `/api/shares/${share.shareId}/events`, share.writerToken, {
+      events: EVENTS.slice(2, 4),
+    });
+    await new Promise((r) => setTimeout(r, 150));
+
+    // The share's TTL runs out under the reaper, which unlinks both files.
+    ticks.fire(Date.now() + 10 * 24 * 3600_000);
+    expect(readdirSync(dir)).toHaveLength(0);
+
+    // The completed push must not land on the object the handler captured
+    // before the await: that answered 200 for a share that no longer existed
+    // and recreated <id>.jsonl on its own, a file load() never enumerates and
+    // the reaper never removes.
+    const res = await slow.finish();
+    expect(res.status).toBe(404);
+    expect(readdirSync(dir)).toHaveLength(0);
+  });
+
+  it("holds --max-shares when several creates have slow bodies", async () => {
+    const dir = storeDir();
+    const handle = await startRelay({ port: 0, store: dir, maxShares: 1 });
+    open.push(handle);
+    const base = `http://127.0.0.1:${handle.port}`;
+
+    // Every request passes the size check while the map is still empty; the
+    // check has to hold again once the bodies land, or --max-shares 1 holds
+    // four shares and, with --store, four meta files in the credential
+    // directory. The endpoint needs no token, so this is the only guard.
+    const slow = Array.from({ length: 4 }, () => slowPost(base, "/api/shares", null, {}));
+    await new Promise((r) => setTimeout(r, 150));
+    const statuses = (await Promise.all(slow.map((s) => s.finish()))).map((r) => r.status);
+    expect(statuses.filter((s) => s === 201)).toHaveLength(1);
+    expect(statuses.filter((s) => s === 503)).toHaveLength(3);
+    expect(readdirSync(dir).filter((n) => n.endsWith(".json"))).toHaveLength(1);
+  });
+});
+
+/**
+ * Capture the intervals a relay registers while it starts, so a test can
+ * fire the reaper on demand instead of waiting for its 60s tick. `fire`
+ * runs them with Date.now pinned to `at`, which is how a TTL runs out.
+ */
+function captureIntervals(): { fire(at: number): void; restore(): void } {
+  const fns: (() => void)[] = [];
+  const real = globalThis.setInterval;
+  const spy = vi.spyOn(globalThis, "setInterval").mockImplementation(((fn: () => void, ms?: number) => {
+    fns.push(fn);
+    return real(fn, ms);
+  }) as unknown as typeof setInterval);
+  return {
+    fire(at) {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(at);
+      try {
+        for (const fn of fns) fn();
+      } finally {
+        clock.mockRestore();
+      }
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+/**
+ * POST a JSON body in two chunks, holding the request open between them.
+ * The relay's handler is then parked on `await readBody` with the first
+ * half in hand, which is where its state can change underneath it.
+ */
+function slowPost(
+  base: string,
+  path: string,
+  writerToken: string | null,
+  body: unknown,
+): { finish(): Promise<{ status: number; body: string }> } {
+  const url = new URL(path, base);
+  const text = JSON.stringify(body);
+  const half = Math.max(1, Math.floor(text.length / 2));
+  let resolveRes!: (r: { status: number; body: string }) => void;
+  let rejectRes!: (e: unknown) => void;
+  const done = new Promise<{ status: number; body: string }>((resolve, reject) => {
+    resolveRes = resolve;
+    rejectRes = reject;
+  });
+  const req = httpRequest(
+    {
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "transfer-encoding": "chunked",
+        ...(writerToken !== null ? { authorization: `Bearer ${writerToken}` } : {}),
+      },
+    },
+    (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (d: string) => (data += d));
+      res.on("end", () => resolveRes({ status: res.statusCode ?? 0, body: data }));
+    },
+  );
+  req.on("error", rejectRes);
+  req.write(text.slice(0, half));
+  return {
+    finish() {
+      req.end(text.slice(half));
+      return done;
+    },
+  };
+}
 
 describe("parseShareRef", () => {
   it("splits a share link into relay and id", () => {
@@ -278,6 +438,102 @@ describe("agit push / agit pull (#72)", () => {
     expect(r.out).toContain("refusing to adopt");
   });
 
+  it("pulls into a project that keeps its own meta.json at the root", async () => {
+    // pull used to hand adoptBundle a fake path under the project root, so
+    // the root's meta.json (a theme's, a dataset's) was read as the pulled
+    // session's meta and every pull in that project was refused against it.
+    const { base } = await relayWith(storeDir());
+    const a = mktemp();
+    expect(agitSync(["import", DEMO, "--dir", a]).code).toBe(0);
+    const url = /http:\/\/\S+\/s\/[A-Za-z0-9_-]+/.exec(
+      (await agit(["push", "demo", "--relay", base, "--dir", a])).out,
+    )?.[0];
+    expect(url).toBeTruthy();
+
+    const project = mktemp();
+    writeFileSync(join(project, "meta.json"), '{"name":"my-theme","version":"1.0.0"}\n', "utf8");
+    const pulled = await agit(["pull", url!, "--dir", project]);
+    expect(pulled.out).not.toContain("refusing");
+    expect(pulled.code).toBe(0);
+    expect(pulled.out).toContain("adopted");
+    // And a root meta.json that is not even JSON is none of pull's business.
+    const junk = mktemp();
+    writeFileSync(join(junk, "meta.json"), "not json {\n", "utf8");
+    expect((await agit(["pull", url!, "--dir", junk])).code).toBe(0);
+    expect(readFileSync(join(junk, "meta.json"), "utf8")).toBe("not json {\n");
+  });
+
+  it("publishes to a second relay instead of reporting the first relay's link", async () => {
+    // The remote record was matched by session id alone, so a push to relay
+    // B printed relay A's link, said the log was served there, and exited 0
+    // while B never received anything.
+    const a = await relayWith(storeDir());
+    const b = await relayWith(storeDir());
+    const store = mktemp();
+    expect(agitSync(["import", DEMO, "--dir", store]).code).toBe(0);
+    const first = await agit(["push", "demo", "--relay", a.base, "--dir", store]);
+    expect(first.code).toBe(0);
+
+    const second = await agit(["push", "demo", "--relay", b.base, "--dir", store]);
+    expect(second.code).toBe(0);
+    expect(second.out).not.toContain("already pushed");
+    const url = /http:\/\/\S+\/s\/[A-Za-z0-9_-]+/.exec(second.out)?.[0];
+    expect(url).toBeTruthy();
+    expect(url!.startsWith(b.base)).toBe(true);
+    expect((await agit(["pull", url!, "--dir", mktemp()])).code).toBe(0);
+    // The same relay again is the case the short-circuit exists for.
+    expect((await agit(["push", "demo", "--relay", b.base, "--dir", store])).out).toContain("already pushed");
+  });
+
+  it("survives a remotes.json that is not what it wrote", async () => {
+    // remotes.json parsing to null used to throw on `all[id] = rec` after
+    // the session was already published: no link printed, nothing recorded,
+    // and the next push published another copy.
+    const dir = storeDir();
+    const { base } = await relayWith(dir);
+    const store = mktemp();
+    expect(agitSync(["import", DEMO, "--dir", store]).code).toBe(0);
+    const remotes = join(store, ".agit", "remotes.json");
+    writeFileSync(remotes, "null\n", "utf8");
+
+    const r = await agit(["push", "demo", "--relay", base, "--dir", store]);
+    expect(r.code).toBe(0);
+    const url = /http:\/\/\S+\/s\/([A-Za-z0-9_-]+)/.exec(r.out);
+    expect(url).toBeTruthy();
+    expect(readdirSync(dir).filter((f) => f.endsWith(".jsonl"))).toHaveLength(1);
+    const rec = (JSON.parse(readFileSync(remotes, "utf8")) as Record<string, { shareId: string }>)[SESSION];
+    expect(rec?.shareId).toBe(url![1]);
+
+    // A record that is not a record is not a place this was pushed either:
+    // it used to be reported as "already pushed to: undefined", exit 0.
+    writeFileSync(remotes, `{"${SESSION}":"junk"}\n`, "utf8");
+    const again = await agit(["push", "demo", "--relay", base, "--dir", store]);
+    expect(again.code).toBe(0);
+    expect(again.out).not.toContain("undefined");
+    expect(again.out).toMatch(/\/s\/[A-Za-z0-9_-]+/);
+  });
+
+  it("pushes a session whose id is a name Object.prototype also has", async () => {
+    // The id comes from the native log, and `constructor` is a valid one. On
+    // a plain object the lookup found Object.prototype's, so the session was
+    // "already pushed to: undefined" and never published once remotes.json
+    // existed.
+    const { base } = await relayWith(storeDir());
+    const store = mktemp();
+    const log = join(store, "c.jsonl");
+    writeFileSync(log, readFileSync(DEMO, "utf8").replaceAll(SESSION, "constructor"), "utf8");
+    expect(agitSync(["import", log, "--dir", store]).code).toBe(0);
+    expect(agitSync(["import", SIMPLE, "--dir", store]).code).toBe(0);
+    expect((await agit(["push", "fixture-simple", "--relay", base, "--dir", store])).code).toBe(0);
+
+    const r = await agit(["push", "constructor", "--relay", base, "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("undefined");
+    const url = /http:\/\/\S+\/s\/[A-Za-z0-9_-]+/.exec(r.out)?.[0];
+    expect(url).toBeTruthy();
+    expect((await agit(["pull", url!, "--dir", mktemp()])).out).toContain("adopted constructor");
+  });
+
   it("says plainly when a share is gone", async () => {
     const { base } = await relayWith();
     const r = await agit(["pull", "nosuchshareaaaaaaaa", "--relay", base, "--dir", mktemp()]);
@@ -314,6 +570,51 @@ describe("share --detach (#72)", () => {
     const r = await agit(["share", SIMPLE, "--detach", "--relay", base, "--dir", a]);
     expect(r.code).toBe(2);
     expect(r.out).toContain("nothing would be left tailing");
+  }, 30_000);
+
+  it("refuses before creating anything: no link, no state file, no share on the relay", async () => {
+    // The refusal used to come after createShare: the link and the --resume
+    // hint were already on stdout, the writer token was already in
+    // .agit/shares, and the relay kept an ended, empty share until its TTL.
+    // Following the printed hint then failed with "ended on the relay".
+    const dir = storeDir();
+    const { base } = await relayWith(dir);
+    const a = mktemp();
+    // An imported session whose source file still exists is live-capable.
+    expect(agitSync(["import", DEMO, "--dir", a]).code).toBe(0);
+
+    const r = await agit(["share", "demo", "--detach", "--relay", base, "--dir", a]);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("nothing would be left tailing");
+    expect(r.out).not.toMatch(/\/s\/[A-Za-z0-9_-]+/);
+    expect(r.out).not.toContain("--resume");
+    expect(existsSync(join(a, ".agit", "shares"))).toBe(false);
+    expect(readdirSync(dir)).toHaveLength(0);
+  }, 30_000);
+});
+
+describe("agit relay --store", () => {
+  it("tells the operator where shares are written, not that nothing is", async () => {
+    // The startup line said "nothing is written to disk" whether or not
+    // --store was given, to the one operator who most needs to know the
+    // directory holds writer tokens.
+    const dir = storeDir();
+    const child = execFile(process.execPath, [CLI, "relay", "--port", "0", "--store", dir], {
+      encoding: "utf8",
+    });
+    let out = "";
+    const banner = await new Promise<string>((resolve) => {
+      child.stdout!.on("data", (chunk: string) => {
+        out += chunk;
+        if (out.includes("Ctrl+C to stop")) resolve(out);
+      });
+      child.on("close", () => resolve(out));
+    });
+    child.kill();
+    expect(banner).toContain("agit relay listening on");
+    expect(banner).not.toContain("nothing is written to disk");
+    expect(banner).toContain(dir);
+    expect(banner).toContain("writer tokens");
   }, 30_000);
 });
 

@@ -176,6 +176,13 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
     if (req.method === "POST" && path === "/api/shares") {
       if (shares.size >= maxShares) return json(res, 503, { error: "relay full" });
       const body = (await readBody(req, LIMITS.messageBody)) ?? {};
+      // Check again after the await. Several creates whose bodies trickle in
+      // (chunked, or a slow uplink) all passed the check above while the map
+      // was still under the limit, then all got created once their bodies
+      // landed: --max-shares 1 held five shares, and with --store every one
+      // of them was a meta file in the credential directory. This endpoint
+      // needs no token, so the limit is the only guard on share creation.
+      if (shares.size >= maxShares) return json(res, 503, { error: "relay full" });
       const ttlMs = clampNum((body as { ttlMs?: unknown }).ttlMs, 60_000, maxTtl, defaultTtl);
       const steer = (body as { steer?: unknown }).steer === true;
       const share: Share = {
@@ -233,6 +240,13 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         if (!authed(req, share)) return json(res, 401, { error: "bad writer token" });
         if (share.ended) return json(res, 409, { error: "share already ended" });
         const body = await readBody(req, LIMITS.pushBody);
+        // The reaper can run while the body is still arriving. It removed the
+        // share from the map and unlinked both files; appending to the object
+        // captured above then answered 200 for a share that no longer existed
+        // and recreated <id>.jsonl on disk with only this batch in it, a file
+        // load() never enumerates (it looks for .json) and the reaper never
+        // removes. Re-fetch, and refuse if the share is not the one we hold.
+        if (shares.get(share.id) !== share) return json(res, 404, { error: "no such share (expired?)" });
         const events = (body as { events?: unknown })?.events;
         if (!Array.isArray(events) || events.length === 0)
           return json(res, 400, { error: "body must be {events: [...]}" });

@@ -32,17 +32,27 @@
  *
  * Timestamps are epoch milliseconds on the message, and the golden fixture
  * omits them on user messages. A message without one inherits the last seen,
- * deterministically; the count is reported. A file with none anywhere is
- * refused rather than dated from the clock (SPEC §7).
+ * deterministically; the count is reported. One outside the years 0000 to
+ * 9999 is treated the same way and counted on its own: past that, Date
+ * either throws or prints an extended-year form that is not the shape SPEC
+ * §2 documents. A file with none anywhere is refused rather than dated from
+ * the clock (SPEC §7).
  *
  * The contract says unknown keys may appear without a version bump and
  * consumers should tolerate them. Tolerated here means counted, not dropped:
- * a content block of a type this adapter does not know is named in the skip
+ * a content block of a type this adapter does not know, an entry that is not
+ * a block at all, or a block whose text is not text is named in the skip
  * counts so nobody reads its absence as "nothing was there".
+ *
+ * A running session is shared from this same file, which Cline rewrites in
+ * place as messages land. Under `ConvertOptions.live` the synthesized
+ * `session.end` is held back, and the document's `updated_at` (its own
+ * last-write time, bumped on every rewrite) stays out of `session.start`, so
+ * each poll extends the previous one instead of rewriting streamed history.
  */
 
 import type { DraftEvent, Json } from "../format/events.js";
-import type { Adapter, ConvertResult } from "./adapter.js";
+import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "cline-sdk";
 const ADAPTER_VERSION = "0.1.0";
@@ -65,6 +75,25 @@ function str(v: Json | undefined): string | null {
 
 function num(v: Json | undefined): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** Epoch milliseconds of 0000-01-01T00:00:00.000Z and 9999-12-31T23:59:59.999Z. */
+const MIN_TS_MS = -62167219200000;
+const MAX_TS_MS = 253402300799999;
+
+/**
+ * The ISO form of a message's `ts`, or null when there is nothing usable.
+ * Only epoch milliseconds inside the years 0000 to 9999 qualify. Past
+ * 8.64e15 Date throws a bare "Invalid time value", which ended the whole
+ * import without naming a message; inside Date's range but outside those
+ * years it prints an extended year such as -001199-02-15T..., which is not
+ * the shape SPEC §2 documents and which fixed-offset readers garble. Either
+ * is treated as no timestamp at all, and the caller counts it.
+ */
+function isoTs(v: Json | undefined): string | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  if (v < MIN_TS_MS || v > MAX_TS_MS) return null;
+  return new Date(v).toISOString();
 }
 
 function parseDocument(lines: string[]): Rec | undefined {
@@ -119,7 +148,7 @@ export const clineSdkAdapter: Adapter = {
     return isClineMessages(parseDocument(lines));
   },
 
-  convert(lines: string[]): ConvertResult {
+  convert(lines: string[], opts?: ConvertOptions): ConvertResult {
     const doc = parseDocument(lines);
     if (!isClineMessages(doc)) throw new Error("not a Cline SDK messages file");
     const t = doc!;
@@ -142,8 +171,8 @@ export const clineSdkAdapter: Adapter = {
 
     if (messages.length === 0) throw new Error("this Cline SDK session has no messages");
 
-    const stamped = messages.filter((m) => typeof m.ts === "number");
-    if (stamped.length === 0) {
+    const firstTs = messages.map((m) => isoTs(m.ts)).find((iso) => iso !== null);
+    if (firstTs === undefined) {
       throw new Error(
         "this Cline SDK session carries no timestamps on any message, and agit will not date events " +
           "from the clock (two imports of the same bytes must produce the same hashes, SPEC §7)",
@@ -152,7 +181,7 @@ export const clineSdkAdapter: Adapter = {
 
     const sessionId = t.sessionId as string;
     const drafts: DraftEvent[] = [];
-    let ts = new Date(stamped[0]!.ts as number).toISOString();
+    let ts = firstTs;
 
     drafts.push({
       ts,
@@ -165,11 +194,14 @@ export const clineSdkAdapter: Adapter = {
         cwd: null,
         gitBranch: null,
         adapter: { name: ADAPTER_NAME, version: ADAPTER_VERSION },
+        // Not the document's updated_at: that is the file's own last-write
+        // time, bumped on every rewrite, so a live share of a running session
+        // would see session.start change between polls and stop as a rewrite
+        // of streamed history. The message timestamps already date the work.
         native: {
           contractVersion: CLINE_MESSAGES_VERSION,
           ...(str(t.agent) !== null ? { agent: str(t.agent) } : {}),
           ...(str(t.taskType) !== null ? { taskType: str(t.taskType) } : {}),
-          ...(str(t.updated_at) !== null ? { updatedAt: str(t.updated_at) } : {}),
         },
       },
     });
@@ -179,24 +211,35 @@ export const clineSdkAdapter: Adapter = {
     if (typeof t.system_prompt === "string" && t.system_prompt !== "") skip("system-prompt");
 
     let inheritedTs = 0;
+    let outOfRangeTs = 0;
     for (const m of messages) {
-      if (typeof m.ts === "number") ts = new Date(m.ts).toISOString();
+      const own = isoTs(m.ts);
+      if (own !== null) ts = own;
+      else if (typeof m.ts === "number") outOfRangeTs++;
       else inheritedTs++;
 
       const role = str(m.role);
       const id = str(m.id);
-      const blocks = (m.content as Json[]).filter((b): b is Rec => asRec(b) !== undefined);
+      const entries = m.content as Json[];
+      const blocks = entries.filter((b): b is Rec => asRec(b) !== undefined);
+      // A bare string or number where a block belongs is content the log
+      // held and this adapter cannot read. Counted, so the report does not
+      // claim a clean import over a message that lost its text.
+      if (blocks.length < entries.length) skip("malformed-block:non-object", entries.length - blocks.length);
       const modelInfo = asRec(m.modelInfo);
       const model = modelInfo ? str(modelInfo.id) : null;
 
       if (role === "user") {
         // Text blocks are the user's message; tool_result blocks ride on user
         // messages in this format because there is no tool role at rest.
-        const text = blocks
-          .filter((b) => b.type === "text")
-          .map((b) => str(b.text) ?? "")
-          .filter((s) => s !== "")
-          .join("\n");
+        const texts: string[] = [];
+        for (const b of blocks) {
+          if (b.type !== "text") continue;
+          const text = str(b.text);
+          if (text === null) skip("malformed-block:text");
+          else if (text !== "") texts.push(text);
+        }
+        const text = texts.join("\n");
         if (text !== "") {
           drafts.push({
             ts,
@@ -207,11 +250,16 @@ export const clineSdkAdapter: Adapter = {
         for (const b of blocks) {
           if (b.type === "text") continue;
           if (b.type === "tool_result") {
+            // No id means no pairing: null, never a shared placeholder, which
+            // the exporters would read as one id and pair every id-less
+            // result with every id-less call.
+            const toolUseId = str(b.tool_use_id);
+            if (toolUseId === null) skip("tool-result-without-id");
             drafts.push({
               ts,
               type: "tool.result",
               payload: {
-                toolUseId: str(b.tool_use_id) ?? "(missing)",
+                toolUseId,
                 isError: b.is_error === true,
                 output: resultText(b.content),
                 structured: null,
@@ -227,10 +275,12 @@ export const clineSdkAdapter: Adapter = {
         for (const b of blocks) {
           if (b.type === "thinking") {
             const thinking = str(b.thinking);
-            if (thinking !== null && thinking !== "") out.push({ type: "thinking", text: thinking });
+            if (thinking === null) skip("malformed-block:thinking");
+            else if (thinking !== "") out.push({ type: "thinking", text: thinking });
           } else if (b.type === "text") {
             const text = str(b.text);
-            if (text !== null && text !== "") out.push({ type: "text", text });
+            if (text === null) skip("malformed-block:text");
+            else if (text !== "") out.push({ type: "text", text });
           }
         }
         if (out.length > 0) {
@@ -252,13 +302,21 @@ export const clineSdkAdapter: Adapter = {
           if (b.type === "thinking" || b.type === "text") continue;
           if (b.type === "tool_use") {
             const name = str(b.name) ?? "(unnamed)";
+            // Same rule as tool_result: an id-less call gets null, so that
+            // nothing downstream pairs it with a result it never had.
+            const toolUseId = str(b.id);
+            if (toolUseId === null) skip("tool-use-without-id");
+            // SPEC §5.5 makes input an object. Anything else is recorded as
+            // the empty call it is not, and the loss is named.
+            const input = asRec(b.input);
+            if (input === undefined && b.input !== undefined) skip("malformed-block:tool_use(input)");
             drafts.push({
               ts,
               type: "tool.call",
               payload: {
-                toolUseId: str(b.id) ?? "(missing)",
+                toolUseId,
                 name,
-                input: asRec(b.input) ?? {},
+                input: input ?? {},
                 native: { messageId: id },
               },
             });
@@ -287,7 +345,12 @@ export const clineSdkAdapter: Adapter = {
               native: {
                 messageId: id,
                 requestId: null,
-                ...(metrics.cost !== undefined ? { cost: num(metrics.cost) } : {}),
+                // Only a number the source held. A null, a string or a
+                // boolean here used to land as cost: 0, a figure the log
+                // never stated, inside a hashed payload.
+                ...(typeof metrics.cost === "number" && Number.isFinite(metrics.cost)
+                  ? { cost: metrics.cost }
+                  : {}),
               },
             },
           });
@@ -298,12 +361,17 @@ export const clineSdkAdapter: Adapter = {
     }
 
     if (inheritedTs > 0) skip("message-timestamp-inherited", inheritedTs);
+    if (outOfRangeTs > 0) skip("message-timestamp-out-of-range", outOfRangeTs);
 
-    drafts.push({
-      ts,
-      type: "session.end",
-      payload: { reason: "messages-end", synthesized: true },
-    });
+    // Live mode: the session has not ended, and a session.end here would
+    // move on every poll that found a new message (ConvertOptions.live).
+    if (!opts?.live) {
+      drafts.push({
+        ts,
+        type: "session.end",
+        payload: { reason: "messages-end", synthesized: true },
+      });
+    }
 
     return { sessionId, drafts, records: messages.length, skipped };
   },

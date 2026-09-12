@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,10 @@ import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { clineSdkAdapter, CLINE_MESSAGES_VERSION } from "../src/adapters/cline-sdk.js";
 import { codexAdapter } from "../src/adapters/codex.js";
 import { openclawAdapter } from "../src/adapters/openclaw.js";
+import { canonicalJson } from "../src/format/canonical.js";
+import { buildChain, toJsonl } from "../src/format/hash.js";
+import { redactDeep, type RedactionCounts } from "../src/redact.js";
+import { SessionFollower } from "../src/share.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
@@ -184,7 +188,7 @@ describe("what it declines, and says it declined", () => {
     expect(clineSdkAdapter.convert(odd).skipped["unknown-role:system"]).toBe(1);
   });
 
-  it("survives wrong-typed fields without dropping the import", () => {
+  it("survives wrong-typed fields without dropping the import, and names what they cost", () => {
     const rough = doc({}, [
       {
         id: "a1",
@@ -202,6 +206,189 @@ describe("what it declines, and says it declined", () => {
     expect(r2.drafts[0]!.type).toBe("session.start");
     const call = r2.drafts.find((d) => d.type === "tool.call")!;
     expect((call.payload as { input: unknown }).input).toEqual({});
+    // Surviving is not the same as being lossless: the call's input and the
+    // text block both went missing, and the report has to say so.
+    expect(r2.skipped["malformed-block:tool_use(input)"]).toBe(1);
+    expect(r2.skipped["malformed-block:text"]).toBe(1);
+  });
+
+  it("counts content entries that are not blocks, and blocks whose text is not text", () => {
+    // detect() only checks that content is an array. What is in it used to
+    // be filtered to objects and string-typed text without a count, so an
+    // import that lost the user's whole message printed no skipped line.
+    const rough = doc({}, [
+      { id: "u1", role: "user", ts: 1777713262000, content: ["hello there", 42, null] },
+      {
+        id: "a1",
+        role: "assistant",
+        ts: 1777713263000,
+        content: ["reply", { type: "text", text: 7 }, { type: "thinking", thinking: ["x"] }],
+      },
+    ]);
+    const r2 = clineSdkAdapter.convert(rough);
+    expect(r2.drafts.map((d) => d.type)).toEqual(["session.start", "session.end"]);
+    expect(r2.skipped["malformed-block:non-object"]).toBe(4);
+    expect(r2.skipped["malformed-block:text"]).toBe(1);
+    expect(r2.skipped["malformed-block:thinking"]).toBe(1);
+  });
+
+  it("gives an id-less tool_use or tool_result a null id rather than a shared placeholder", () => {
+    // Both used to get the literal "(missing)". The exporters key results by
+    // toolUseId and treat only null as "no id", so that one string paired
+    // every id-less call with the last id-less result: a successful
+    // read_files came out of the OTLP export as a failed span.
+    const r2 = clineSdkAdapter.convert(
+      doc({}, [
+        {
+          id: "a1",
+          role: "assistant",
+          ts: 1777713262000,
+          content: [
+            { type: "tool_use", name: "read_files", input: { files: [{ path: "a.ts" }] } },
+            { type: "tool_use", name: "run_commands", input: { commands: [{ command: "rm" }] } },
+          ],
+        },
+        {
+          id: "u2",
+          role: "user",
+          ts: 1777713263000,
+          content: [
+            { type: "tool_result", content: "contents of a.ts" },
+            { type: "tool_result", content: "rm: permission denied", is_error: true },
+          ],
+        },
+      ]),
+    );
+    const ids = (t: string): unknown[] =>
+      r2.drafts.filter((d) => d.type === t).map((d) => (d.payload as { toolUseId: unknown }).toolUseId);
+    expect(ids("tool.call")).toEqual([null, null]);
+    expect(ids("tool.result")).toEqual([null, null]);
+    expect(r2.skipped["tool-use-without-id"]).toBe(2);
+    expect(r2.skipped["tool-result-without-id"]).toBe(2);
+  });
+
+  it("treats a timestamp outside the years 0000 to 9999 as absent, and counts it", () => {
+    // Date throws a bare "Invalid time value" past 8.64e15, which used to
+    // end the whole import with that as the only message. Inside Date's
+    // range but before year 0 it prints -001199-02-15T..., which is not the
+    // SPEC §2 shape and which fixed-offset readers garble.
+    const text = [{ type: "text", text: "x" }];
+    const only = doc({}, [{ id: "a1", role: "assistant", ts: 1e300, content: text }]);
+    expect(() => clineSdkAdapter.convert(only)).toThrow(/no timestamps/);
+
+    const mixed = doc({}, [
+      { id: "a1", role: "assistant", ts: 1777713262000, content: text },
+      { id: "a2", role: "assistant", ts: 8640000000000001, content: text },
+      { id: "a3", role: "assistant", ts: -1e14, content: text },
+    ]);
+    const r2 = clineSdkAdapter.convert(mixed);
+    for (const d of r2.drafts) expect(d.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(r2.drafts.map((d) => d.type)).toEqual([
+      "session.start",
+      "message.assistant",
+      "message.assistant",
+      "message.assistant",
+      "session.end",
+    ]);
+    expect(r2.skipped["message-timestamp-out-of-range"]).toBe(2);
+    expect(r2.skipped["message-timestamp-inherited"]).toBeUndefined();
+  });
+
+  it("carries metrics.cost only when the source held a number", () => {
+    // A string, a null or a boolean used to land as cost: 0 inside the
+    // hashed payload, a figure the log never stated (openclaw's precedent
+    // is to record only what was actually a number).
+    const text = [{ type: "text", text: "x" }];
+    const r2 = clineSdkAdapter.convert(
+      doc({}, [
+        { id: "a1", role: "assistant", ts: 5, content: text, metrics: { inputTokens: 10, cost: "0.021" } },
+        { id: "a2", role: "assistant", ts: 6, content: text, metrics: { inputTokens: 10, cost: null } },
+        { id: "a3", role: "assistant", ts: 7, content: text, metrics: { inputTokens: 10, cost: true } },
+        { id: "a4", role: "assistant", ts: 8, content: text, metrics: { inputTokens: 10, cost: 0.021 } },
+      ]),
+    );
+    const natives = r2.drafts
+      .filter((d) => d.type === "cost")
+      .map((d) => (d.payload as { native: Record<string, unknown> }).native);
+    expect(natives).toHaveLength(4);
+    for (const n of natives.slice(0, 3)) expect("cost" in n).toBe(false);
+    expect(natives[3]!.cost).toBe(0.021);
+  });
+});
+
+describe("a session that is still running (ConvertOptions.live)", () => {
+  const v1 = [
+    { id: "u1", role: "user", content: [{ type: "text", text: "hi" }] },
+    {
+      id: "a1",
+      role: "assistant",
+      ts: 1777713262000,
+      modelInfo: { id: "m" },
+      content: [{ type: "text", text: "hello" }],
+    },
+  ];
+  const v2 = [
+    ...v1,
+    {
+      id: "a2",
+      role: "assistant",
+      ts: 1777713263000,
+      modelInfo: { id: "m" },
+      content: [{ type: "text", text: "more" }],
+    },
+  ];
+
+  it("holds back session.end, and keeps the document's updated_at out of the chain", () => {
+    // Cline rewrites <id>.messages.json in place as messages land and bumps
+    // updated_at each time. A session.end that moved with every poll, or a
+    // session.start that changed with the file's own write time, was a
+    // rewrite of streamed history and stopped the share on the first update.
+    const at = (t: string, messages: unknown[]): string[] => doc({ updated_at: t }, messages);
+    const live = clineSdkAdapter.convert(at("2026-05-02T09:14:22.000Z", v1), { live: true }).drafts;
+    expect(live.some((d) => d.type === "session.end")).toBe(false);
+
+    const full = clineSdkAdapter.convert(at("2026-05-02T09:14:22.000Z", v1)).drafts;
+    expect(full.length).toBe(live.length + 1);
+    expect(full.slice(0, live.length).map((d) => canonicalJson(d))).toEqual(
+      live.map((d) => canonicalJson(d)),
+    );
+    expect(full[full.length - 1]!.type).toBe("session.end");
+
+    const later = clineSdkAdapter.convert(at("2026-05-02T09:15:00.000Z", v2), { live: true }).drafts;
+    expect(later.slice(0, live.length).map((d) => canonicalJson(d))).toEqual(
+      live.map((d) => canonicalJson(d)),
+    );
+  });
+
+  it("a follower keeps streaming across Cline's rewrites and ends byte-identical to an import", () => {
+    const dir = mktemp();
+    const path = join(dir, "s-1.messages.json");
+    const write = (t: string, messages: unknown[]): void =>
+      writeFileSync(path, doc({ updated_at: t }, messages).join("\n"), "utf8");
+
+    // The golden fixture omits ts on user messages, so a session that has
+    // only the user's opening turn is not yet datable: nothing streams, and
+    // nothing throws.
+    write("2026-05-02T09:14:20.000Z", v1.slice(0, 1));
+    const follower = new SessionFollower(path, clineSdkAdapter);
+    const chunks = [follower.poll()];
+    expect(chunks[0]).toEqual([]);
+
+    write("2026-05-02T09:14:22.000Z", v1);
+    chunks.push(follower.poll());
+    expect(chunks[1]!.map((e) => e.type)).toEqual(["session.start", "message.user", "message.assistant"]);
+
+    write("2026-05-02T09:15:00.000Z", v2);
+    chunks.push(follower.poll()); // used to throw StabilityError here
+    expect(chunks[2]!.map((e) => e.type)).toEqual(["message.assistant"]);
+    chunks.push(follower.finish());
+    expect(chunks[3]!.map((e) => e.type)).toEqual(["session.end"]);
+
+    const streamed = chunks.flat();
+    const full = clineSdkAdapter.convert(doc({ updated_at: "2026-05-02T09:15:00.000Z" }, v2));
+    const counts: RedactionCounts = {};
+    for (const d of full.drafts) d.payload = redactDeep(d.payload, counts);
+    expect(toJsonl(streamed)).toBe(toJsonl(buildChain(full.sessionId, full.drafts)));
   });
 });
 
@@ -250,5 +437,49 @@ describe("agit import on a Cline SDK session", () => {
     const otel = agit(["export", "cline", "--otel", "--dir", dir]);
     expect(otel.code).toBe(0);
     expect(otel.out).toContain("invoke_agent cline");
+  });
+
+  it("does not pair id-less calls with id-less results in the OpenTelemetry export", () => {
+    // With the shared "(missing)" id, both spans below reported the second
+    // result's error, and read_files had not failed.
+    const dir = mktemp();
+    const src = join(dir, "s-miss.messages.json");
+    writeFileSync(
+      src,
+      doc({ sessionId: "s-miss" }, [
+        {
+          id: "a1",
+          role: "assistant",
+          ts: 1777713262000,
+          modelInfo: { id: "m" },
+          content: [
+            { type: "tool_use", name: "read_files", input: { files: [{ path: "a.ts" }] } },
+            { type: "tool_use", name: "run_commands", input: { commands: [{ command: "rm" }] } },
+          ],
+        },
+        {
+          id: "u2",
+          role: "user",
+          ts: 1777713263000,
+          content: [
+            { type: "tool_result", content: "contents of a.ts" },
+            { type: "tool_result", content: "rm: permission denied", is_error: true },
+          ],
+        },
+      ]).join("\n"),
+      "utf8",
+    );
+    const imp = agit(["import", src, "--dir", dir]);
+    expect(imp.code).toBe(0);
+    expect(imp.out).toContain("tool-use-without-id");
+    const otel = agit(["export", "s-miss", "--otel", "--dir", dir]);
+    expect(otel.code).toBe(0);
+    expect(otel.out).not.toContain("(missing)");
+    type Span = { name: string; status: { code: number } };
+    const spans = (JSON.parse(otel.out) as { resourceSpans: { scopeSpans: { spans: Span[] }[] }[] })
+      .resourceSpans[0]!.scopeSpans[0]!.spans;
+    const tools = spans.filter((s) => s.name.startsWith("execute_tool "));
+    expect(tools.map((s) => s.name)).toEqual(["execute_tool read_files", "execute_tool run_commands"]);
+    for (const s of tools) expect(s.status.code).toBe(0);
   });
 });

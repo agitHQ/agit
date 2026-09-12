@@ -1,10 +1,12 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { EVENT_TYPES } from "../src/format/events.js";
+import { buildChain, sha256Hex, toJsonl } from "../src/format/hash.js";
 import { handleMessage, TOOLS, type JsonRpcResponse } from "../src/mcp.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -40,6 +42,49 @@ function call(dir: string, name: string, args: Record<string, unknown> = {}): Re
   });
   const result = r?.result as { content: { text: string }[]; isError: boolean };
   return { ...(JSON.parse(result.content[0]!.text) as object), _isError: result.isError };
+}
+
+/** Call one tool expecting it to fail, and return the text the model would read. */
+function callError(dir: string, name: string, args: Record<string, unknown>): string {
+  const r = handleMessage(dir, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+  const result = r?.result as { content: { text: string }[]; isError: boolean };
+  expect(result.isError, `${name} ${JSON.stringify(args)} should be a tool error`).toBe(true);
+  return result.content[0]!.text;
+}
+
+/**
+ * Import a hand-built session that creates one file at `path` and one at
+ * `<cwd>/ok.ts`, with an intact chain. `agit import` adopts a bare
+ * events.jsonl, which is how an untrusted log reaches the store in practice.
+ */
+function importSessionCreating(dir: string, id: string, path: string): void {
+  const create = (ts: number, p: string, content: string, toolUseId: string) => ({
+    ts: `2026-01-01T00:00:0${ts}.000Z`,
+    type: "file.diff" as const,
+    payload: {
+      path: p,
+      kind: "create",
+      diff: `--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+${content.trimEnd()}\n`,
+      beforeHash: null,
+      afterHash: sha256Hex(content),
+      toolUseId,
+      source: "Write",
+    },
+  });
+  const events = buildChain(id, [
+    { ts: "2026-01-01T00:00:00.000Z", type: "session.start", payload: { runtime: "test", cwd: "/work" } },
+    create(1, path, "hello\n", "t0"),
+    create(2, "/work/ok.ts", "ok\n", "t1"),
+  ]);
+  const src = join(dir, "src", id);
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "events.jsonl"), toJsonl(events), "utf8");
+  expect(agit(["import", join(src, "events.jsonl"), "--dir", dir]).code).toBe(0);
 }
 
 let store: string;
@@ -103,14 +148,17 @@ describe("MCP handshake (#66)", () => {
 });
 
 describe("MCP tools read the store", () => {
-  it("agit_list names every session with its runtime", () => {
+  it("agit_list names every session with its runtime and whether it verifies", () => {
     const d = call(store, "agit_list") as {
       count: number;
-      sessions: { runtime: string; readable: boolean }[];
+      sessions: { runtime: string; readable: boolean; verified: boolean }[];
     };
     expect(d.count).toBe(2);
     expect(d.sessions.map((s) => s.runtime).sort()).toEqual(["claude-code", "codex"]);
     expect(d.sessions.every((s) => s.readable)).toBe(true);
+    // The header promises every answer carries `verified`; the listing is
+    // where a model picks a session, so it needs the signal most.
+    expect(d.sessions.every((s) => s.verified === true)).toBe(true);
   });
 
   it("agit_verify reports an intact chain and its head", () => {
@@ -172,6 +220,26 @@ describe("MCP tools read the store", () => {
     expect(capped.truncated).toBe(capped.total - 2);
   });
 
+  it("agit_grep refuses an unknown type rather than answering 'never happened'", () => {
+    // A typo in `type` used to search nothing and report total: 0 with no
+    // error, indistinguishable from a real "no, you have not done this".
+    const text = callError(store, "agit_grep", { pattern: "ratelimit", type: "tool_call" });
+    expect(text).toContain('unknown event type "tool_call"');
+    for (const t of EVENT_TYPES) expect(text).toContain(t);
+  });
+
+  it("agit_grep refuses path mode with a type that has no path", () => {
+    // Path mode only looks at file.diff and file.delete, so any other type
+    // filter can never match; the CLI calls that a usage error too.
+    const text = callError(store, "agit_grep", { pattern: "ratelimit", type: "message.user", path: true });
+    expect(text).toContain("message.user");
+    expect(text).toContain("file.diff");
+    // The two types path mode reads still combine with it.
+    for (const type of ["file.diff", "file.delete"]) {
+      expect(call(store, "agit_grep", { pattern: ".ts", type, path: true })._isError).toBe(false);
+    }
+  });
+
   it("agit_replay returns a timeline, and file state at a point", () => {
     const timeline = call(store, "agit_replay", { id: "demo", at: 5 }) as { at: number; timeline: string[] };
     expect(timeline.at).toBe(5);
@@ -196,6 +264,44 @@ describe("MCP tools read the store", () => {
     // Two unrelated sessions: every path belongs to exactly one of them.
     expect(d.summary.onlyA! + d.summary.onlyB!).toBe(d.files.length);
     expect(d.verdicts).toHaveProperty("converged");
+  });
+
+  it("agit_diff sets aside a file whose path the tree cannot key, and still compares the rest", () => {
+    // A hash-verified file.diff at "/" (or "." or "..") sanitizes to no path
+    // segments at all. It used to throw out of the comparison, so one such
+    // record in an adopted log made agit_diff fail against every other
+    // session while agit_show listed the path without complaint.
+    const dir = storeWith(DEMO);
+    for (const [i, path] of ["/", ".", ".."].entries()) {
+      const id = `unkeyable-${i}`;
+      importSessionCreating(dir, id, path);
+      expect((call(dir, "agit_verify", { id }) as { verified: boolean }).verified).toBe(true);
+
+      const d = call(dir, "agit_diff", { a: id, b: "demo" }) as {
+        _isError: boolean;
+        files: { path: string; verdict: string }[];
+        partial?: { a: number; b: number; meaning: string };
+      };
+      expect(d._isError, path).toBe(false);
+      expect(d.files.map((f) => f.path)).toContain("ok.ts");
+      expect(d.files.some((f) => f.path === "" || f.path === path)).toBe(false);
+      // Absent from the comparison is honest only when it is counted.
+      expect(d.partial?.a, path).toBe(1);
+      expect(d.partial?.b, path).toBe(0);
+    }
+  });
+
+  it("agit_diff still keys a path that only looks like the cwd", () => {
+    // "/work" under cwd "/work" is not "/work/" and so does not get stripped;
+    // it keys to "work" and must stay in the comparison, not be set aside.
+    const dir = storeWith(DEMO);
+    importSessionCreating(dir, "cwd-alike", "/work");
+    const d = call(dir, "agit_diff", { a: "cwd-alike", b: "demo" }) as {
+      files: { path: string }[];
+      partial?: unknown;
+    };
+    expect(d.files.map((f) => f.path)).toContain("work");
+    expect(d.partial).toBeUndefined();
   });
 });
 
@@ -237,14 +343,17 @@ describe("MCP says what it cannot answer", () => {
     expect(res.content[0]!.text).toContain("outside this session");
   });
 
-  it("names an unknown tool", () => {
+  it("names an unknown tool as invalid params, since tools/call itself exists", () => {
     const r = handleMessage(store, {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/call",
       params: { name: "agit_delete_everything", arguments: {} },
     });
-    expect(r?.error?.code).toBe(-32601);
+    // MCP files an unknown tool under -32602. It was -32601 once, which a
+    // client reads as "this server has no tools/call at all".
+    expect(r?.error?.code).toBe(-32602);
+    expect(r?.error?.message).toContain("agit_delete_everything");
   });
 
   it("answers from a session whose chain is broken, and says it is broken", () => {
@@ -266,6 +375,14 @@ describe("MCP says what it cannot answer", () => {
 
     const g = call(dir, "agit_grep", { pattern: "ratelimit" }) as { hits: { verified: boolean }[] };
     expect(g.hits.every((h) => h.verified === false)).toBe(true);
+
+    // The listing is where a model chooses what to read, so it must not make
+    // a tampered session look like an intact one. Readable is a different
+    // question from verified, and both are answered.
+    const l = call(dir, "agit_list") as { sessions: { id: string; readable: boolean; verified: boolean }[] };
+    expect(l.sessions).toHaveLength(1);
+    expect(l.sessions[0]!.readable).toBe(true);
+    expect(l.sessions[0]!.verified).toBe(false);
   });
 });
 

@@ -242,8 +242,8 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   catches exactly that forgery:
 
   ```
-  ok: 31 events, chain intact, matches meta.json head
-  SIGNATURE DOES NOT MATCH (SHA256:+++sbwFo…): does not match this head
+  NOT OK: 31 events, chain intact, matches meta.json head, but a signature does not match:
+  SIGNATURE DOES NOT MATCH (SHA256:+++sbwFo…): does not match this head — the log changed after signing, or the signature was never valid
   ```
 
   Ed25519, reading the `~/.ssh/id_ed25519` you already have or any PKCS#8

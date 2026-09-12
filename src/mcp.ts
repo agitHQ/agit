@@ -36,9 +36,10 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { verifyChain } from "./format/verify.js";
-import type { AgitEvent, Json } from "./format/events.js";
+import { EVENT_TYPES, isEventType, type AgitEvent, type Json } from "./format/events.js";
 import { buildMatcher, grepEvents, GrepPatternError, type GrepHit } from "./grep.js";
 import { diffSessions } from "./diff.js";
+import { reconstructTree, treeRelativePath } from "./fork.js";
 import { fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
 import {
   listSessionIds,
@@ -195,8 +196,9 @@ export const TOOLS = [
   {
     name: "agit_list",
     description:
-      "List every imported session with its runtime, start time, event count and tags — the " +
-      "starting point when you do not yet know which session you want. Read-only.",
+      "List every imported session with its runtime, start time, event count, tags and whether " +
+      "its hash chain verifies — the starting point when you do not yet know which session you " +
+      "want. Read-only.",
     inputSchema: { type: "object", properties: {} },
   },
 ] as const;
@@ -256,7 +258,12 @@ function doList(dir: string): unknown {
     } catch {
       readable = false;
     }
-    return { id, runtime, started, events, readable, tags: notes.tags, note: notes.note ?? null };
+    // `readable` says the log parses; `verified` says the chain is intact.
+    // The listing used to carry only the first, so a tampered session and an
+    // intact one looked the same at the point a model picks which to read,
+    // against the promise in the header that every answer says.
+    const verified = statusOf(dir, id).verified;
+    return { id, runtime, started, events, readable, verified, tags: notes.tags, note: notes.note ?? null };
   });
   return { sessions, count: sessions.length };
 }
@@ -376,13 +383,61 @@ function doReplay(dir: string, id: string, at: number | undefined, wantState: bo
   };
 }
 
+/**
+ * Split a session's events into those the comparison can key by path and
+ * those it cannot, and count the files the latter would have contributed.
+ *
+ * treeRelativePath throws for a path that sanitizes to nothing ("/", ".",
+ * ".." and whatever the cwd strip reduces to one of them), and diffSessions
+ * does not catch that per file, so a single hash-verified file.diff with such
+ * a path failed the whole comparison against every other session, while
+ * agit_show on the same session listed the path without complaint. The hash
+ * on a create is trivially computed by whoever writes the log, and adopted
+ * logs are untrusted input, so the events for such a path are set aside here
+ * and their files go into the same skip channel the tool already reports.
+ */
+function setAsideUnkeyable(events: AgitEvent[]): { events: AgitEvent[]; unusable: number } {
+  const start = events[0]?.payload as { cwd?: Json } | undefined;
+  const cwd = typeof start?.cwd === "string" ? start.cwd : null;
+  const kept: AgitEvent[] = [];
+  const aside: AgitEvent[] = [];
+  for (const e of events) {
+    const path =
+      e.type === "file.diff" || e.type === "file.delete" ? (e.payload as { path?: Json }).path : undefined;
+    let keyable = true;
+    if (typeof path === "string") {
+      try {
+        treeRelativePath(path, cwd);
+      } catch {
+        keyable = false;
+      }
+    }
+    (keyable ? kept : aside).push(e);
+  }
+  if (aside.length === 0) return { events, unusable: 0 };
+  // Replaying only the set-aside events says how many files they would have
+  // put in the tree or on its skip list, both of which are now absent from
+  // the comparison. A path created and then deleted is in neither and is
+  // not counted, since it would not have been compared anyway.
+  const t = reconstructTree(aside, events.length - 1);
+  return { events: kept, unusable: t.files.length + t.skipped.length };
+}
+
 function doDiff(dir: string, a: string, b: string): unknown {
   const ra = resolveSessionId(dir, a);
   const rb = resolveSessionId(dir, b);
+  const ea = readSessionEvents(dir, ra);
+  const eb = readSessionEvents(dir, rb);
+  const ka = setAsideUnkeyable(ea);
+  const kb = setAsideUnkeyable(eb);
+  // `at` is pinned to the original log's end: diffSessions would otherwise
+  // derive it from the shorter, filtered array and drop the last events.
   const d = diffSessions({
-    a: { events: readSessionEvents(dir, ra), label: ra },
-    b: { events: readSessionEvents(dir, rb), label: rb },
+    a: { events: ka.events, label: ra, at: ea.length - 1 },
+    b: { events: kb.events, label: rb, at: eb.length - 1 },
   });
+  const partialA = d.a.unreconstructible + ka.unusable;
+  const partialB = d.b.unreconstructible + kb.unusable;
   return {
     a: { id: ra, verified: statusOf(dir, ra).verified },
     b: { id: rb, verified: statusOf(dir, rb).verified },
@@ -400,13 +455,14 @@ function doDiff(dir: string, a: string, b: string): unknown {
       "only-b": "only the second session has it",
     },
     comparedBy: "content hash of the file state each session produced, structured edits only (SPEC 5.7)",
-    ...(d.a.unreconstructible > 0 || d.b.unreconstructible > 0
+    ...(partialA > 0 || partialB > 0
       ? {
           partial: {
-            a: d.a.unreconstructible,
-            b: d.b.unreconstructible,
+            a: partialA,
+            b: partialB,
             meaning:
-              "files the log could not rebuild, so they are absent from the comparison rather than equal",
+              "files the log could not rebuild, or whose path the tree cannot key, so they are " +
+              "absent from the comparison rather than equal",
           },
         }
       : {}),
@@ -421,6 +477,16 @@ function doGrep(dir: string, params: Record<string, unknown>): unknown {
     caseSensitive: params.caseSensitive === true,
   });
   const type = str(params.type);
+  // The CLI refuses both of these as usage errors; here they used to pass
+  // straight through and answer total: 0 with no error, which for a tool
+  // whose job is "have I done this before?" reads as "no, never" when the
+  // real answer is "you misspelled tool.call".
+  if (type !== undefined && !isEventType(type)) {
+    throw new TypeError(`unknown event type ${JSON.stringify(type)}; one of: ${EVENT_TYPES.join(", ")}`);
+  }
+  if (params.path === true && type !== undefined && type !== "file.diff" && type !== "file.delete") {
+    throw new TypeError(`path searches file.diff and file.delete paths; it cannot combine with type ${type}`);
+  }
   const tag = str(params.tag);
   const limit = Math.max(1, Math.min(num(params.limit) ?? MAX_GREP_HITS, MAX_GREP_HITS));
 
@@ -469,7 +535,8 @@ function doGrep(dir: string, params: Record<string, unknown>): unknown {
 
 /**
  * Handle one JSON-RPC message. Returns null for a notification, which by
- * definition gets no reply.
+ * definition gets no reply. A batch is not one message; `handleFrame` splits
+ * it before this is reached.
  *
  * Exported so the protocol can be tested without a subprocess and a pipe.
  */
@@ -477,8 +544,8 @@ export function handleMessage(dir: string, msg: unknown): JsonRpcResponse | null
   // Anything that is not a request object is an Invalid Request, and gets an
   // error with a null id. It is not a notification: both lack an id, but only
   // one of them earns silence, and treating them alike left a client that
-  // sent a malformed request (or a batch, which MCP 2025-06-18 dropped)
-  // waiting for a reply that was never coming.
+  // sent a malformed request waiting for a reply that was never coming. An
+  // array here is one nested inside a batch, which JSON-RPC does not allow.
   if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
     return err(null, INVALID_REQUEST, "expected a JSON-RPC 2.0 request object");
   }
@@ -547,7 +614,11 @@ export function handleMessage(dir: string, msg: unknown): JsonRpcResponse | null
           case "agit_diff":
             return toolOk(id, doDiff(dir, requireStr(args, "a"), requireStr(args, "b")));
           default:
-            return err(id, METHOD_NOT_FOUND, `unknown tool ${JSON.stringify(name)}`);
+            // Invalid params, not method-not-found: the method is tools/call
+            // and it exists, the tool name is one of its parameters. MCP
+            // lists an unknown tool under -32602, and a client that maps
+            // -32601 to "this server has no tools/call" misreports the failure.
+            return err(id, INVALID_PARAMS, `unknown tool ${JSON.stringify(name)}`);
         }
       } catch (e) {
         // A tool that cannot answer says why in a result the model can read,
@@ -578,12 +649,6 @@ export function setServerVersion(v: string): void {
   VERSION = v;
 }
 
-/**
- * Serve MCP over a stdio pair until the input closes.
- *
- * stdout carries protocol frames and nothing else — anything human goes to
- * stderr — because a stray log line on stdout is a parse error at the client.
- */
 /** A message's id when it has a usable one, for error replies. Never throws. */
 function idOf(msg: unknown): string | number | null {
   if (msg === null || typeof msg !== "object" || Array.isArray(msg)) return null;
@@ -591,6 +656,47 @@ function idOf(msg: unknown): string | number | null {
   return typeof v === "string" || typeof v === "number" ? v : null;
 }
 
+/** handleMessage with a bug in it turned into an error reply rather than a crash. */
+function handleSafely(dir: string, msg: unknown): JsonRpcResponse | null {
+  try {
+    return handleMessage(dir, msg);
+  } catch (e) {
+    // A bug here must not take the server down mid-conversation. Reading
+    // the id has to be safe for that to hold: `msg.id` on a line that
+    // parsed to `null` threw inside this very handler, which killed the
+    // process and left every later request on the pipe unanswered.
+    return err(idOf(msg), INVALID_REQUEST, e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * Handle one parsed line of the transport: a single message, or a JSON-RPC
+ * batch. Returns null when nothing is owed back.
+ *
+ * Batches exist because the server echoes back protocolVersion 2025-03-26
+ * when asked for it, and that revision's base protocol says implementations
+ * MUST support receiving them (2025-06-18 dropped them again). Treating the
+ * array as one Invalid Request answered a 2025-03-26 client's batch with a
+ * single id-less error and left every request inside it unanswered, which
+ * is the hang the id-less-error rule in handleMessage exists to prevent.
+ * JSON-RPC 2.0 sets the edges: an empty batch is one Invalid Request, and a
+ * batch of nothing but notifications gets no reply at all, not `[]`.
+ *
+ * Exported for the same reason handleMessage is.
+ */
+export function handleFrame(dir: string, msg: unknown): JsonRpcResponse | JsonRpcResponse[] | null {
+  if (!Array.isArray(msg)) return handleSafely(dir, msg);
+  if (msg.length === 0) return err(null, INVALID_REQUEST, "expected a non-empty JSON-RPC 2.0 batch");
+  const replies = msg.map((m) => handleSafely(dir, m)).filter((r): r is JsonRpcResponse => r !== null);
+  return replies.length > 0 ? replies : null;
+}
+
+/**
+ * Serve MCP over a stdio pair until the input closes.
+ *
+ * stdout carries protocol frames and nothing else — anything human goes to
+ * stderr — because a stray log line on stdout is a parse error at the client.
+ */
 export function serveMcp(dir: string, input: Readable, output: Writable): Promise<void> {
   return new Promise((resolve) => {
     const rl = createInterface({ input, crlfDelay: Infinity });
@@ -604,16 +710,7 @@ export function serveMcp(dir: string, input: Readable, output: Writable): Promis
         output.write(JSON.stringify(err(null, PARSE_ERROR, "invalid JSON")) + "\n");
         return;
       }
-      let response: JsonRpcResponse | null;
-      try {
-        response = handleMessage(dir, msg);
-      } catch (e) {
-        // A bug here must not take the server down mid-conversation. Reading
-        // the id has to be safe for that to hold: `msg.id` on a line that
-        // parsed to `null` threw inside this very handler, which killed the
-        // process and left every later request on the pipe unanswered.
-        response = err(idOf(msg), INVALID_REQUEST, e instanceof Error ? e.message : String(e));
-      }
+      const response = handleFrame(dir, msg);
       if (response !== null) output.write(JSON.stringify(response) + "\n");
     });
     rl.on("close", () => resolve());

@@ -115,6 +115,18 @@ export function fingerprint(raw: Buffer): string {
   return "SHA256:" + createHash("sha256").update(blob).digest("base64").replace(/=+$/, "");
 }
 
+/**
+ * An ed25519 public key is exactly 32 bytes. The check matters because the
+ * SPKI wrapper below declares a 32-byte key, and OpenSSL reads only what the
+ * DER declares: a key padded past 32 bytes still verifies with the real key
+ * while its fingerprint is hashed over the padded blob. One seed could then
+ * present as many "different" keys as it liked, none of them a fingerprint
+ * `ssh-keygen -l` would ever print.
+ */
+function checkRawLength(raw: Buffer, what: string): void {
+  if (raw.length !== 32) throw new KeyError(`${what} is ${raw.length} bytes, expected 32`);
+}
+
 /** Parse the 32 raw bytes out of a one-line `ssh-ed25519 AAAA…` public key. */
 export function parseOpensshPublicKey(line: string): Buffer {
   const parts = line.trim().split(/\s+/);
@@ -125,7 +137,18 @@ export function parseOpensshPublicKey(line: string): Buffer {
   const blob = Buffer.from(parts[idx + 1]!, "base64");
   const type = readField(blob, 0);
   if (type.value.toString("utf8") !== SSH_ED25519) throw new KeyError("public key is not ed25519");
-  return readField(blob, type.next).value;
+  const key = readField(blob, type.next);
+  checkRawLength(key.value, "ed25519 public key");
+  // OpenSSH refuses a blob with bytes after the key, so a line agit accepts
+  // should be one `ssh-keygen -lf` accepts too.
+  if (key.next !== blob.length) throw new KeyError("trailing bytes after the public key");
+  return key.value;
+}
+
+/** The 32 raw public bytes of an Ed25519 private key: the tail of its SPKI DER. */
+function rawPublicOf(priv: KeyObject): Buffer {
+  const spki = createPublicKey(priv).export({ type: "spki", format: "der" });
+  return Buffer.from(spki.subarray(spki.length - 32));
 }
 
 /**
@@ -156,10 +179,15 @@ function parseOpensshPrivateKey(pem: string): { priv: KeyObject; pub: Buffer } {
 
   const cipherName = cipher.value.toString("utf8");
   if (cipherName !== "none" || kdf.value.toString("utf8") !== "none") {
+    // `ssh-keygen -p` rewrites the file it is given and has no output flag,
+    // so the hint copies first. An earlier version of this message suggested
+    // `-out <key>.pem`, which ssh-keygen parses as `-o -u -t <key>.pem` and
+    // then strips the passphrase from the user's real key in place.
     throw new KeyError(
       `this key is encrypted (${cipherName}). agit does not take passphrases.\n` +
-        "Export an unencrypted copy you control, and sign with that:\n" +
-        "  ssh-keygen -p -f <key> -m PKCS8 -N '' -out <key>.pem\n" +
+        "Make an unencrypted copy you control, and sign with that:\n" +
+        "  cp <key> agit-signing-key && ssh-keygen -p -f agit-signing-key -N ''\n" +
+        "(copy first: ssh-keygen -p rewrites the file it is given, and the original keeps its passphrase)\n" +
         "or generate a signing key: ssh-keygen -t ed25519 -N '' -f agit-signing-key",
     );
   }
@@ -186,8 +214,14 @@ function parseOpensshPrivateKey(pem: string): { priv: KeyObject; pub: Buffer } {
   }
   const pub = readField(privBlob.value, p);
   p = pub.next;
+  checkRawLength(pub.value, "ed25519 public key in this file");
   const secret = readField(privBlob.value, p);
   // OpenSSH stores seed||public for ed25519; PKCS#8 wants the 32-byte seed.
+  // A shorter field would otherwise surface as a raw OpenSSL "not enough
+  // data" error from the DER below, naming nothing the user can act on.
+  if (secret.value.length !== 64) {
+    throw new KeyError(`ed25519 secret in this file is ${secret.value.length} bytes, expected 64`);
+  }
   const seed = secret.value.subarray(0, 32);
 
   // Wrap the raw seed in the minimal PKCS#8 DER that node will read.
@@ -198,7 +232,22 @@ function parseOpensshPrivateKey(pem: string): { priv: KeyObject; pub: Buffer } {
     seed,
   ]);
   const priv = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
-  return { priv, pub: pub.value };
+
+  // The public key the file stores is a claim; the seed is the fact. Using
+  // the stored copy meant a file whose public field did not match its seed
+  // (corrupted, hand-built) signed with the seed and published the stored
+  // key, so `agit sign` exited 0 with a fingerprint that had signed nothing
+  // and `agit verify` rejected the record a moment later. Derive the key
+  // from the seed, and refuse a file that disagrees with itself rather than
+  // silently sign under a key its owner does not recognise.
+  const derived = rawPublicOf(priv);
+  if (!derived.equals(pub.value) || !derived.equals(secret.value.subarray(32))) {
+    throw new KeyError(
+      "this key file disagrees with itself: the public key it stores is not the one its seed produces.\n" +
+        "Regenerate it, or sign with a different key.",
+    );
+  }
+  return { priv, pub: derived };
 }
 
 export interface LoadedKey {
@@ -232,9 +281,7 @@ export function loadPrivateKey(pem: string): LoadedKey {
     if (priv.asymmetricKeyType !== "ed25519") {
       throw new KeyError(`this is an ${priv.asymmetricKeyType ?? "unknown"} key; agit signs with ed25519`);
     }
-    // The last 32 bytes of the SPKI DER are the raw public key.
-    const spki = createPublicKey(priv).export({ type: "spki", format: "der" });
-    publicRaw = Buffer.from(spki.subarray(spki.length - 32));
+    publicRaw = rawPublicOf(priv);
   }
 
   return {
@@ -245,9 +292,42 @@ export function loadPrivateKey(pem: string): LoadedKey {
   };
 }
 
+/**
+ * The encodings of the eight small-order points of the Ed25519 curve, as
+ * libsodium's blocklist spells them; the last three are the non-canonical
+ * encodings (y >= p) of the first ones. The sign bit of the final byte is
+ * masked before comparing, so each entry covers both of its encodings.
+ */
+const SMALL_ORDER_POINTS = [
+  "0000000000000000000000000000000000000000000000000000000000000000",
+  "0100000000000000000000000000000000000000000000000000000000000000",
+  "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+  "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+  "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+  "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+].map((hex) => Buffer.from(hex, "hex"));
+
+/**
+ * OpenSSL's Ed25519 verify does not reject a small-order public key, and
+ * under one the equation [S]B = R + [k]A holds for any message with S = 0
+ * and R chosen from the same eight points: no private key exists, and the
+ * record still verifies. libsodium-class verifiers refuse such a key, and
+ * SPEC §12 promises an independent implementation reaches the same verdict
+ * agit does, so agit refuses it too.
+ */
+function hasSmallOrder(raw: Buffer): boolean {
+  const masked = Buffer.from(raw);
+  masked[31] = masked[31]! & 0x7f;
+  return SMALL_ORDER_POINTS.some((p) => p.equals(masked));
+}
+
 /** Rebuild a verifying key from the stored one-line public key. */
 export function publicKeyFromLine(line: string): { key: KeyObject; raw: Buffer } {
   const raw = parseOpensshPublicKey(line);
+  if (hasSmallOrder(raw)) {
+    throw new KeyError("public key is a small-order point, which verifies signatures nobody made");
+  }
   const der = Buffer.concat([
     Buffer.from([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]),
     raw,

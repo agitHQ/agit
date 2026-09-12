@@ -33,9 +33,12 @@ export class StabilityError extends Error {
 /**
  * How long a file's mtime must have been stable before the idle fast path
  * will trust it. Two seconds is FAT's granularity, the coarsest in common
- * use; anything finer is covered by it.
+ * use; anything finer is covered by it. The comparison is strict, so an
+ * mtime that counts as settled names a tick that is already over, and no
+ * later write can land inside it. Exported for the tests that sit a poll
+ * on either side of the window.
  */
-const MTIME_SETTLE_MS = 2000;
+export const MTIME_SETTLE_MS = 2000;
 
 export class SessionFollower {
   readonly redactions: RedactionCounts = {};
@@ -88,6 +91,10 @@ export class SessionFollower {
     // byte-offset tailing was considered and rejected, because reading only
     // appended bytes is blind to in-place prefix rewrites — exactly the
     // history tampering the full-prefix digest below exists to catch.
+    //
+    // The stat this poll may remember, once the content behind it has been
+    // read and checked.
+    let seen: { size: number; mtimeMs: number } | null = null;
     if (live) {
       const st = statSync(this.path);
       // ...but only once the file's mtime has had time to settle. Filesystems
@@ -103,10 +110,28 @@ export class SessionFollower {
       // which is exactly when it matters.
       const settled = Date.now() - st.mtimeMs > MTIME_SETTLE_MS;
       if (settled && st.size === this.lastSize && st.mtimeMs === this.lastMtimeMs) return [];
-      this.lastSize = st.size;
-      this.lastMtimeMs = st.mtimeMs;
+      // And the pair is only worth remembering once it is settled. Remembering
+      // it earlier left the hole open from the other side: a poll inside the
+      // tick read the file and recorded (size, mtime), a same-size rewrite
+      // later in that tick moved neither, and the first poll after the tick
+      // found the file settled and matching, so the rewrite was never read
+      // and the digest never ran. How long after does not matter, because a
+      // slow push skips ticks and the gap between two polls is unbounded. A
+      // settled stat names a tick that is already over, so any later write
+      // has to move the mtime. The fast path is reached one poll later than
+      // before, which a quiet session does not notice. What this still leans
+      // on is the sharer's clock agreeing with the filesystem's to within the
+      // window; a file server whose clock runs behind by more than that is
+      // the same boundary as a backdated mtime, which the tests document.
+      if (settled) seen = { size: st.size, mtimeMs: st.mtimeMs };
     }
+    // A leading BOM is stripped here as at every other native-log read site.
+    // Left in place it glues to the first record, the adapter skips that
+    // record as unparseable, and a live share of the file is no longer the
+    // chain an import of it produces. An editor re-save of the source before
+    // `agit share <id>` is enough to get there.
     const lines = readFileSync(this.path, "utf8")
+      .replace(/^\uFEFF/, "")
       .split("\n")
       .filter((l) => l.trim() !== "");
     let drafts: DraftEvent[];
@@ -134,6 +159,18 @@ export class SessionFollower {
     for (let i = 0; i < this.sentDrafts; i++) digest = sha256Hex(digest + canonicalJson(drafts[i]));
     if (digest !== this.prefixDigest) {
       throw new StabilityError("previously streamed drafts changed content between polls");
+    }
+    // Committed only now, with the content read, converted and checked.
+    // Recording the stat before the read meant a read that failed (EBUSY
+    // from a scanner holding the file on Windows, a stale handle on NFS)
+    // still counted as processed: the next poll found the same settled
+    // stat, took the fast path, and an appended tail sat unread until the
+    // runtime wrote again or the share ended. Waiting for the checks as well
+    // keeps a follower that just stopped on a rewrite from ever gating on
+    // the rewritten bytes.
+    if (seen !== null) {
+      this.lastSize = seen.size;
+      this.lastMtimeMs = seen.mtimeMs;
     }
 
     const fresh = drafts.slice(this.sentDrafts);
@@ -345,20 +382,73 @@ export async function readSse(
 }
 
 /**
+ * The most `agit pull` will buffer from a relay. A relay is untrusted, and
+ * an unbounded res.text() let one that streams forever grow the process
+ * until the OS killed it, and one that stops just past V8's string limit
+ * fail with a bare "Cannot create a string longer than ..." after every
+ * byte was already held. The relay caps its own inbound side at 25MB per
+ * push and 200k events per share, so a real share sits far below this and
+ * a body that passes it is the relay misbehaving; the pull refuses and
+ * says so.
+ */
+export const PULL_BODY_LIMIT = 256 * 1024 * 1024;
+
+/**
+ * Read a response body with a byte budget, so the relay does not decide how
+ * much memory the client spends. Cancelling the reader closes the socket,
+ * which is what ends a stream that was never going to.
+ */
+async function readBounded(res: Response, limit: number): Promise<string> {
+  const refuse = (): never => {
+    throw new Error(
+      `the relay sent more than ${Math.round(limit / (1024 * 1024))}MB for that share; agit pull ` +
+        "will not buffer it (a share on a well-behaved relay is far smaller)",
+    );
+  };
+  if (res.body === null) return "";
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await res.body.cancel().catch(() => undefined);
+    refuse();
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    if (bytes > limit) {
+      await reader.cancel().catch(() => undefined);
+      refuse();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+/**
  * Fetch a published share's whole event log (#72, `agit pull`).
  *
  * No writer token: this is the same bytes any viewer can download from the
  * share page, which is the point — pulling is adopting what was published,
  * not privileged access to it. The caller verifies the chain before storing
  * anything, exactly as adopting a `pr` bundle does.
+ *
+ * `limit` exists for the tests; the CLI takes the default.
  */
-export async function fetchShareLog(relayUrl: string, shareId: string): Promise<string[]> {
+export async function fetchShareLog(
+  relayUrl: string,
+  shareId: string,
+  limit: number = PULL_BODY_LIMIT,
+): Promise<string[]> {
   const res = await relayFetch(relayUrl, `/api/shares/${shareId}/events.jsonl`);
   if (res.status === 404) {
     throw new Error(`no such share on ${relayUrl} — it may have expired (shares have a TTL)`);
   }
-  if (!res.ok) throw new Error(`relay refused the log: ${res.status} ${await res.text()}`);
-  return (await res.text()).split("\n").filter((l) => l.trim() !== "");
+  if (!res.ok) throw new Error(`relay refused the log: ${res.status} ${await readBounded(res, limit)}`);
+  return (await readBounded(res, limit)).split("\n").filter((l) => l.trim() !== "");
 }
 
 /**
