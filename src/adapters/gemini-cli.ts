@@ -1,14 +1,23 @@
 /**
- * Adapter for Gemini CLI session logs (~/.gemini/tmp/<hash>/chats/*.jsonl, #61).
+ * Adapter for Gemini CLI session logs (~/.gemini/tmp/<hash>/chats/*.jsonl).
  *
- * Maps JSONL session turns produced by Gemini CLI into agit's open event log:
- *  - user and model turns mapped to message.user and message.assistant
- *  - thinking / thought parts mapped to assistant thinking blocks
- *  - functionCall and functionResponse mapped to tool.call and tool.result
- *  - usageMetadata mapped to cost events
+ * Derived from Google's Gemini CLI source:
+ *  - `packages/cli/src/session/session-manager.ts` (JSONL turn envelope)
+ *  - `packages/core/src/types/content.ts` and Gemini API Content schema
  *
- * Skip counters track unmapped structures (e.g. system prompts or unsupported
- * parts) without guessing. Built with zero runtime dependencies.
+ * In the Gemini Content schema, there is no tool role: function execution results
+ * are submitted back to the model as user turns (`role: "user"`) containing
+ * `parts: [{ functionResponse: { name, response, id } }]`.
+ *
+ * Mapping rules follow SPEC.md §6:
+ *  - `role: "user"` parts with text -> `message.user`
+ *  - `role: "user"` parts with `functionResponse` -> `tool.result`
+ *  - `role: "model"` parts with `thought` -> `message.assistant` thinking blocks
+ *  - `role: "model"` parts with `text` -> `message.assistant` text blocks
+ *  - `role: "model"` parts with `functionCall` -> `tool.call`
+ *  - `usageMetadata` -> `cost` events (promptTokenCount, candidatesTokenCount)
+ *
+ * Unverifiable or system records are counted in skip totals without guessing.
  */
 
 import type { DraftEvent, Json } from "../format/events.js";
@@ -61,8 +70,7 @@ export const geminiCliAdapter: Adapter = {
       if (!rec) continue;
 
       if (
-        (typeof rec.role === "string" && Array.isArray(rec.parts)) ||
-        (typeof rec.type === "string" && rec.type.startsWith("gemini")) ||
+        (typeof rec.role === "string" && Array.isArray(rec.parts) && (rec.role === "user" || rec.role === "model")) ||
         (asRec(rec.usageMetadata) !== undefined && typeof rec.role === "string")
       ) {
         return true;
@@ -170,12 +178,35 @@ export const geminiCliAdapter: Adapter = {
         for (const p of parts) {
           const recP = asRec(p);
           if (!recP) continue;
+
           if (typeof recP.text === "string") {
             textParts.push(recP.text);
+          } else if (asRec(recP.functionResponse)) {
+            // Function results arrive under role: "user" in the Gemini API specification
+            const fr = asRec(recP.functionResponse) as unknown as FunctionResponsePart;
+            const callId = fr.id ?? `call_${toolCallSeq}`;
+            let output = "";
+            if (typeof fr.response === "string") {
+              output = fr.response;
+            } else if (fr.response !== undefined && fr.response !== null) {
+              output = JSON.stringify(fr.response);
+            }
+            drafts.push({
+              ts: currentTs,
+              type: "tool.result",
+              payload: {
+                toolUseId: callId,
+                isError: false,
+                output,
+                structured: (asRec(fr.response) as Json) ?? null,
+                native: { functionResponse: (recP.functionResponse ?? null) as Json },
+              },
+            });
           } else {
             skip(`unknown-user-part:${Object.keys(recP).join(",")}`);
           }
         }
+
         const text = textParts.join("\n").trim();
         if (text !== "") {
           drafts.push({
@@ -243,42 +274,16 @@ export const geminiCliAdapter: Adapter = {
               type: "cost",
               payload: {
                 model,
-                inputTokens: promptTokens,
-                outputTokens: candidatesTokens,
-                cacheReadTokens: num(usage.cachedContentTokenCount),
-                cacheWriteTokens: 0,
+                usage: {
+                  inputTokens: promptTokens,
+                  outputTokens: candidatesTokens,
+                  cacheReadTokens: num(usage.cachedContentTokenCount),
+                  cacheWriteTokens: 0,
+                },
                 costUsd: null,
                 native: { usageMetadata: usage },
               },
             });
-          }
-        }
-      } else if (role === "tool") {
-        for (const p of parts) {
-          const recP = asRec(p);
-          if (!recP) continue;
-          if (asRec(recP.functionResponse)) {
-            const fr = asRec(recP.functionResponse) as unknown as FunctionResponsePart;
-            const callId = fr.id ?? `call_${toolCallSeq}`;
-            let output = "";
-            if (typeof fr.response === "string") {
-              output = fr.response;
-            } else if (fr.response !== undefined && fr.response !== null) {
-              output = JSON.stringify(fr.response);
-            }
-            drafts.push({
-              ts: currentTs,
-              type: "tool.result",
-              payload: {
-                toolUseId: callId,
-                isError: false,
-                output,
-                structured: (asRec(fr.response) as Json) ?? null,
-                native: { functionResponse: (recP.functionResponse ?? null) as Json },
-              },
-            });
-          } else {
-            skip(`unknown-tool-part:${Object.keys(recP).join(",")}`);
           }
         }
       } else {

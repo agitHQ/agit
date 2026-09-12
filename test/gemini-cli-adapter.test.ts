@@ -73,8 +73,9 @@ describe("geminiCliAdapter.convert", () => {
     expect(blocks.some((b) => b.type === "text")).toBe(true);
 
     const cost = res.drafts.find((d) => d.type === "cost")!;
-    expect(cost.payload.inputTokens).toBeGreaterThan(0);
-    expect(cost.payload.outputTokens).toBeGreaterThan(0);
+    const u = cost.payload.usage as { inputTokens: number; outputTokens: number };
+    expect(u.inputTokens).toBeGreaterThan(0);
+    expect(u.outputTokens).toBeGreaterThan(0);
   });
 
   it("supports live conversion omitting session.end", () => {
