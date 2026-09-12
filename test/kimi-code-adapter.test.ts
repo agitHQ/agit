@@ -71,8 +71,9 @@ describe("kimiCodeAdapter.convert", () => {
     expect(blocks.some((b) => b.type === "text")).toBe(true);
 
     const cost = res.drafts.find((d) => d.type === "cost")!;
-    expect(cost.payload.inputTokens).toBe(210);
-    expect(cost.payload.outputTokens).toBe(40);
+    const u = cost.payload.usage as { inputTokens: number; outputTokens: number };
+    expect(u.inputTokens).toBe(210);
+    expect(u.outputTokens).toBe(40);
   });
 
   it("omits session.end when live is true", () => {

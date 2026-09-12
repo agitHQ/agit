@@ -1,13 +1,18 @@
 /**
- * Adapter for Kimi Code sessions (~/.kimi-code/sessions/.../agents/<name>/*.jsonl, #64).
+ * Adapter for Kimi Code sessions (~/.kimi-code/sessions/<project>/<session>/agents/<name>/*.jsonl, #64).
  *
- * Maps Kimi Code session logs into agit's open event log:
- *  - user turns to message.user
- *  - assistant turns (including reasoning_content / thought) to message.assistant
- *  - OpenAI-compatible function tool calls and results to tool.call and tool.result
- *  - token usage to cost events
+ * Derived from Moonshot / Kimi Code agent session format (as read by claude-replay):
+ * Sessions are persisted per agent in JSONL containing standard chat turns:
+ *  - `{ id, created_at, role: "user" | "assistant" | "tool" | "system", content, tool_calls, tool_call_id, model, usage }`
  *
- * Skip counters track system prompts and unmapped blocks without guessing.
+ * Mapping rules follow SPEC.md §6:
+ *  - `role: "user"` -> `message.user`
+ *  - `role: "assistant"` -> `message.assistant` (mapping `reasoning_content` to thinking blocks if present)
+ *  - `tool_calls` -> `tool.call`
+ *  - `role: "tool"` -> `tool.result`
+ *  - `usage` -> `cost` events (`payload.usage`)
+ *
+ * `system` records are counted in skip totals without guessing.
  */
 
 import type { DraftEvent, Json } from "../format/events.js";
@@ -57,11 +62,12 @@ export const kimiCodeAdapter: Adapter = {
       const rec = asRec(o);
       if (!rec) continue;
 
-      if (
-        (typeof rec.kimiVersion === "string" || typeof rec.agent_name === "string" || typeof rec.agentName === "string") ||
-        (rec.client === "kimi" || rec.runtime === "kimi-code") ||
-        (typeof rec.model === "string" && rec.model.includes("kimi"))
-      ) {
+      const model = str(rec.model);
+      const isKimiModel = model !== null && (model.includes("kimi") || model.includes("moonshot"));
+      const isAgentSession = typeof rec.agent_name === "string" || typeof rec.agentId === "string";
+      const hasChatTurn = typeof rec.role === "string" && (rec.content !== undefined || rec.tool_calls !== undefined);
+
+      if ((isKimiModel || isAgentSession) && hasChatTurn) {
         return true;
       }
     }
@@ -106,13 +112,13 @@ export const kimiCodeAdapter: Adapter = {
 
     let firstTs: string | null = null;
     for (const r of records) {
-      const t = str(r.timestamp) ?? str(r.ts) ?? str(r.created_at);
+      const t = str(r.timestamp) ?? str(r.created_at);
       if (t && !Number.isNaN(Date.parse(t))) {
         firstTs = new Date(t).toISOString();
         break;
       }
-      if (typeof r.timestamp === "number" || typeof r.ts === "number" || typeof r.created === "number") {
-        const n = (r.timestamp ?? r.ts ?? r.created) as number;
+      if (typeof r.timestamp === "number" || typeof r.created_at === "number" || typeof r.created === "number") {
+        const n = (r.timestamp ?? r.created_at ?? r.created) as number;
         firstTs = new Date(n > 1e11 ? n : n * 1000).toISOString();
         break;
       }
@@ -133,25 +139,25 @@ export const kimiCodeAdapter: Adapter = {
       type: "session.start",
       payload: {
         runtime: "kimi-code",
-        runtimeVersion: str(records[0]?.kimiVersion) ?? null,
+        runtimeVersion: null,
         nativeSessionId: sessionId,
         cwd: str(records[0]?.cwd) ?? null,
         gitBranch: str(records[0]?.gitBranch) ?? null,
         adapter: { name: KIMI_CODE_ADAPTER_NAME, version: KIMI_CODE_ADAPTER_VERSION },
         native: {
           sessionId,
-          agentName: str(records[0]?.agent_name) ?? str(records[0]?.agentName) ?? null,
+          agentName: str(records[0]?.agent_name) ?? null,
         },
       },
     });
 
     let toolCallSeq = 0;
     for (const r of records) {
-      const rawTs = str(r.timestamp) ?? str(r.ts) ?? str(r.created_at);
+      const rawTs = str(r.timestamp) ?? str(r.created_at);
       if (rawTs && !Number.isNaN(Date.parse(rawTs))) {
         currentTs = new Date(rawTs).toISOString();
-      } else if (typeof r.timestamp === "number" || typeof r.ts === "number" || typeof r.created === "number") {
-        const n = (r.timestamp ?? r.ts ?? r.created) as number;
+      } else if (typeof r.timestamp === "number" || typeof r.created_at === "number" || typeof r.created === "number") {
+        const n = (r.timestamp ?? r.created_at ?? r.created) as number;
         currentTs = new Date(n > 1e11 ? n : n * 1000).toISOString();
       }
 
@@ -241,10 +247,12 @@ export const kimiCodeAdapter: Adapter = {
               type: "cost",
               payload: {
                 model,
-                inputTokens: inTokens,
-                outputTokens: outTokens,
-                cacheReadTokens: num(usage.cached_tokens),
-                cacheWriteTokens: 0,
+                usage: {
+                  inputTokens: inTokens,
+                  outputTokens: outTokens,
+                  cacheReadTokens: num(usage.cached_tokens),
+                  cacheWriteTokens: 0,
+                },
                 costUsd: null,
                 native: { usage },
               },
