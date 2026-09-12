@@ -66,8 +66,9 @@ describe("cursorAdapter.convert", () => {
     expect(toolResult.payload.output).toContain("export function auth");
 
     const cost = res.drafts.find((d) => d.type === "cost")!;
-    expect(cost.payload.inputTokens).toBe(250);
-    expect(cost.payload.outputTokens).toBe(65);
+    const u = cost.payload.usage as { inputTokens: number; outputTokens: number };
+    expect(u.inputTokens).toBe(250);
+    expect(u.outputTokens).toBe(65);
   });
 
   it("omits session.end when live option is true", () => {

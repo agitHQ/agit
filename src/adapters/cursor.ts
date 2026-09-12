@@ -1,14 +1,23 @@
 /**
- * Adapter for Cursor agent transcripts (~/.cursor/projects/<project>/agent-transcripts/<id>/, #62).
+ * Adapter for Cursor agent transcripts (~/.cursor/projects/<path>/agent-transcripts/<uuid>/<uuid>.jsonl, #62).
  *
- * Maps Cursor agent transcripts into agit's open event log:
- *  - User queries mapped to message.user
- *  - Agent responses (with thinking and text) mapped to message.assistant
- *  - Tool calls and results mapped to tool.call and tool.result
- *  - Unverifiable file edits skipped and counted rather than guessing hashes
- *  - Usage/token metrics mapped to cost events
+ * Derived from Cursor 3.5.38 agent transcript format (source reference:
+ * `cursor-history/src/core/store-stack/transcript.ts`).
  *
- * Implements prefix stability under live options and deterministic imports.
+ * Cursor agent transcripts persist Anthropic-shaped conversation turn lines:
+ *  - `{ role, type, message: { content: [...] }, parentMessageId, isSidechain, timestamp }`
+ *  - Content blocks contain `text`, `tool_use` (with `id`, `name`, `input`),
+ *    and `tool_result` (with `tool_use_id`, `content`, `is_error`).
+ *
+ * Mapping rules follow SPEC.md §6:
+ *  - user text content -> `message.user`
+ *  - assistant text and thinking content -> `message.assistant`
+ *  - `tool_use` blocks -> `tool.call`
+ *  - `tool_result` blocks -> `tool.result`
+ *  - token usage -> `cost` events
+ *
+ * Sidechains (`isSidechain: true`) and system blocks are skipped and counted
+ * honestly without altering the main trajectory. Built with zero dependencies.
  */
 
 import type { DraftEvent, Json } from "../format/events.js";
@@ -31,6 +40,18 @@ function num(v: Json | undefined): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+interface ContentBlock {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, Json>;
+  tool_use_id?: string;
+  content?: Json;
+  is_error?: boolean;
+}
+
 export const cursorAdapter: Adapter = {
   name: CURSOR_ADAPTER_NAME,
   version: CURSOR_ADAPTER_VERSION,
@@ -48,12 +69,13 @@ export const cursorAdapter: Adapter = {
       const rec = asRec(o);
       if (!rec) continue;
 
-      if (
-        (typeof rec.agentId === "string" || typeof rec.transcriptId === "string") ||
-        (rec.cursorVersion !== undefined) ||
-        (typeof rec.sender === "string" && (rec.sender === "human" || rec.sender === "agent")) ||
-        (rec.client === "cursor")
-      ) {
+      // Anthropic-shaped Cursor transcript record
+      const hasParent = rec.parentMessageId !== undefined || rec.parentId !== undefined;
+      const hasSidechain = rec.isSidechain !== undefined;
+      const msg = asRec(rec.message);
+      const isAnthropicShaped = typeof rec.role === "string" && msg !== undefined && Array.isArray(msg.content);
+
+      if ((hasParent || hasSidechain) && isAnthropicShaped) {
         return true;
       }
     }
@@ -84,28 +106,18 @@ export const cursorAdapter: Adapter = {
       throw new Error("this Cursor agent transcript has no valid records");
     }
 
-    let sessionId: string | null = null;
-    for (const r of records) {
-      const s = str(r.transcriptId) ?? str(r.agentId) ?? str(r.sessionId) ?? str(r.id);
-      if (s) {
-        sessionId = s;
-        break;
-      }
-    }
-    if (!sessionId) {
-      sessionId = "cursor-transcript-0001";
-    }
+    const sessionId = "cursor-transcript-0001";
 
     let firstTs: string | null = null;
     for (const r of records) {
-      const t = str(r.timestamp) ?? str(r.ts) ?? str(r.createdAt);
+      const t = str(r.timestamp) ?? str(r.createdAt);
       if (t && !Number.isNaN(Date.parse(t))) {
         firstTs = new Date(t).toISOString();
         break;
       }
-      if (typeof r.timestamp === "number" || typeof r.ts === "number") {
-        const n = (r.timestamp ?? r.ts) as number;
-        firstTs = new Date(n).toISOString();
+      if (typeof r.timestamp === "number" || typeof r.createdAt === "number") {
+        const n = (r.timestamp ?? r.createdAt) as number;
+        firstTs = new Date(n > 1e11 ? n : n * 1000).toISOString();
         break;
       }
     }
@@ -125,10 +137,10 @@ export const cursorAdapter: Adapter = {
       type: "session.start",
       payload: {
         runtime: "cursor",
-        runtimeVersion: str(records[0]?.cursorVersion) ?? null,
+        runtimeVersion: null,
         nativeSessionId: sessionId,
-        cwd: str(records[0]?.cwd) ?? null,
-        gitBranch: str(records[0]?.gitBranch) ?? null,
+        cwd: null,
+        gitBranch: null,
         adapter: { name: CURSOR_ADAPTER_NAME, version: CURSOR_ADAPTER_VERSION },
         native: {
           sessionId,
@@ -136,139 +148,126 @@ export const cursorAdapter: Adapter = {
       },
     });
 
-    let toolCallSeq = 0;
     for (const r of records) {
-      const rawTs = str(r.timestamp) ?? str(r.ts) ?? str(r.createdAt);
-      if (rawTs && !Number.isNaN(Date.parse(rawTs))) {
-        currentTs = new Date(rawTs).toISOString();
-      } else if (typeof r.timestamp === "number" || typeof r.ts === "number") {
-        currentTs = new Date((r.timestamp ?? r.ts) as number).toISOString();
-      }
-
-      const role = str(r.role) ?? (str(r.sender) === "human" ? "user" : str(r.sender) === "agent" ? "assistant" : null);
-      const model = str(r.model) ?? "cursor-default";
-
-      if (role === "system") {
-        skip("system-prompt");
+      if (r.isSidechain === true) {
+        skip("sidechain-turn");
         continue;
       }
 
+      const rawTs = str(r.timestamp) ?? str(r.createdAt);
+      if (rawTs && !Number.isNaN(Date.parse(rawTs))) {
+        currentTs = new Date(rawTs).toISOString();
+      } else if (typeof r.timestamp === "number" || typeof r.createdAt === "number") {
+        const n = (r.timestamp ?? r.createdAt) as number;
+        currentTs = new Date(n > 1e11 ? n : n * 1000).toISOString();
+      }
+
+      const msg = asRec(r.message) ?? r;
+      const role = str(r.role) ?? str(msg.role);
+      const blocks = (Array.isArray(msg.content) ? msg.content : [])
+        .map(asRec)
+        .filter((b): b is Rec => b !== undefined) as unknown as ContentBlock[];
+
+      const model = str(msg.model) ?? "cursor-claude";
+
       if (role === "user") {
-        const text = str(r.text) ?? str(r.content) ?? str(r.message) ?? "";
+        const textParts: string[] = [];
+        for (const b of blocks) {
+          if (b.type === "text" && typeof b.text === "string") {
+            textParts.push(b.text);
+          } else if (b.type === "tool_result") {
+            const callId = b.tool_use_id ?? "(unknown)";
+            let output = "";
+            if (typeof b.content === "string") output = b.content;
+            else if (b.content !== undefined) output = JSON.stringify(b.content);
+            drafts.push({
+              ts: currentTs,
+              type: "tool.result",
+              payload: {
+                toolUseId: callId,
+                isError: b.is_error === true,
+                output,
+                structured: (asRec(b.content) as Json) ?? null,
+                native: { tool_use_id: callId },
+              },
+            });
+          } else {
+            skip(`unknown-user-block:${b.type ?? "(untyped)"}`);
+          }
+        }
+        const text = textParts.join("\n").trim();
         if (text !== "") {
           drafts.push({
             ts: currentTs,
             type: "message.user",
             payload: {
               text,
-              native: { id: str(r.id) ?? null },
+              native: { id: str(msg.id) ?? null },
             },
           });
         }
       } else if (role === "assistant") {
-        const blocks: Json[] = [];
-        const thinking = str(r.thought) ?? str(r.thinking);
-        if (thinking) {
-          blocks.push({ type: "thinking", text: thinking });
-        }
-        const text = str(r.text) ?? str(r.content) ?? str(r.message);
-        if (text) {
-          blocks.push({ type: "text", text });
-        }
+        const assistantBlocks: Json[] = [];
+        for (const b of blocks) {
+          if (b.type === "text" && typeof b.text === "string" && b.text !== "") {
+            assistantBlocks.push({ type: "text", text: b.text });
+          } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking !== "") {
+            assistantBlocks.push({ type: "thinking", text: b.thinking });
+          } else if (b.type === "tool_use") {
+            const callId = b.id ?? `call_${drafts.length + 1}`;
+            const name = b.name ?? "tool";
+            const input = (b.input as Json) ?? {};
 
-        // Handle tool calls if embedded in turn
-        const toolCalls = Array.isArray(r.toolCalls) ? (r.toolCalls as Json[]) : [];
-        for (const tc of toolCalls) {
-          const recTc = asRec(tc);
-          if (!recTc) continue;
-          toolCallSeq++;
-          const callId = str(recTc.id) ?? `call_${toolCallSeq}`;
-          const name = str(recTc.name) ?? str(recTc.tool) ?? "tool";
-          const input = (asRec(recTc.input) ?? asRec(recTc.args) ?? {}) as Json;
-
-          drafts.push({
-            ts: currentTs,
-            type: "tool.call",
-            payload: {
-              toolUseId: callId,
-              name,
-              input,
-              native: { toolCall: (tc ?? null) as Json },
-            },
-          });
-
-          // If tool result is attached
-          if (recTc.result !== undefined) {
-            const outStr = typeof recTc.result === "string" ? recTc.result : JSON.stringify(recTc.result);
             drafts.push({
               ts: currentTs,
-              type: "tool.result",
+              type: "tool.call",
               payload: {
                 toolUseId: callId,
-                isError: recTc.isError === true,
-                output: outStr,
-                structured: (asRec(recTc.result) as Json) ?? null,
-                native: { result: (recTc.result ?? null) as Json },
+                name,
+                input,
+                native: { id: callId },
               },
             });
           }
         }
 
-        if (blocks.length > 0) {
+        if (assistantBlocks.length > 0) {
           drafts.push({
             ts: currentTs,
             type: "message.assistant",
             payload: {
               model,
-              blocks,
-              stopReason: str(r.stopReason) ?? null,
-              native: { id: str(r.id) ?? null },
+              blocks: assistantBlocks,
+              stopReason: str(msg.stop_reason) ?? null,
+              native: { id: str(msg.id) ?? null },
             },
           });
         }
 
-        const tokens = asRec(r.tokens) ?? asRec(r.usage);
-        if (tokens) {
-          const inTokens = num(tokens.inputTokens) || num(tokens.promptTokens);
-          const outTokens = num(tokens.outputTokens) || num(tokens.completionTokens);
+        const usage = asRec(msg.usage);
+        if (usage) {
+          const inTokens = num(usage.input_tokens) || num(usage.promptTokens);
+          const outTokens = num(usage.output_tokens) || num(usage.completionTokens);
           if (inTokens > 0 || outTokens > 0) {
             drafts.push({
               ts: currentTs,
               type: "cost",
               payload: {
                 model,
-                inputTokens: inTokens,
-                outputTokens: outTokens,
-                cacheReadTokens: 0,
-                cacheWriteTokens: 0,
+                usage: {
+                  inputTokens: inTokens,
+                  outputTokens: outTokens,
+                  cacheReadTokens: 0,
+                  cacheWriteTokens: 0,
+                },
                 costUsd: null,
-                native: { usage: tokens },
+                native: { usage },
               },
             });
           }
         }
-      } else if (role === "tool") {
-        toolCallSeq++;
-        const callId = str(r.toolUseId) ?? str(r.callId) ?? `call_${toolCallSeq}`;
-        const output = str(r.output) ?? str(r.result) ?? "";
-        drafts.push({
-          ts: currentTs,
-          type: "tool.result",
-          payload: {
-            toolUseId: callId,
-            isError: r.isError === true,
-            output,
-            structured: (asRec(r.structured) as Json) ?? null,
-            native: { id: str(r.id) ?? null },
-          },
-        });
       } else {
         skip(`unknown-role:${role ?? "(missing)"}`);
-      }
-
-      if (r.fileEdit !== undefined) {
-        // Cursor file edits without verifiable base/diff are logged as skipped edits
-        skip("unverifiable-file-edit");
       }
     }
 
