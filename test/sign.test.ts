@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import {
   loadPrivateKey,
   opensshPublicKey,
   parseOpensshPublicKey,
+  publicKeyFromLine,
   signedBytes,
   signHead,
   SIGNATURE_PAYLOAD_VERSION,
@@ -102,6 +103,62 @@ function forge(dir: string): void {
   writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
 }
 
+/**
+ * Take an unencrypted OpenSSH ed25519 key apart and put it back together
+ * with one field changed, the way a corrupted or hand-built file would be.
+ * ssh-keygen will not write these, so the tests have to.
+ */
+function rebuildOpensshKey(
+  pem: string,
+  edit: { pub?: (b: Buffer) => Buffer; secret?: (b: Buffer) => Buffer },
+): string {
+  const buf = Buffer.from(
+    pem.replace(/-----(BEGIN|END) OPENSSH PRIVATE KEY-----/g, "").replace(/\s+/g, ""),
+    "base64",
+  );
+  let at = "openssh-key-v1\0".length;
+  const read = (b: Buffer): Buffer => {
+    const len = b.readUInt32BE(at);
+    const v = b.subarray(at + 4, at + 4 + len);
+    at += 4 + len;
+    return v;
+  };
+  const field = (b: Buffer): Buffer => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(b.length, 0);
+    return Buffer.concat([len, b]);
+  };
+  const cipher = read(buf);
+  const kdf = read(buf);
+  const kdfOpts = read(buf);
+  at += 4; // key count
+  read(buf); // outer public blob, rebuilt below
+  const priv = read(buf);
+
+  at = 8; // the two check ints
+  const type = read(priv);
+  const pub = (edit.pub ?? ((b) => b))(read(priv));
+  const secret = (edit.secret ?? ((b) => b))(read(priv));
+  const comment = read(priv);
+  let section = Buffer.concat([priv.subarray(0, 8), field(type), field(pub), field(secret), field(comment)]);
+  for (let i = 1; section.length % 8 !== 0; i++) section = Buffer.concat([section, Buffer.from([i])]);
+
+  const out = Buffer.concat([
+    Buffer.from("openssh-key-v1\0", "binary"),
+    field(cipher),
+    field(kdf),
+    field(kdfOpts),
+    Buffer.from([0, 0, 0, 1]),
+    field(Buffer.concat([field(type), field(pub)])),
+    field(section),
+  ]);
+  const lines = out
+    .toString("base64")
+    .match(/.{1,70}/g)!
+    .join("\n");
+  return `-----BEGIN OPENSSH PRIVATE KEY-----\n${lines}\n-----END OPENSSH PRIVATE KEY-----\n`;
+}
+
 let keyDir: string;
 let sshKey: string;
 beforeAll(() => {
@@ -137,6 +194,72 @@ describe("key handling (#68)", () => {
       // Refusing is only useful if it says what to do instead.
       expect((e as Error).message).toContain("ssh-keygen");
     }
+  });
+
+  it("gives an encrypted-key hint that works, and leaves the original key alone", () => {
+    const enc = join(keyDir, "enc-hint");
+    ssh("-t", "ed25519", "-N", "hunter2", "-f", enc);
+    let hint = "";
+    try {
+      loadPrivateKey(readFileSync(enc, "utf8"));
+    } catch (e) {
+      hint = (e as Error).message;
+    }
+    // ssh-keygen has no -out flag: it parsed the old hint as `-o -u -t
+    // <key>.pem`, stripped the passphrase from ~/.ssh/id_ed25519 in place,
+    // and wrote no .pem. The hint has to copy first.
+    expect(hint).not.toContain("-out");
+    expect(hint).toContain("cp <key> agit-signing-key && ssh-keygen -p -f agit-signing-key -N ''");
+
+    // Run the recipe it gives (with -P for the old passphrase, since a test
+    // cannot answer a prompt) and check both halves of the promise.
+    const copy = join(keyDir, "enc-hint-copy");
+    copyFileSync(enc, copy);
+    ssh("-p", "-P", "hunter2", "-f", copy, "-N", "");
+    expect(loadPrivateKey(readFileSync(copy, "utf8")).fingerprint).toMatch(/^SHA256:/);
+    expect(() => loadPrivateKey(readFileSync(enc, "utf8"))).toThrow(/encrypted/);
+  });
+
+  it("refuses an OpenSSH key whose stored public key is not the one its seed produces", () => {
+    // Nothing in the file format ties the public field to the seed. Signing
+    // with the seed and publishing the stored key made `agit sign` exit 0
+    // with a fingerprint that had signed nothing, and `agit verify` reject
+    // the record it had just written.
+    const pem = rebuildOpensshKey(readFileSync(sshKey, "utf8"), {
+      pub: (b) => {
+        const c = Buffer.from(b);
+        c[0] = c[0]! ^ 0xff;
+        return c;
+      },
+    });
+    expect(() => loadPrivateKey(pem)).toThrow(/disagrees with itself/);
+
+    const bad = join(keyDir, "mismatched");
+    writeFileSync(bad, pem, "utf8");
+    const dir = storeWithDemo();
+    const r = agit(["sign", "demo", "--key", bad, "--dir", dir]);
+    expect(r.code).toBe(1);
+    expect(metaOf(dir).signatures).toBeUndefined();
+  });
+
+  it("requires a public key of exactly 32 bytes, in a key line and in a key file", () => {
+    const k = loadPrivateKey(readFileSync(sshKey, "utf8"));
+    // The SPKI wrapper declares 32 bytes and OpenSSL reads no further, so a
+    // padded key verified with the real key under a fingerprint of the
+    // padded blob: one seed, as many "different" fingerprints as it liked,
+    // none of them one ssh-keygen would print.
+    const padded = Buffer.concat([k.publicRaw, Buffer.alloc(40, 0x41)]);
+    expect(() => parseOpensshPublicKey(opensshPublicKey(padded))).toThrow(/72 bytes, expected 32/);
+    expect(() => parseOpensshPublicKey(opensshPublicKey(k.publicRaw.subarray(0, 31)))).toThrow(KeyError);
+
+    const pem = readFileSync(sshKey, "utf8");
+    expect(() =>
+      loadPrivateKey(rebuildOpensshKey(pem, { pub: (b) => Buffer.concat([b, Buffer.from([0])]) })),
+    ).toThrow(/33 bytes, expected 32/);
+    // A short secret used to surface as a raw OpenSSL "not enough data".
+    expect(() => loadPrivateKey(rebuildOpensshKey(pem, { secret: (b) => b.subarray(0, 20) }))).toThrow(
+      /20 bytes, expected 64/,
+    );
   });
 
   it("names a key type it cannot sign with instead of guessing", () => {
@@ -211,6 +334,57 @@ describe("signatures bind a head to a key", () => {
   it("refuses a payload version it does not understand", () => {
     expect(verifySignature({ ...sign(), payloadVersion: 99 }, head).ok).toBe(false);
   });
+
+  it("does not let a padded key line verify under a fingerprint nobody can check", () => {
+    // The signature is real; only the key line grew. It verified, because
+    // OpenSSL ignores what the DER does not declare, and it printed a
+    // fingerprint `ssh-keygen -lf` calls "not a public key file".
+    const k = loadPrivateKey(readFileSync(sshKey, "utf8"));
+    const padded = Buffer.concat([k.publicRaw, Buffer.alloc(40, 0x41)]);
+    const r = verifySignature(
+      { ...sign(), key: opensshPublicKey(padded), keyFingerprint: fingerprint(padded) },
+      head,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain("expected 32");
+  });
+
+  it("refuses a small-order public key, which would verify signatures nobody made", () => {
+    // OpenSSL accepts these keys, and with S = 0 and R picked from the same
+    // eight points the verification equation holds for any head: a record
+    // with no private key behind it reads as signed. libsodium refuses the
+    // key, and SPEC §12 says an independent verifier must agree with agit.
+    const forgeries: [Buffer, Buffer][] = [
+      [Buffer.alloc(32), Buffer.alloc(32)],
+      [
+        Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]),
+        Buffer.concat([Buffer.from([1]), Buffer.alloc(31)]),
+      ],
+    ];
+    for (const [raw, R] of forgeries) {
+      const r = verifySignature(
+        {
+          alg: "ed25519",
+          key: opensshPublicKey(raw),
+          keyFingerprint: fingerprint(raw),
+          sig: Buffer.concat([R, Buffer.alloc(32)]).toString("base64"),
+          at,
+          payloadVersion: SIGNATURE_PAYLOAD_VERSION,
+        },
+        head,
+      );
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toContain("small-order");
+    }
+    // The non-canonical spelling of the identity (y = p + 1) is the same point.
+    const nonCanonical = Buffer.from(
+      "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "hex",
+    );
+    expect(() => publicKeyFromLine(opensshPublicKey(nonCanonical))).toThrow(/small-order/);
+    // And a real key is not caught in the net.
+    expect(() => publicKeyFromLine(loadPrivateKey(readFileSync(sshKey, "utf8")).publicLine)).not.toThrow();
+  });
 });
 
 describe("agit sign / agit verify", () => {
@@ -259,6 +433,41 @@ describe("agit sign / agit verify", () => {
     expect(r.out).toContain("chain intact");
     expect(r.out).toContain("SIGNATURE DOES NOT MATCH");
     expect(r.code).toBe(1);
+
+    // The README shows this exact run as the reason `sign` exists. It once
+    // showed the `ok:` prefix the code dropped for reading as a pass, so
+    // hold it to the output the code prints today, line by line.
+    const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+    const [verdict, mismatch] = r.out.split("\n");
+    expect(readme).toContain(verdict);
+    expect(readme).toContain(mismatch!.slice(mismatch!.indexOf("): ") + 3));
+  });
+
+  it("fails verify on a record whose key is a small-order point", () => {
+    // The finding's shape: no key material anywhere, and `verify` used to
+    // print `signed by` and exit 0.
+    const dir = storeWithDemo();
+    const metaPath = join(dir, ".agit", "sessions", SESSION, "meta.json");
+    const meta = metaOf(dir);
+    const raw = Buffer.alloc(32);
+    meta.signatures = [
+      {
+        alg: "ed25519",
+        key: opensshPublicKey(raw),
+        keyFingerprint: fingerprint(raw),
+        sig: Buffer.alloc(64).toString("base64"),
+        at: "2026-01-01T00:00:00.000Z",
+        payloadVersion: SIGNATURE_PAYLOAD_VERSION,
+      },
+    ];
+    writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+
+    const r = agit(["verify", "demo", "--dir", dir]);
+    expect(r.out).not.toContain("signed by");
+    expect(r.out).toContain("SIGNATURE DOES NOT MATCH");
+    expect(r.code).toBe(1);
+    const doc = JSON.parse(agit(["verify", "demo", "--json", "--dir", dir]).out) as { signaturesOk: boolean };
+    expect(doc.signaturesOk).toBe(false);
   });
 
   it("refuses to sign a log whose chain does not verify", () => {
@@ -294,6 +503,20 @@ describe("agit sign / agit verify", () => {
     const r = agit(["verify", "demo", "--dir", dir]);
     expect(r.out.match(/signed by/g)).toHaveLength(2);
     expect(r.code).toBe(0);
+
+    // "Same key" is decided by fingerprint, so a key file with a padded
+    // public field used to sign as a third party: the same seed, stacked
+    // under a fingerprint nothing else would ever print.
+    const padded = join(keyDir, "padded");
+    writeFileSync(
+      padded,
+      rebuildOpensshKey(readFileSync(sshKey, "utf8"), {
+        pub: (b) => Buffer.concat([b, Buffer.alloc(40, 0x41)]),
+      }),
+      "utf8",
+    );
+    expect(agit(["sign", "demo", "--key", padded, "--dir", dir]).code).toBe(1);
+    expect(metaOf(dir).signatures).toHaveLength(2);
   });
 
   it("reports signatures in --json, and fails the exit code on a bad one", () => {
@@ -310,6 +533,63 @@ describe("agit sign / agit verify", () => {
     const bad = agit(["verify", "demo", "--json", "--dir", dir]);
     expect((JSON.parse(bad.out) as { signatures: { ok: boolean }[] }).signatures[0]!.ok).toBe(false);
     expect(bad.code).toBe(1);
+  });
+
+  it("reports a signatures field that is not an array of records instead of crashing", () => {
+    // meta.json is third-party input once a bundle is adopted, and adoption
+    // checks the chain, not the meta. `"signatures": {}` used to take verify
+    // down with a bare TypeError (0 bytes on stdout under --json) and sign
+    // with another.
+    for (const bad of [{}, "x", true, [null], [42]]) {
+      const dir = storeWithDemo();
+      const metaPath = join(dir, ".agit", "sessions", SESSION, "meta.json");
+      const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+      meta.signatures = bad;
+      writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+
+      const r = agit(["verify", "demo", "--dir", dir]);
+      expect(r.code, JSON.stringify(bad)).toBe(1);
+      expect(r.out).not.toMatch(/is not a function|Cannot read properties/);
+      expect(r.out).toContain("chain intact");
+      expect(r.out).toContain("SIGNATURE DOES NOT MATCH");
+      expect(r.out).toContain("malformed record");
+
+      const j = agit(["verify", "demo", "--json", "--dir", dir]);
+      expect(j.code).toBe(1);
+      const doc = JSON.parse(j.out) as {
+        ok: boolean;
+        chainOk: boolean;
+        signaturesOk: boolean;
+        signatures: { ok: boolean; reason?: string }[];
+      };
+      expect(doc).toMatchObject({ ok: false, chainOk: true, signaturesOk: false });
+      expect(doc.signatures).toHaveLength(1);
+      expect(doc.signatures[0]!.ok).toBe(false);
+      expect(doc.signatures[0]!.reason).toContain("malformed record");
+
+      // Signing next to junk would put a name behind a meta.json verify keeps
+      // failing; it is refused and named, and the file is left alone.
+      const s = agit(["sign", "demo", "--key", sshKey, "--dir", dir]);
+      expect(s.code).toBe(1);
+      expect(s.out).toContain("refusing to sign");
+      expect(s.out).not.toMatch(/is not a function|Cannot read properties/);
+      expect((JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>).signatures).toEqual(bad);
+    }
+    // Five shapes, four CLI runs each: well past the default under a loaded
+    // parallel run on Windows.
+  }, 90_000);
+
+  it("names a bundle meta.json that is not JSON when verifying the log beside it", () => {
+    const dir = storeWithDemo();
+    const out = join(dir, "bundle");
+    expect(agit(["pr", "demo", "--out", out, "--dir", dir]).code).toBe(0);
+    writeFileSync(join(out, "meta.json"), "not json {", "utf8");
+
+    const r = agit(["verify", join(out, "events.jsonl"), "--dir", dir]);
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain("Unexpected token");
+    expect(r.out).toContain(join(out, "meta.json"));
+    expect(r.out).toContain("not readable JSON");
   });
 
   it("carries signatures into a pr bundle, so the recipient can check them", () => {

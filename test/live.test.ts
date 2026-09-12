@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import { appendFileSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +10,7 @@ import { canonicalJson } from "../src/format/canonical.js";
 import { buildChain, toJsonl } from "../src/format/hash.js";
 import { verifyChain } from "../src/format/verify.js";
 import { redactDeep, type RedactionCounts } from "../src/redact.js";
-import { SessionFollower, StabilityError } from "../src/share.js";
+import { MTIME_SETTLE_MS, SessionFollower, StabilityError } from "../src/share.js";
 import type { DraftEvent } from "../src/format/events.js";
 
 const FIXTURE = join(
@@ -29,6 +31,21 @@ function liveDrafts(upto: number): DraftEvent[] {
     return []; // no conversation records yet
   }
 }
+
+/** What `agit import` stores for these lines: convert, redact, chain. */
+function importOf(native: string[]): string {
+  const full = claudeCodeAdapter.convert(native);
+  const counts: RedactionCounts = {};
+  for (const d of full.drafts) d.payload = redactDeep(d.payload, counts);
+  return toJsonl(buildChain(full.sessionId, full.drafts));
+}
+
+/** The first six records with the user's request altered, same byte length. */
+const tampered = lines
+  .slice(0, 6)
+  .map((l, i) => (i === 1 ? l.replace("greeting module", "greetinj module") : l));
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe("live conversion (PROTOCOL.md prefix stability)", () => {
   it("every longer read strictly extends every shorter read", () => {
@@ -75,11 +92,28 @@ describe("SessionFollower", () => {
     expect(verifyChain(streamed.map((e) => JSON.stringify(e))).ok).toBe(true);
 
     // byte-identical to a one-shot import of the same file
-    const full = claudeCodeAdapter.convert(lines);
-    const counts: RedactionCounts = {};
-    for (const d of full.drafts) d.payload = redactDeep(d.payload, counts);
-    const imported = buildChain(full.sessionId, full.drafts);
-    expect(toJsonl(streamed)).toBe(toJsonl(imported));
+    expect(toJsonl(streamed)).toBe(importOf(lines));
+  });
+
+  it("strips a UTF-8 BOM, so a live share of a re-saved log is still its import", () => {
+    // Every other native-log read site strips the BOM an editor re-save
+    // leaves at the head of the file. The follower did not, so the BOM
+    // glued itself to the first record, the adapter skipped that record as
+    // unparseable, and the chain a share published was not the chain
+    // `agit show` and `agit verify` describe. The fixture's first record is
+    // a queue-operation line the adapter skips anyway, which hid this;
+    // dropping it puts the first user turn where the BOM lands.
+    const body = lines.slice(1);
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, "\uFEFF" + body.join("\n") + "\n", "utf8");
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    const streamed = [...follower.poll(), ...follower.finish()];
+    expect(streamed.find((e) => e.type === "message.user")?.payload.text).toBe(
+      "Add a greeting module and print it",
+    );
+    expect(toJsonl(streamed)).toBe(importOf(body));
   });
 
   it("a fresh follower regenerates the identical chain — the crash-resume invariant", () => {
@@ -116,27 +150,106 @@ describe("SessionFollower", () => {
 
   it("catches a same-size rewrite even when mtime is byte-identical", () => {
     // The failure this guards against, reproduced without depending on the
-    // filesystem's resolution: force mtime back to exactly what it was, which
-    // is what a coarse-granularity filesystem does for free when two writes
+    // filesystem's resolution: force mtime to exactly what it was, which is
+    // what a coarse-granularity filesystem does for free when two writes
     // land inside one tick. CI on Windows hit this for real.
+    //
+    // Both mtimes are set through utimesSync from the same Date, and the
+    // test asserts they came back identical. Restoring `before.mtime` did
+    // not do that: the Date carries milliseconds while the stat carries the
+    // filesystem's sub-millisecond part, so the "restored" mtime differed,
+    // the gate saw a change, and the test passed with the gate deleted.
     const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
     const path = join(dir, "native.jsonl");
     writeFileSync(path, lines.slice(0, 6).join("\n") + "\n", "utf8");
+    const tick = new Date();
+    utimesSync(path, tick, tick);
+    const before = statSync(path);
 
     const follower = new SessionFollower(path, claudeCodeAdapter);
     expect(follower.poll().length).toBeGreaterThan(0);
-    const before = statSync(path);
 
-    const mutated = lines
-      .slice(0, 6)
-      .map((l, i) => (i === 1 ? l.replace("greeting module", "greetinj module") : l));
-    writeFileSync(path, mutated.join("\n") + "\n", "utf8");
-    utimesSync(path, before.atime, before.mtime);
-    expect(statSync(path).size).toBe(before.size);
+    writeFileSync(path, tampered.join("\n") + "\n", "utf8");
+    utimesSync(path, tick, tick);
+    const after = statSync(path);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
 
-    // Size identical, mtime as close to unchanged as the platform allows: the
-    // digest still has to run, or history could be rewritten unnoticed.
+    // Size and mtime identical: the digest still has to run, or history
+    // could be rewritten unnoticed.
     expect(() => follower.poll()).toThrow(StabilityError);
+  });
+
+  it("catches a rewrite inside the tick it first read in, however late the next poll", async () => {
+    // The settle window alone was not enough. A poll inside the tick read
+    // the file and remembered (size, mtime); a same-size rewrite later in
+    // the same tick moved neither; and the first poll after the window
+    // found the file settled and matching, so it never read the rewrite.
+    // The poll gap is unbounded (a slow push skips ticks), so this is not a
+    // race the cadence closes. A stat is remembered only once it is settled.
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.slice(0, 6).join("\n") + "\n", "utf8");
+    // The tick started most of a window ago, as a coarse filesystem records
+    // a write that landed late in it. A second of slack keeps the first poll
+    // inside the window on a loaded CI machine.
+    const tick = new Date(Date.now() - (MTIME_SETTLE_MS - 1000));
+    utimesSync(path, tick, tick);
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    expect(follower.poll().length).toBeGreaterThan(0);
+    expect(Date.now() - tick.getTime()).toBeLessThan(MTIME_SETTLE_MS); // read inside the window
+
+    writeFileSync(path, tampered.join("\n") + "\n", "utf8");
+    utimesSync(path, tick, tick);
+    expect(statSync(path).mtimeMs).toBe(tick.getTime());
+
+    while (Date.now() - tick.getTime() <= MTIME_SETTLE_MS) await sleep(50);
+    expect(() => follower.poll()).toThrow(StabilityError);
+  });
+
+  it("a read that fails does not count as having seen the file", () => {
+    // The stat was remembered before the read. A read that then failed (a
+    // scanner holding the file on Windows, a stale NFS handle) was swallowed
+    // by the share loop as a retry, but the follower already believed it
+    // had processed that (size, mtime): once settled, every later poll took
+    // the fast path and the appended tail stayed unread until the runtime
+    // wrote again or the share ended.
+    const dir = mkdtempSync(join(tmpdir(), "agit-live-"));
+    const path = join(dir, "native.jsonl");
+    writeFileSync(path, lines.slice(0, 3).join("\n") + "\n", "utf8");
+
+    const follower = new SessionFollower(path, claudeCodeAdapter);
+    const first = follower.poll();
+    expect(first.length).toBe(3);
+
+    appendFileSync(path, lines.slice(3).join("\n") + "\n", "utf8");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old); // the append has settled by the next poll
+
+    const real = fs.readFileSync;
+    let failOnce = true;
+    fs.readFileSync = ((...args: Parameters<typeof real>) => {
+      if (failOnce) {
+        failOnce = false;
+        throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      }
+      return real(...args);
+    }) as typeof real;
+    syncBuiltinESMExports();
+    try {
+      expect(() => follower.poll()).toThrow(/EBUSY/);
+    } finally {
+      fs.readFileSync = real;
+      syncBuiltinESMExports();
+    }
+
+    // Nothing has changed on disk since the failed read, and the file is
+    // settled: the only way these events arrive is if that read did not
+    // count.
+    const recovered = follower.poll();
+    expect(recovered.length).toBeGreaterThan(0);
+    expect(toJsonl([...first, ...recovered, ...follower.finish()])).toBe(importOf(lines));
   });
 
   it("still skips the read on a file nothing has touched recently", () => {

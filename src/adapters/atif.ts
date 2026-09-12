@@ -33,6 +33,15 @@
  * so the inference is never silent. A trajectory with no timestamps anywhere
  * is refused rather than dated from the clock, which would make two imports
  * of the same bytes differ (SPEC §7).
+ *
+ * A continuation file (Terminus 2 writes one after each context summary)
+ * carries the earlier trajectory's steps with `is_copied_context` set. Those
+ * are the earlier trajectory's work: importing them again here would record
+ * the same messages and tool calls under two sessions, so they are counted
+ * and left out, and `continued_trajectory_ref` is kept on session.start so
+ * the other file can be found. A result that points at a subagent's
+ * trajectory in another file gets the same treatment as an embedded one:
+ * counted, with the reference kept, never linearized into this session.
  */
 
 import { createHash } from "node:crypto";
@@ -57,6 +66,23 @@ function str(v: Json | undefined): string | null {
 
 function num(v: Json | undefined): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Is a field there at all? A null is absence, not a wrong type: ATIF's
+ * Pydantic models serialize an unset `Optional` as JSON null unless the
+ * producer opts into exclude_none, so `tool_calls: null` is an ordinary step
+ * with no tool calls, while `tool_calls: {...}` is a producer bug that would
+ * otherwise lose every call on the step without a word in the report.
+ */
+function present(v: Json | undefined): boolean {
+  return v !== undefined && v !== null;
+}
+
+/** A declared id that is the empty string is no id; a producer that initialises string fields to "" hits this. */
+function declaredId(v: Json | undefined): string | null {
+  const s = str(v);
+  return s === null || s === "" ? null : s;
 }
 
 /** ATIF's `message` is a string or a list of ContentPart; flatten to text. */
@@ -121,13 +147,43 @@ export const atifAdapter: Adapter = {
     if (!isAtif(doc)) throw new Error("not an ATIF trajectory");
     const t = doc!;
 
-    const steps = (t.steps as Json[]).filter((s): s is Rec => asRec(s) !== undefined);
     const skipped: Record<string, number> = {};
     const skip = (what: string, n = 1): void => {
       skipped[what] = (skipped[what] ?? 0) + n;
     };
 
-    if (steps.length === 0) throw new Error("this ATIF trajectory has no steps");
+    // Every entry of `steps` is a native record, readable or not. The count
+    // the import reports is over all of them, and an entry that is not an
+    // object is named here rather than filtered out of existence, which used
+    // to make meta.json say fewer records than the file holds.
+    const entries = t.steps as Json[];
+    const steps: Rec[] = [];
+    let copied = 0;
+    for (const entry of entries) {
+      const step = asRec(entry);
+      if (step === undefined) {
+        skip("unparseable-step");
+        continue;
+      }
+      // A step copied in from an earlier trajectory is that trajectory's
+      // work, not this one's. Importing it here too would record the same
+      // messages and tool calls under both sessions, and `stats` and `grep`
+      // would count them twice. Counted, with the link kept on session.start.
+      if (step.is_copied_context === true) {
+        copied++;
+        continue;
+      }
+      steps.push(step);
+    }
+    if (copied > 0) skip("copied-context-step", copied);
+
+    if (steps.length === 0) {
+      throw new Error(
+        copied > 0
+          ? "every step in this ATIF trajectory is copied context from another trajectory; import that one"
+          : "this ATIF trajectory has no steps",
+      );
+    }
 
     // A trajectory with no timestamp anywhere cannot be dated without reading
     // the clock, which would break determinism (SPEC §7).
@@ -146,11 +202,15 @@ export const atifAdapter: Adapter = {
     // a stable id derived from its bytes, not from the agent's name: two
     // different unnamed trajectories from the same agent would otherwise
     // collide on one id, and the second import would be refused as "already
-    // exists with different content".
-    const declaredId = str(t.trajectory_id) ?? str(t.session_id);
+    // exists with different content". The agent's name is in the id only to
+    // be readable in `agit ls`, and it is free text from the document: an
+    // agent called "Terminus 2" used to make the whole import refuse over a
+    // session id the document never declared, so anything outside what SPEC
+    // §1 allows in an id becomes "-".
+    const ownId = declaredId(t.trajectory_id) ?? declaredId(t.session_id);
     const sessionId =
-      declaredId ??
-      `atif-${runtime}-${createHash("sha256").update(lines.join("\n"), "utf8").digest("hex").slice(0, 12)}`;
+      ownId ??
+      `atif-${runtime.replace(/[^A-Za-z0-9._-]+/g, "-")}-${createHash("sha256").update(lines.join("\n"), "utf8").digest("hex").slice(0, 12)}`;
 
     // Newer than what this adapter was written against. Read it anyway —
     // ATIF has been additive — but never silently, because a field this
@@ -178,6 +238,11 @@ export const atifAdapter: Adapter = {
           schemaVersion: str(t.schema_version),
           trajectoryId: str(t.trajectory_id),
           ...(str(t.notes) !== null ? { notes: str(t.notes) } : {}),
+          // The other half of a trajectory split across files. Kept so the
+          // steps this import left out as copied context can be found.
+          ...(str(t.continued_trajectory_ref) !== null
+            ? { continuedTrajectoryRef: str(t.continued_trajectory_ref) }
+            : {}),
         },
       },
     });
@@ -230,24 +295,50 @@ export const atifAdapter: Adapter = {
 
       // Tool calls hang off the step in ATIF; agit records one event each, in
       // order, with results matched by the id the trajectory itself uses.
-      const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
-      const results = new Map<string, Rec>();
+      let calls: Json[] = [];
+      if (Array.isArray(step.tool_calls)) calls = step.tool_calls;
+      else if (present(step.tool_calls)) skip("tool-calls-not-a-list");
+
+      // Results are grouped under the call id each one names. A result that
+      // names none is, by ATIF's own definition, the output of something
+      // outside the tool-calling format (an observation on a system step,
+      // for instance), and agit has no event for a result with no call:
+      // counted, not paired with a call it does not claim. A result naming a
+      // call that is not on this step is counted the same way once the calls
+      // have been read. Both used to vanish with nothing in the report.
+      const results = new Map<string, Rec[]>();
       const obs = asRec(step.observation);
+      if (obs === undefined && present(step.observation)) skip("observation-not-an-object");
+      if (obs !== undefined && !Array.isArray(obs.results) && present(obs.results)) {
+        skip("observation-results-not-a-list");
+      }
       if (obs !== undefined && Array.isArray(obs.results)) {
         for (const r of obs.results) {
           const rr = asRec(r);
-          const id = rr === undefined ? null : str(rr.source_call_id);
-          if (rr !== undefined && id !== null) results.set(id, rr);
+          if (rr === undefined) {
+            skip("unparseable-observation-result");
+            continue;
+          }
+          const id = str(rr.source_call_id);
+          if (id === null) {
+            skip("observation-result-without-call-id");
+            continue;
+          }
+          results.set(id, [...(results.get(id) ?? []), rr]);
         }
       }
 
-      for (const c of calls) {
+      for (const [i, c] of calls.entries()) {
         const call = asRec(c);
         if (call === undefined) {
           skip("unparseable-tool-call");
           continue;
         }
-        const id = str(call.tool_call_id) ?? `atif-step${num(step.step_id)}`;
+        // ATIF requires tool_call_id, so this fallback only ever serves a
+        // producer that broke the rule. It carries the call's position on the
+        // step as well: one id per step let a single result attach to every
+        // id-less call on it, a pairing the document never stated.
+        const id = str(call.tool_call_id) ?? `atif-step${num(step.step_id)}-${i}`;
         drafts.push({
           ts,
           type: "tool.call",
@@ -258,9 +349,17 @@ export const atifAdapter: Adapter = {
             native: { stepId: num(step.step_id) },
           },
         });
-        const r = results.get(id);
-        if (r !== undefined) {
+        // Every result naming this call is recorded, in document order. Two
+        // results under one id is the document's own claim about that call;
+        // keeping only the last, as this used to, threw the first away
+        // without a word, and choosing between them would be a guess.
+        for (const r of results.get(id) ?? []) {
           const extra = asRec(r.extra);
+          // A result that points at a subagent's trajectory in another file
+          // says this call was delegated. The work lives there, not here, so
+          // it is counted like an embedded subagent trajectory and the
+          // reference is kept so the other file can be found.
+          const refs = Array.isArray(r.subagent_trajectory_ref) ? r.subagent_trajectory_ref : [];
           drafts.push({
             ts,
             type: "tool.result",
@@ -269,9 +368,13 @@ export const atifAdapter: Adapter = {
               isError: extra?.isError === true,
               output: messageText(r.content),
               structured: null,
-              native: { stepId: num(step.step_id) },
+              native: {
+                stepId: num(step.step_id),
+                ...(refs.length > 0 ? { subagentTrajectoryRef: refs } : {}),
+              },
             },
           });
+          if (refs.length > 0) skip("subagent-trajectory-ref", refs.length);
           // A write tool's result is prose here. The file it touched is real
           // but its content is not in the document, so no file.diff can be
           // emitted over bytes agit does not hold.
@@ -279,9 +382,12 @@ export const atifAdapter: Adapter = {
             skip("file-edit-without-content", extra.agitFileEdits.length);
           }
         }
+        results.delete(id);
       }
+      for (const orphans of results.values()) skip("observation-result-without-call", orphans.length);
 
       const metrics = asRec(step.metrics);
+      if (metrics === undefined && present(step.metrics)) skip("metrics-not-an-object");
       // ATIF's metrics are per step, so one object may cover several model
       // calls; `llm_call_count` says how many. agit emits one cost event
       // either way, because the trajectory records no per-call split to
@@ -308,7 +414,13 @@ export const atifAdapter: Adapter = {
               messageId: null,
               requestId: null,
               stepId: num(step.step_id),
-              ...(metrics.cost_usd !== undefined ? { costUsd: num(metrics.cost_usd) } : {}),
+              // ATIF's cost_usd is `float | None`, and pydantic writes None
+              // as null. A null is a cost the producer did not know, not a
+              // cost of zero, so only a number the document holds is kept:
+              // this event is hashed, and "free" is not what it said.
+              ...(typeof metrics.cost_usd === "number" && Number.isFinite(metrics.cost_usd)
+                ? { costUsd: metrics.cost_usd }
+                : {}),
             },
           },
         });
@@ -328,6 +440,6 @@ export const atifAdapter: Adapter = {
       payload: { reason: "trajectory-end", synthesized: true },
     });
 
-    return { sessionId, drafts, records: steps.length, skipped };
+    return { sessionId, drafts, records: entries.length, skipped };
   },
 };

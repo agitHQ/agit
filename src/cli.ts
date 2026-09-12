@@ -21,6 +21,7 @@ import {
   SCHEMA_VERSION,
   SUPPORTED_SCHEMA_VERSIONS,
   type AgitEvent,
+  type AgitSignatureRecord,
   type SessionMeta,
 } from "./format/events.js";
 import { blameFile, sessionTrailer, whyLine, type LineOrigin } from "./blame.js";
@@ -897,7 +898,7 @@ function importPath(opts: Opts, target: string): number {
   // Adoption gets the unfiltered text: dropping blank lines first would both
   // hide the "blank line inside log" break from verifyChain and quietly
   // rewrite a log this path promises to store byte for byte.
-  if (looksLikeAgitLog(lines)) return adoptBundle(opts, path, raw);
+  if (looksLikeAgitLog(lines)) return adoptBundle(opts, join(dirname(path), "meta.json"), raw);
 
   const base = baseTreeFor(opts);
   if (base === null) return 2;
@@ -1017,17 +1018,23 @@ function cmdImportDiscovered(opts: Opts): number {
  * first and a broken or tampered log is refused outright; redaction is NOT
  * re-run, because re-scanning would change bytes and invalidate every hash
  * downstream — the log carries whatever the origin decided to publish.
+ *
+ * `metaPath` is where the origin's meta.json would be when the bundle came
+ * with one, and null when the log arrived without any (a pull). The caller
+ * names the file rather than a directory to search in: pull used to hand
+ * over a fake path under the project root, and a project that happened to
+ * keep its own meta.json there (a theme, a dataset) had that file read as
+ * the session's meta and every pull refused against it.
  */
-function adoptBundle(opts: Opts, path: string, raw: string): number {
+function adoptBundle(opts: Opts, metaPath: string | null, raw: string): number {
   // Split, do not filter: verifyChain tolerates exactly one trailing empty
   // element (the final newline) and treats any other blank as a break.
   const lines = raw.split("\n");
   // A sibling meta.json is the origin's own account of the import. It is kept
   // verbatim when present (it truthfully describes where the log came from)
   // and never invented when absent.
-  const metaPath = join(dirname(path), "meta.json");
   let meta: SessionMeta | undefined;
-  if (existsSync(metaPath)) {
+  if (metaPath !== null && existsSync(metaPath)) {
     try {
       meta = JSON.parse(readFileSync(metaPath, "utf8")) as SessionMeta;
     } catch {
@@ -1692,8 +1699,19 @@ function cmdSign(opts: Opts): number {
 
   // Re-signing with the same key replaces that key's signature rather than
   // stacking duplicates; a different key appends, because two people signing
-  // the same head is the point.
-  const kept = (meta.signatures ?? []).filter((s) => s.keyFingerprint !== signature.keyFingerprint);
+  // the same head is the point. A malformed entry is neither: writing a
+  // signature next to it would put a name behind a meta.json that verify
+  // will keep reporting as NOT OK, so it is named and left for the owner.
+  const entries = signatureEntries(meta);
+  const bad = entries.find((e): e is { record: null; malformed: string } => e.record === null);
+  if (bad !== undefined) {
+    console.error(`refusing to sign ${id}: in meta.json, ${bad.malformed}`);
+    console.error("Fix or remove that field first; agit verify reports it the same way.");
+    return 1;
+  }
+  const kept = entries
+    .flatMap((e) => (e.record === null ? [] : [e.record]))
+    .filter((s) => s.keyFingerprint !== signature.keyFingerprint);
   writeSessionMeta(opts.dir, id, { ...meta, signatures: [...kept, signature] });
 
   console.log(`signed ${id} with ${signature.keyFingerprint}`);
@@ -1703,20 +1721,54 @@ function cmdSign(opts: Opts): number {
   return 0;
 }
 
+/**
+ * One entry of meta.json's `signatures`: a record verifySignature can judge,
+ * or a description of why it cannot be one.
+ *
+ * meta.json is third-party input once a bundle has been adopted (adoption
+ * checks the chain, not the meta), and `signatures` used to be mapped as if
+ * it were always an array of records. A bundle carrying `"signatures": {}`
+ * or `[null]` adopted cleanly, then every verify and sign on that session
+ * died with a bare TypeError, and with --json nothing reached stdout at all.
+ * The chain verifier holds the line that a tampered input is reported by it
+ * rather than crashing it; this gives the signature path the same bar.
+ */
+type SignatureEntry = { record: AgitSignatureRecord } | { record: null; malformed: string };
+
+function signatureEntries(meta: SessionMeta | undefined): SignatureEntry[] {
+  const raw: unknown = meta?.signatures;
+  if (raw === undefined || raw === null) return [];
+  const kind = (x: unknown): string =>
+    x === null
+      ? "null"
+      : Array.isArray(x)
+        ? "an array"
+        : typeof x === "object"
+          ? "an object"
+          : `a ${typeof x}`;
+  if (!Array.isArray(raw)) return [{ record: null, malformed: `signatures is ${kind(raw)}, not an array` }];
+  return raw.map((s: unknown, i) =>
+    s !== null && typeof s === "object" && !Array.isArray(s)
+      ? { record: s as AgitSignatureRecord }
+      : { record: null, malformed: `signatures[${i}] is ${kind(s)}, not a signature record` },
+  );
+}
+
 /** Report every signature on a head, for `verify`. */
 function signatureLines(meta: SessionMeta | undefined, sessionId: string): string[] {
-  const sigs = meta?.signatures ?? [];
-  if (meta === undefined || sigs.length === 0)
+  const entries = signatureEntries(meta);
+  if (meta === undefined || entries.length === 0)
     return ["unsigned (agit sign <id> --key <file> binds this head to a key)"];
-  return sigs.map((s) => {
-    const v = verifySignature(s, {
+  return entries.map((e) => {
+    if (e.record === null) return `SIGNATURE DOES NOT MATCH: malformed record, ${e.malformed}`;
+    const v = verifySignature(e.record, {
       sessionId,
       headHash: meta.headHash,
       eventCount: meta.eventCount,
     });
     return v.ok
       ? `signed by ${v.fingerprint} at ${v.at}`
-      : `SIGNATURE DOES NOT MATCH (${s.keyFingerprint}): ${v.reason}`;
+      : `SIGNATURE DOES NOT MATCH (${e.record.keyFingerprint}): ${v.reason}`;
   });
 }
 
@@ -1731,7 +1783,17 @@ function cmdVerify(opts: Opts): number {
       .split("\n")
       .filter((l) => l.trim() !== "");
     const sibling = join(dirname(resolve(arg)), "meta.json");
-    meta = existsSync(sibling) ? (JSON.parse(readFileSync(sibling, "utf8")) as SessionMeta) : undefined;
+    if (existsSync(sibling)) {
+      // The bundle's meta.json is somebody else's file. Unparseable used to
+      // escape as a raw JSON.parse error, which names neither the file nor
+      // what to do about it.
+      try {
+        meta = JSON.parse(readFileSync(sibling, "utf8")) as SessionMeta;
+      } catch {
+        console.error(`${sibling} is not readable JSON: remove it or fix it; the log itself may be fine`);
+        return 1;
+      }
+    }
   } else {
     const id = requireId(opts);
     lines = readSessionLines(opts.dir, id);
@@ -1745,11 +1807,19 @@ function cmdVerify(opts: Opts): number {
     headHash: meta?.headHash ?? "",
     eventCount: meta?.eventCount ?? 0,
   };
-  const sigs = (meta?.signatures ?? []).map((s) => ({
-    keyFingerprint: s.keyFingerprint,
-    at: s.at,
-    ...verifySignature(s, head),
-  }));
+  // A malformed entry is a failed signature with no fingerprint to report,
+  // not a crash: the verdict document still has to come out.
+  const sigs = signatureEntries(meta).map((e) =>
+    e.record === null
+      ? {
+          keyFingerprint: null,
+          at: null,
+          ok: false as const,
+          fingerprint: null,
+          reason: `malformed record, ${e.malformed}`,
+        }
+      : { keyFingerprint: e.record.keyFingerprint, at: e.record.at, ...verifySignature(e.record, head) },
+  );
   // A signature that does not match is a failure even when the chain is
   // intact: something claimed this head and the claim does not hold.
   const signaturesOk = sigs.every((s) => s.ok);
@@ -2613,7 +2683,16 @@ async function cmdRelay(opts: Opts): Promise<number> {
     throw err;
   }
   console.log(`agit relay listening on ${handle.scheme}://${host}:${handle.port}`);
-  console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
+  // The operator running --store is the one who most needs to hear that the
+  // directory holds writer tokens; this line used to say "nothing is written
+  // to disk" to them as well.
+  if (opts.store !== undefined) {
+    console.log(
+      `shares are written to ${resolve(opts.store)} (writer tokens included: treat it as a credential store). Ctrl+C to stop.`,
+    );
+  } else {
+    console.log("shares are held in memory only; nothing is written to disk. Ctrl+C to stop.");
+  }
   if (!isLoopback(host)) {
     console.log(
       handle.scheme === "https"
@@ -2652,8 +2731,12 @@ async function cmdPush(opts: Opts): Promise<number> {
   if (!refuseUnlessVerified(opts, id, "push", "nothing was published")) return 1;
   if (!refuseUnredacted(opts, id, "push")) return 1;
 
+  // A link only counts as "already pushed" on the relay it points at. The
+  // record used to be matched by session id alone, so a push to a second
+  // relay printed the first relay's link, reported success, and published
+  // nothing there.
   const previous = readRemote(opts.dir, id);
-  if (previous !== null && !opts.force) {
+  if (previous !== null && previous.relay === opts.relay && !opts.force) {
     console.log(`${id} was already pushed to:
 
   ${previous.viewUrl}
@@ -2719,12 +2802,10 @@ async function cmdPull(opts: Opts): Promise<number> {
   }
 
   console.log(`pulled ${lines.length} events from ${where.relay}`);
-  // A path that does not exist: adoptBundle only uses it to look for a
-  // sibling meta.json, and a downloaded share has none. The origin's meta is
-  // not published with the log, so the adopted session carries none either —
-  // which is honest, rather than inventing one here.
-  const fakePath = join(opts.dir, `${where.shareId}.pulled.jsonl`);
-  return adoptBundle(opts, fakePath, lines.join("\n") + "\n");
+  // No meta.json: the origin's meta is not published with the log, so the
+  // adopted session carries none either. That is honest, where inventing one
+  // here or reading whatever meta.json the project root holds would not be.
+  return adoptBundle(opts, null, lines.join("\n") + "\n");
 }
 
 /** Where a session was last pushed, so pushing twice does not scatter links. */
@@ -2738,22 +2819,44 @@ function remotesPath(dir: string): string {
   return join(agitDir(dir), "remotes.json");
 }
 
-function readRemote(dir: string, id: string): RemoteRecord | null {
+/**
+ * The whole remotes file, as a map that cannot throw on lookup or assignment.
+ *
+ * A file that is missing, not JSON, or JSON that is not an object (`null`,
+ * a string) counts as no remotes at all: it used to be parsed and trusted,
+ * so `all[id] = rec` on a `null` threw after the session was already
+ * published, with no link printed and nothing recorded to stop the next push
+ * from publishing another copy. The map has no prototype because a session
+ * id is whatever the native log said it was, and `constructor` is a valid
+ * one: on a plain object it looks up Object.prototype's, so that session
+ * read as already pushed to `undefined` and was never published.
+ */
+function readRemotes(dir: string): Record<string, unknown> {
+  const all: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  let parsed: unknown;
   try {
-    const all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
-    return all[id] ?? null;
+    parsed = JSON.parse(readFileSync(remotesPath(dir), "utf8"));
   } catch {
-    return null;
+    return all;
   }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return all;
+  return Object.assign(all, parsed);
+}
+
+function isRemoteRecord(x: unknown): x is RemoteRecord {
+  if (x === null || typeof x !== "object") return false;
+  const r = x as Record<string, unknown>;
+  return typeof r.shareId === "string" && typeof r.viewUrl === "string" && typeof r.relay === "string";
+}
+
+/** A record that does not have a record's shape is not a place this was pushed. */
+function readRemote(dir: string, id: string): RemoteRecord | null {
+  const rec = readRemotes(dir)[id];
+  return isRemoteRecord(rec) ? rec : null;
 }
 
 function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
-  let all: Record<string, RemoteRecord> = {};
-  try {
-    all = JSON.parse(readFileSync(remotesPath(dir), "utf8")) as Record<string, RemoteRecord>;
-  } catch {
-    /* first push */
-  }
+  const all = readRemotes(dir);
   all[id] = rec;
   // Sorted: this file is read by humans and diffed by git often enough.
   const sorted = Object.fromEntries(Object.entries(all).sort(([a], [b]) => a.localeCompare(b)));
@@ -2883,6 +2986,18 @@ async function cmdShare(opts: Opts): Promise<number> {
     nativePath = null;
   }
 
+  // A live share is a tail: detaching would end it the moment the process
+  // exits, so it is refused rather than silently producing a one-event link.
+  // Refused here, before anything touches the relay: this check used to run
+  // after createShare had printed the link and the resume hint and written
+  // the writer token to disk, leaving an ended, empty share on the relay and
+  // a state file whose --resume hint could only fail.
+  if (opts.detach && nativePath !== null) {
+    console.error("--detach cannot follow a live session: nothing would be left tailing the log.");
+    console.error("Pass --static to publish what exists now and exit, or drop --detach to keep following.");
+    return 2;
+  }
+
   // Steering is wired per runtime, and only where the runtime documents a
   // turn-boundary hook (src/steer.ts). Refused up front, before a share
   // exists, so a refusal never leaves an orphan link on the relay.
@@ -2935,15 +3050,6 @@ async function cmdShare(opts: Opts): Promise<number> {
       ? `  Ctrl+C ends the share. If this process dies instead: agit share --resume ${share.shareId.slice(0, 8)}\n`
       : "  Ctrl+C ends the share.\n",
   );
-
-  // A live share is a tail: detaching would end it the moment the process
-  // exits, so it is refused rather than silently producing a one-event link.
-  if (opts.detach && nativePath !== null) {
-    console.error("--detach cannot follow a live session: nothing would be left tailing the log.");
-    console.error("Pass --static to publish what exists now and exit, or drop --detach to keep following.");
-    await endShare(opts.relay, share);
-    return 2;
-  }
 
   let follower: SessionFollower | null = null;
   const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower?.sessionId ?? null) : null;

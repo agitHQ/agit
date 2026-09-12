@@ -223,9 +223,11 @@ describe("trajectories that name themselves badly, or not at all", () => {
     );
   });
 
-  it("survives fields that are the wrong type instead of the right one", () => {
+  it("survives fields that are the wrong type instead of the right one, and names each loss", () => {
     // A foreign producer will get something wrong eventually; one bad field
-    // should cost that field, not the import.
+    // should cost that field, not the import. But a `tool_calls` that is one
+    // object where the list should be loses every call on the step, and the
+    // report has to say so rather than read the field as absent.
     const rough = JSON.stringify({
       schema_version: "ATIF-v1.8",
       agent: {},
@@ -235,15 +237,306 @@ describe("trajectories that name themselves badly, or not at all", () => {
           timestamp: "2026-01-01T00:00:00.000Z",
           source: "agent",
           message: null,
-          tool_calls: "not-an-array",
+          tool_calls: { tool_call_id: "c1", function_name: "bash", arguments: {} },
           observation: { results: "not-an-array" },
-          metrics: "not-an-object",
+          metrics: "12 tokens",
+        },
+        {
+          step_id: 2,
+          timestamp: "2026-01-01T00:00:01.000Z",
+          source: "agent",
+          message: "x",
+          observation: "prose",
         },
       ],
     });
     const r = atifAdapter.convert([rough]);
     expect(r.drafts[0]!.type).toBe("session.start");
     expect(r.drafts.some((d) => d.type === "tool.call")).toBe(false);
+    expect(r.skipped["tool-calls-not-a-list"]).toBe(1);
+    expect(r.skipped["observation-results-not-a-list"]).toBe(1);
+    expect(r.skipped["metrics-not-an-object"]).toBe(1);
+    expect(r.skipped["observation-not-an-object"]).toBe(1);
+  });
+
+  it("reads a null field as absent, not as the wrong type", () => {
+    // Pydantic writes an unset Optional as null unless the producer opts
+    // out, so `tool_calls: null` is an ordinary step and must not be counted
+    // as a producer bug.
+    const r = atifAdapter.convert(
+      doc({
+        steps: [
+          {
+            step_id: 1,
+            timestamp: "2026-01-01T00:00:00.000Z",
+            source: "agent",
+            message: "x",
+            tool_calls: null,
+            observation: null,
+            metrics: null,
+          },
+        ],
+      }),
+    );
+    expect(r.skipped).toEqual({});
+  });
+
+  it("counts a step that is not an object, and still counts it as a record", () => {
+    // Filtering them out used to make meta.json say fewer records than the
+    // file holds, with nothing in skipped to account for the difference.
+    const r = atifAdapter.convert(
+      doc({
+        steps: [
+          { step_id: 1, timestamp: "2026-01-01T00:00:00.000Z", source: "user", message: "hi" },
+          null,
+          "junk",
+          42,
+        ],
+      }),
+    );
+    expect(r.records).toBe(4);
+    expect(r.skipped["unparseable-step"]).toBe(3);
+  });
+
+  it("makes the derived id safe when the agent's name is not", () => {
+    // The agent's name is free text. "Terminus 2" used to produce an id with
+    // a space in it, and writeSession refused the whole import over an id
+    // the document never declared.
+    for (const name of ["Terminus 2", "openhands/CodeActAgent", "a:b"]) {
+      const id = atifAdapter.convert(doc({ agent: { name, version: "1" } })).sessionId;
+      expect(id, name).toMatch(/^atif-[A-Za-z0-9._-]+-[0-9a-f]{12}$/);
+    }
+    expect(atifAdapter.convert(doc({ agent: { name: "Terminus 2", version: "1" } })).sessionId).toMatch(
+      /^atif-Terminus-2-/,
+    );
+  });
+
+  it("treats an empty declared id as no id", () => {
+    // A producer that initialises string fields to "" rather than omitting
+    // them used to name the session "" and shadow a perfectly good
+    // session_id underneath.
+    expect(atifAdapter.convert(doc({ trajectory_id: "", session_id: "good-id" })).sessionId).toBe("good-id");
+    expect(atifAdapter.convert(doc({ trajectory_id: "", session_id: "" })).sessionId).toMatch(
+      /^atif-anon-[0-9a-f]{12}$/,
+    );
+  });
+});
+
+describe("observation results the adapter cannot pair, and ones it must not pair twice", () => {
+  const T = "2026-01-01T00:00:00.000Z";
+  const one = (step: Record<string, unknown>): string[] => [
+    JSON.stringify({ schema_version: "ATIF-v1.8", agent: { name: "anon", version: "1" }, steps: [step] }),
+  ];
+  const call = (id?: string, name = "bash"): Record<string, unknown> => ({
+    ...(id !== undefined ? { tool_call_id: id } : {}),
+    function_name: name,
+    arguments: {},
+  });
+  const results = (r: ReturnType<typeof atifAdapter.convert>): { toolUseId: string; output: string }[] =>
+    r.drafts
+      .filter((d) => d.type === "tool.result")
+      .map((d) => d.payload as { toolUseId: string; output: string });
+
+  it("counts a result that names no call rather than dropping it", () => {
+    // ATIF says a null source_call_id is the output of something outside the
+    // tool-calling format; v1.2 added observations on system steps for
+    // exactly that. agit has no event for a result with no call, so it is
+    // counted, not paired with a call it does not claim and not lost.
+    const r = atifAdapter.convert([
+      JSON.stringify({
+        schema_version: "ATIF-v1.8",
+        agent: { name: "anon", version: "1" },
+        steps: [
+          {
+            step_id: 1,
+            timestamp: T,
+            source: "agent",
+            message: "",
+            tool_calls: [call("c1")],
+            observation: { results: [{ content: "file1\nfile2" }] },
+          },
+          {
+            step_id: 2,
+            timestamp: T,
+            source: "system",
+            message: "container restarted",
+            observation: { results: [{ content: "restart log here" }] },
+          },
+        ],
+      }),
+    ]);
+    expect(results(r)).toEqual([]);
+    expect(r.skipped["observation-result-without-call-id"]).toBe(2);
+  });
+
+  it("counts a result naming a call that is not on the step", () => {
+    const r = atifAdapter.convert(
+      one({
+        step_id: 1,
+        timestamp: T,
+        source: "agent",
+        message: "",
+        tool_calls: [call("c1")],
+        observation: { results: [{ source_call_id: "nope", content: "orphan" }] },
+      }),
+    );
+    expect(results(r)).toEqual([]);
+    expect(r.skipped["observation-result-without-call"]).toBe(1);
+  });
+
+  it("keeps every result the document files under one call, in order", () => {
+    // Two results under one id is the document's own claim about that call.
+    // Keeping only the last, as this used to, threw the first away without
+    // a word.
+    const r = atifAdapter.convert(
+      one({
+        step_id: 1,
+        timestamp: T,
+        source: "agent",
+        message: "",
+        tool_calls: [call("c1")],
+        observation: {
+          results: [
+            { source_call_id: "c1", content: "FIRST" },
+            { source_call_id: "c1", content: "SECOND" },
+          ],
+        },
+      }),
+    );
+    expect(results(r).map((x) => x.output)).toEqual(["FIRST", "SECOND"]);
+    expect(r.skipped).toEqual({});
+  });
+
+  it("counts a result that is not an object", () => {
+    const r = atifAdapter.convert(
+      one({ step_id: 1, timestamp: T, source: "agent", message: "", observation: { results: ["prose", 7] } }),
+    );
+    expect(r.skipped["unparseable-observation-result"]).toBe(2);
+  });
+
+  it("gives id-less calls on one step different ids, so one result cannot attach to all of them", () => {
+    // ATIF requires tool_call_id, so only a broken producer gets here. The
+    // old fallback was one id per step, and a result naming it was emitted
+    // after every id-less call on the step: the same output attributed to
+    // calls it may not belong to.
+    const r = atifAdapter.convert(
+      one({
+        step_id: 3,
+        timestamp: T,
+        source: "agent",
+        message: "x",
+        tool_calls: [call(undefined, "a"), call(undefined, "b")],
+        observation: { results: [{ source_call_id: "atif-step3", content: "whose?" }] },
+      }),
+    );
+    const ids = r.drafts
+      .filter((d) => d.type === "tool.call")
+      .map((d) => (d.payload as { toolUseId: string }).toolUseId);
+    expect(new Set(ids).size).toBe(2);
+    expect(results(r)).toEqual([]);
+    expect(r.skipped["observation-result-without-call"]).toBe(1);
+  });
+
+  it("counts a subagent reference on a result and keeps the pointer", () => {
+    // ATIF's primary subagent linkage is a reference to another file, not
+    // the embedded list; Terminus 2's summarization path writes refs. The
+    // delegation used to become a tool.result with an empty output and no
+    // trace of where the work went.
+    const refs = [{ session_id: "sub-1", trajectory_path: "sub/trajectory.json" }];
+    const r = atifAdapter.convert(
+      one({
+        step_id: 1,
+        timestamp: T,
+        source: "agent",
+        message: "delegate",
+        tool_calls: [call("c1", "spawn_subagent")],
+        observation: { results: [{ source_call_id: "c1", subagent_trajectory_ref: refs }] },
+      }),
+    );
+    expect(r.skipped["subagent-trajectory-ref"]).toBe(1);
+    const native = (
+      r.drafts.find((d) => d.type === "tool.result")!.payload as { native: Record<string, unknown> }
+    ).native;
+    expect(native.subagentTrajectoryRef).toEqual(refs);
+  });
+});
+
+describe("a trajectory continued from another file", () => {
+  const T = "2026-01-01T00:00:00.000Z";
+  const continuation = (steps: Record<string, unknown>[]): string[] => [
+    JSON.stringify({
+      schema_version: "ATIF-v1.8",
+      session_id: "s-cont-1",
+      continued_trajectory_ref: "trajectory.cont-2.json",
+      agent: { name: "terminus-2", version: "1" },
+      steps,
+    }),
+  ];
+  const copiedSteps = [
+    { step_id: 1, timestamp: T, source: "user", message: "original task", is_copied_context: true },
+    {
+      step_id: 2,
+      timestamp: T,
+      source: "agent",
+      message: "did it",
+      is_copied_context: true,
+      tool_calls: [{ tool_call_id: "c1", function_name: "bash", arguments: { cmd: "make" } }],
+      observation: { results: [{ source_call_id: "c1", content: "ok" }] },
+    },
+  ];
+
+  it("leaves copied context out, counts it, and keeps the link to the other file", () => {
+    // Copied steps are the earlier trajectory's work. Importing both files
+    // used to record the same messages and tool calls under two sessions,
+    // with nothing to tell them apart.
+    const r = atifAdapter.convert(
+      continuation([
+        ...copiedSteps,
+        { step_id: 3, timestamp: "2026-01-01T00:00:09.000Z", source: "agent", message: "continuing" },
+      ]),
+    );
+    expect(r.skipped["copied-context-step"]).toBe(2);
+    expect(r.records).toBe(3);
+    expect(r.drafts.map((d) => d.type)).toEqual(["session.start", "message.assistant", "session.end"]);
+    expect(JSON.stringify(r.drafts)).not.toContain("original task");
+    const native = (r.drafts[0]!.payload as { native: Record<string, unknown> }).native;
+    expect(native.continuedTrajectoryRef).toBe("trajectory.cont-2.json");
+  });
+
+  it("refuses a file that is nothing but copied context, and says why", () => {
+    expect(() => atifAdapter.convert(continuation(copiedSteps))).toThrow(/copied context/);
+  });
+});
+
+describe("what goes into the hashed cost event", () => {
+  const metrics = (m: Record<string, unknown>): string[] => [
+    JSON.stringify({
+      schema_version: "ATIF-v1.8",
+      agent: { name: "anon", version: "1" },
+      steps: [
+        { step_id: 1, timestamp: "2026-01-01T00:00:00.000Z", source: "agent", message: "x", metrics: m },
+      ],
+    }),
+  ];
+  const native = (lines: string[]): Record<string, unknown> =>
+    (
+      atifAdapter.convert(lines).drafts.find((d) => d.type === "cost")!.payload as {
+        native: Record<string, unknown>;
+      }
+    ).native;
+
+  it("keeps a cost the document holds, and leaves out one it says is unknown", () => {
+    // cost_usd is `float | None` and pydantic writes None as null. A null
+    // used to pass the presence check and be recorded as zero dollars in a
+    // hashed payload: "free" where the source said "unknown".
+    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: 0.021 })).costUsd).toBe(0.021);
+    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: null }))).not.toHaveProperty(
+      "costUsd",
+    );
+    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: "0.02" }))).not.toHaveProperty(
+      "costUsd",
+    );
+    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5 }))).not.toHaveProperty("costUsd");
   });
 });
 
@@ -266,6 +559,25 @@ describe("agit import on an ATIF trajectory", () => {
     expect(readFileSync(join(a, ".agit", "sessions", "atif-fixture-0001", "events.jsonl"), "utf8")).toBe(
       readFileSync(join(b, ".agit", "sessions", "atif-fixture-0001", "events.jsonl"), "utf8"),
     );
+  });
+
+  it("imports an anonymous trajectory whatever the agent is called", () => {
+    // session_id became optional in ATIF v1.7. An agent called "Terminus 2"
+    // used to make writeSession refuse the import over the derived id.
+    const dir = mktemp();
+    const traj = join(dir, "t.json");
+    writeFileSync(
+      traj,
+      JSON.stringify({
+        schema_version: "ATIF-v1.8",
+        agent: { name: "Terminus 2", version: "1" },
+        steps: [{ step_id: 1, timestamp: "2026-01-01T00:00:00.000Z", source: "user", message: "hello" }],
+      }),
+      "utf8",
+    );
+    const r = agit(["import", traj, "--dir", dir]);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("imported atif-Terminus-2-");
   });
 
   it("leaves the read verbs working, and blame with nothing to say", () => {

@@ -21,11 +21,21 @@
  * file-edit step. They are attached as extras rather than dropped or bent
  * into a shape that means something else, and the SPEC §5.7 lower bound is
  * stated in the output so a downstream eval does not read "3 files" as "the
- * files this session changed".
+ * files this session changed". That includes an edit whose tool call the log
+ * does not contain (Codex records a patch apply without a function call):
+ * it rides on the root span and on the step it happened during, because an
+ * edit nothing claims is still an edit the log holds.
+ *
+ * **Refusals.** A document the receiving side would reject is worse than no
+ * document, so both exporters throw, with the reason, where a faithful one
+ * cannot be made: a token count outside int64 or with a fraction, or a
+ * session with nothing ATIF can make a step from. The CLI turns that into a
+ * line on stderr and exit 1 rather than exit 0 and invalid JSON on stdout.
  */
 
 import { createHash } from "node:crypto";
 import type { AgitEvent, Json, SessionMeta } from "./format/events.js";
+import { verifySignature } from "./sign.js";
 
 // --- shared -----------------------------------------------------------------
 
@@ -55,12 +65,113 @@ function assistantText(e: AgitEvent): { text: string; thinking: string } {
   return { text: pick("text"), thinking: pick("thinking") };
 }
 
-function usageOf(e: AgitEvent): Record<string, number> {
+const USAGE_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadInputTokens",
+  "cacheCreationInputTokens",
+] as const;
+
+/**
+ * Token counts, checked rather than passed through. OTLP's intValue and
+ * ATIF's Metrics are both int64, and the adapters forward whatever number the
+ * native log carried: 1e21 stringifies as "1e+21" and 1.5 stays 1.5, and
+ * either is a document the collector or Harbor rejects after agit has exited
+ * 0. A count neither format can carry is a refusal naming the event, not a
+ * clamp that reports a number the log does not contain.
+ */
+function usageOf(e: AgitEvent): Partial<Record<(typeof USAGE_KEYS)[number], number>> {
   const u = payload(e).usage;
   if (typeof u !== "object" || u === null || Array.isArray(u)) return {};
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(u)) if (typeof v === "number") out[k] = v;
+  const out: Partial<Record<(typeof USAGE_KEYS)[number], number>> = {};
+  for (const k of USAGE_KEYS) {
+    const v = u[k];
+    if (typeof v !== "number") continue;
+    if (!Number.isInteger(v) || Math.abs(v) >= 2 ** 63) {
+      throw new Error(
+        `refusing to export: event ${e.seq} usage.${k} is ${v}, not an integer within int64, ` +
+          "which is the only token count OTLP and ATIF can carry",
+      );
+    }
+    out[k] = v;
+  }
   return out;
+}
+
+/**
+ * Which result and which edits belong to which tool call, decided by position
+ * rather than by id alone. Ids are not unique in every log: the Cline SDK
+ * adapter writes "(missing)" for every block that had none, so a map keyed by
+ * id gave every call the *last* result under that id, and a call that failed
+ * was exported as the success that came after it. A result goes to the
+ * earliest call with its id still waiting for one; an edit goes to the latest
+ * call with its id seen so far, since edits follow the call that made them.
+ * Edits naming no call the log contains are returned on their own, so both
+ * exporters can keep them rather than drop them. So are results: a result
+ * with no id (the Cline SDK adapter records a block that had none as
+ * `toolUseId: null` and counts it, rather than inventing an id that would
+ * pair it with the wrong call) or with an id no waiting call carries is
+ * not paired by position either — that would be the same guess with less
+ * evidence — but its output is still in the log, so it is still exported,
+ * as a result that names no call.
+ */
+function pairToolEvents(events: AgitEvent[]): {
+  resultOf: Map<AgitEvent, AgitEvent>;
+  editsOf: Map<AgitEvent, AgitEvent[]>;
+  unclaimedEdits: Set<AgitEvent>;
+  unclaimedResults: Set<AgitEvent>;
+} {
+  const resultOf = new Map<AgitEvent, AgitEvent>();
+  const editsOf = new Map<AgitEvent, AgitEvent[]>();
+  const unclaimedEdits = new Set<AgitEvent>();
+  const unclaimedResults = new Set<AgitEvent>();
+  const awaitingResult = new Map<string, AgitEvent[]>();
+  const latestCall = new Map<string, AgitEvent>();
+  for (const e of events) {
+    const isEdit = e.type === "file.diff" || e.type === "file.delete";
+    const id = str(payload(e).toolUseId);
+    if (id === null) {
+      if (isEdit) unclaimedEdits.add(e);
+      else if (e.type === "tool.result") unclaimedResults.add(e);
+    } else if (e.type === "tool.call") {
+      awaitingResult.set(id, [...(awaitingResult.get(id) ?? []), e]);
+      latestCall.set(id, e);
+    } else if (e.type === "tool.result") {
+      const call = awaitingResult.get(id)?.shift();
+      if (call !== undefined) resultOf.set(call, e);
+      else unclaimedResults.add(e);
+    } else if (isEdit) {
+      const call = latestCall.get(id);
+      if (call === undefined) unclaimedEdits.add(e);
+      else editsOf.set(call, [...(editsOf.get(call) ?? []), e]);
+    }
+  }
+  return { resultOf, editsOf, unclaimedEdits, unclaimedResults };
+}
+
+/**
+ * `agitSigned` used to be a presence check, so a rechained log still carrying
+ * its original signature (the forgery `agit verify` exists to catch) was
+ * exported as signed provenance. Each record is checked against the head
+ * meta.json names, the same check `verify` runs, and the document says which
+ * ones held.
+ */
+function signatureVerdicts(
+  meta: SessionMeta | null,
+): { keyFingerprint: string | null; at: string | null; ok: boolean }[] {
+  const sigs = Array.isArray(meta?.signatures) ? meta.signatures : [];
+  const head = {
+    sessionId: meta?.sessionId ?? "",
+    headHash: meta?.headHash ?? "",
+    eventCount: meta?.eventCount ?? 0,
+  };
+  return sigs.map((s) => {
+    // meta.json can arrive in someone else's bundle, so a record is not
+    // trusted to be an object until it has been checked.
+    if (typeof s !== "object" || s === null) return { keyFingerprint: null, at: null, ok: false };
+    const v = verifySignature(s, head);
+    return { keyFingerprint: v.fingerprint ?? str(s.keyFingerprint), at: str(s.at), ok: v.ok };
+  });
 }
 
 // --- OpenTelemetry ----------------------------------------------------------
@@ -78,8 +189,26 @@ function spanId(eventHash: string): string {
   return eventHash.slice(0, 16);
 }
 
+/**
+ * The root is anchored to the first event's hash, but in its own namespace:
+ * nothing requires seq 0 to be session.start, and a chain that opens with a
+ * tool call or a cost event would otherwise give the root and that event's
+ * own span one id, with the child listed as its own parent.
+ */
+function rootSpanId(firstHash: string): string {
+  return createHash("sha256").update(`agit-root:${firstHash}`).digest("hex").slice(0, 16);
+}
+
+/** An ISO date-time with no zone designator: no trailing Z and no offset. */
+const ZONELESS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
 function nanos(ts: string): string {
-  const ms = Date.parse(ts);
+  // SPEC §2 says `ts` is UTC, but the ATIF adapter stores a step's timestamp
+  // as it came, and Python's naive isoformat() carries no zone designator.
+  // ECMAScript reads such a string as local time, so one verified log
+  // exported on two machines gave two different traces. A date-time with no
+  // designator is read as the UTC the SPEC declares it to be.
+  const ms = Date.parse(ZONELESS.test(ts) ? `${ts}Z` : ts);
   // OTLP/JSON carries nanosecond timestamps as decimal strings, because they
   // do not fit a double without losing the low digits.
   return Number.isFinite(ms) ? String(BigInt(ms) * 1_000_000n) : "0";
@@ -141,9 +270,18 @@ export function toOtlpJson(
 
   const spans: Record<string, unknown>[] = [];
 
+  const { resultOf, editsOf, unclaimedResults } = pairToolEvents(events);
+  const pathsOf = (edits: AgitEvent[]): string[] =>
+    edits.map((e) => str(payload(e).path)).filter((p): p is string => p !== null);
+  // Every recorded edit, including one no tool call claims: the root span is
+  // the only place in a trace where such an edit can appear at all.
+  const allFiles = [
+    ...new Set(pathsOf(events.filter((e) => e.type === "file.diff" || e.type === "file.delete"))),
+  ].sort();
+
   // The root: the session itself. Its span id comes from the first event's
   // hash, so the whole trace is anchored to a line of the log.
-  const rootId = first ? spanId(first.hash) : "0".repeat(16);
+  const rootId = first ? rootSpanId(first.hash) : "0".repeat(16);
   spans.push({
     traceId: trace,
     spanId: rootId,
@@ -160,30 +298,25 @@ export function toOtlpJson(
       ["agit.head.hash", meta?.headHash ?? null],
       ["agit.event.count", events.length],
       ["agit.schema.version", first?.v ?? null],
-      ["agit.adapter.name", meta?.adapter.name ?? null],
-      ["agit.adapter.version", meta?.adapter.version ?? null],
+      // A bundle adopted from someone else keeps its meta.json verbatim, and
+      // that file need not carry an adapter at all.
+      ["agit.adapter.name", meta?.adapter?.name ?? null],
+      ["agit.adapter.version", meta?.adapter?.version ?? null],
       ["agit.cwd", cwd],
+      // Structured edits only (SPEC §5.7), named so nobody reads this as
+      // the complete set of files the session touched.
+      ["agit.files.recorded", allFiles.length > 0 ? allFiles.join("\n") : null],
+      ["agit.files.lower_bound", allFiles.length > 0 ? true : null],
+      // A result no call claims has no execute_tool span to end; a trace has
+      // nowhere else to put it, so the root names the events by hash rather
+      // than letting them vanish from the export.
+      [
+        "agit.tool_results.unpaired",
+        unclaimedResults.size > 0 ? [...unclaimedResults].map((e) => e.hash).join("\n") : null,
+      ],
     ]),
     status: { code: 0 },
   });
-
-  // Tool results are matched to their calls by toolUseId so a tool span can
-  // end when its result arrived rather than being zero-length.
-  const resultOf = new Map<string, AgitEvent>();
-  for (const e of events) {
-    if (e.type !== "tool.result") continue;
-    const id = str(payload(e).toolUseId);
-    if (id !== null) resultOf.set(id, e);
-  }
-  // Files an edit touched, credited to the tool call that produced them.
-  const filesOf = new Map<string, string[]>();
-  for (const e of events) {
-    if (e.type !== "file.diff" && e.type !== "file.delete") continue;
-    const id = str(payload(e).toolUseId);
-    const path = str(payload(e).path);
-    if (id === null || path === null) continue;
-    filesOf.set(id, [...(filesOf.get(id) ?? []), path]);
-  }
 
   for (const e of events) {
     if (e.type === "cost") {
@@ -218,9 +351,11 @@ export function toOtlpJson(
 
     if (e.type === "tool.call") {
       const id = str(payload(e).toolUseId);
-      const result = id === null ? undefined : resultOf.get(id);
+      // A tool span ends when its result arrived rather than being
+      // zero-length, so the result has to be this call's own.
+      const result = resultOf.get(e);
       const failed = result !== undefined && payload(result).isError === true;
-      const files = id === null ? [] : (filesOf.get(id) ?? []);
+      const files = pathsOf(editsOf.get(e) ?? []);
       spans.push({
         traceId: trace,
         spanId: spanId(e.hash),
@@ -260,7 +395,7 @@ export function toOtlpJson(
         },
         scopeSpans: [
           {
-            scope: { name: "agit", version: meta?.adapter.version ?? "0" },
+            scope: { name: "agit", version: meta?.adapter?.version ?? "0" },
             // The GenAI conventions have never cut a release: there is no
             // stable schema URL to pin, only this -dev one. Saying which
             // moving target this was built against beats implying a version.
@@ -316,10 +451,12 @@ interface AtifStep {
  * - agit records one event per tool call; ATIF hangs tool calls off the
  *   agent step that made them, so calls are folded back onto the preceding
  *   assistant message and their results into that step's `observation`.
- * - `file.diff` has no ATIF equivalent. The edits are attached to the step's
- *   `extra` with their verified hashes, which is where ATIF puts anything it
- *   does not model — better than dropping provenance a verified log has and
- *   an ordinary trajectory does not.
+ * - `file.diff` has no ATIF equivalent. The edits are attached to the
+ *   observation of the call that made them, in `extra` with their verified
+ *   hashes, which is where ATIF puts anything it does not model. That beats
+ *   dropping provenance a verified log has and an ordinary trajectory does
+ *   not. An edit whose call the log does not contain goes on the step it
+ *   happened during, under `agitFileEditsWithoutCall`, with the same hashes.
  * - Thinking blocks map to `reasoning_content`, which is what it is for.
  */
 export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<string, unknown> {
@@ -327,29 +464,17 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
   const runtime = firstOf(events, "session.start", "runtime") ?? "unknown";
   const runtimeVersion = firstOf(events, "session.start", "runtimeVersion");
 
-  const resultOf = new Map<string, AgitEvent>();
-  for (const e of events) {
-    if (e.type !== "tool.result") continue;
-    const id = str(payload(e).toolUseId);
-    if (id !== null) resultOf.set(id, e);
-  }
-  const editsOf = new Map<string, Record<string, Json>[]>();
-  for (const e of events) {
-    if (e.type !== "file.diff" && e.type !== "file.delete") continue;
-    const id = str(payload(e).toolUseId);
-    if (id === null) continue;
+  const { resultOf, editsOf, unclaimedEdits, unclaimedResults } = pairToolEvents(events);
+  const editRecord = (e: AgitEvent): Record<string, Json> => {
     const p = payload(e);
-    editsOf.set(id, [
-      ...(editsOf.get(id) ?? []),
-      {
-        path: p.path ?? null,
-        kind: e.type === "file.delete" ? "delete" : (p.kind ?? null),
-        beforeHash: p.beforeHash ?? null,
-        afterHash: p.afterHash ?? null,
-        agitEventHash: e.hash,
-      },
-    ]);
-  }
+    return {
+      path: p.path ?? null,
+      kind: e.type === "file.delete" ? "delete" : (p.kind ?? null),
+      beforeHash: p.beforeHash ?? null,
+      afterHash: p.afterHash ?? null,
+      agitEventHash: e.hash,
+    };
+  };
 
   const steps: AtifStep[] = [];
   let stepId = 1;
@@ -410,8 +535,11 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
           }));
         host.tool_calls = [...(host.tool_calls ?? []), call];
 
-        const result = resultOf.get(id);
-        const edits = editsOf.get(id);
+        // This call's own result and edits, by position: a second call under
+        // the same id must not inherit the first one's, and a result whose id
+        // happens to spell `seq-N` must not attach to a call that had none.
+        const result = resultOf.get(e);
+        const edits = editsOf.get(e)?.map(editRecord);
         if (result !== undefined || edits !== undefined) {
           host.observation = host.observation ?? { results: [] };
           host.observation.results.push({
@@ -425,6 +553,60 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
             },
           });
         }
+        break;
+      }
+
+      case "tool.result": {
+        // Paired results were written into their call's observation above.
+        // One that names no call the log contains still happened, and ATIF
+        // has a shape for exactly that: an observation result without a
+        // `source_call_id`, which its own definition reserves for output
+        // from outside the tool-calling format. It goes on the step it
+        // followed, unpaired, rather than being dropped.
+        if (!unclaimedResults.has(e)) break;
+        const host =
+          lastAgentStep ??
+          (lastAgentStep = push({
+            timestamp: e.ts,
+            source: "agent",
+            message: "",
+            extra: { agitSynthesized: true, agitNote: "no assistant message preceded this tool result" },
+          }));
+        host.observation = host.observation ?? { results: [] };
+        host.observation.results.push({
+          content: str(payload(e).output) ?? "",
+          extra: {
+            isError: payload(e).isError ?? false,
+            agitEventHash: e.hash,
+            agitNote: "names no tool call the log contains",
+          },
+        });
+        break;
+      }
+
+      case "file.diff":
+      case "file.delete": {
+        // Credited edits were written into their call's observation above.
+        // One that names no call the log contains still happened, so it goes
+        // on the step it happened during, hashes and all, rather than
+        // surviving only as a bare path in the session-level file list.
+        if (!unclaimedEdits.has(e)) break;
+        const host =
+          lastAgentStep ??
+          (lastAgentStep = push({
+            timestamp: e.ts,
+            source: "agent",
+            message: "",
+            extra: { agitSynthesized: true, agitNote: "no assistant message preceded this file edit" },
+          }));
+        const prior = host.extra?.agitFileEditsWithoutCall;
+        host.extra = {
+          ...(host.extra ?? {}),
+          agitFileEditsWithoutCall: [
+            ...(Array.isArray(prior) ? prior : []),
+            { toolUseId: payload(e).toolUseId ?? null, ...editRecord(e) },
+          ],
+        };
         break;
       }
 
@@ -465,9 +647,24 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
       { prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, llm_calls: 0 },
     );
 
+  // Harbor's Trajectory model requires at least one step, and a log of only
+  // session.start and session.end (a Claude Code record whose content array
+  // is empty imports that way) has nothing to make one from. An empty list
+  // is a document Harbor rejects, so this refuses with the reason rather
+  // than exiting 0 behind invalid output.
+  if (steps.length === 0) {
+    throw new Error(
+      `refusing to export: ${sessionId} has no message, tool or file events, and ATIF requires at least one step`,
+    );
+  }
+
   const editedPaths = new Set<string>();
-  for (const list of editsOf.values())
-    for (const ed of list) if (typeof ed.path === "string") editedPaths.add(ed.path);
+  for (const e of events) {
+    if (e.type !== "file.diff" && e.type !== "file.delete") continue;
+    const path = str(payload(e).path);
+    if (path !== null) editedPaths.add(path);
+  }
+  const signatures = signatureVerdicts(meta);
 
   return {
     schema_version: ATIF_SCHEMA_VERSION,
@@ -502,7 +699,11 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
       agitEventCount: events.length,
       agitSchemaVersion: events[0]?.v ?? null,
       agitAdapter: meta?.adapter ? `${meta.adapter.name}@${meta.adapter.version}` : null,
-      agitSigned: (meta?.signatures ?? []).length > 0,
+      // True only when every signature on the head verifies, which is the
+      // verdict `agit verify` gives; a signature that is merely present is
+      // what a forged log carries too.
+      agitSigned: signatures.length > 0 && signatures.every((s) => s.ok),
+      agitSignatures: signatures,
       agitFilesRecorded: [...editedPaths].sort(),
       agitFilesAreLowerBound:
         "Structured edits only. Files changed by shell commands leave no record (SPEC 5.7), " +
