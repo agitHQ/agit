@@ -739,8 +739,9 @@ export function toMarkdown(events: AgitEvent[], meta: SessionMeta | null): strin
   for (const e of events) {
     if (e.type === "cost") {
       const p = payload(e);
-      inputTokens += typeof p.inputTokens === "number" ? p.inputTokens : 0;
-      outputTokens += typeof p.outputTokens === "number" ? p.outputTokens : 0;
+      const u = usageOf(e);
+      inputTokens += u.inputTokens ?? u.input_tokens ?? 0;
+      outputTokens += u.outputTokens ?? u.output_tokens ?? 0;
       if (typeof p.model === "string") models.add(p.model);
     }
   }
@@ -781,6 +782,17 @@ export function toMarkdown(events: AgitEvent[], meta: SessionMeta | null): strin
       lines.push(`| \`${f.kind}\` | \`${f.path}\` |`);
     }
     lines.push("");
+    lines.push(
+      "> Structured edits only. Files changed by shell commands leave no record (SPEC §5.7), " +
+        "so this is a floor on what the session touched, not the complete set.\n",
+    );
+  }
+
+  function fence(text: string): string {
+    const match = text.match(/`+/g);
+    const maxTicks = match ? Math.max(...match.map((m) => m.length)) : 0;
+    const ticks = "`".repeat(Math.max(3, maxTicks + 1));
+    return `${ticks}\n${text}\n${ticks}`;
   }
 
   lines.push("## Trajectory Timeline\n");
@@ -789,15 +801,15 @@ export function toMarkdown(events: AgitEvent[], meta: SessionMeta | null): strin
     if (e.type === "message.user") {
       const text = str(p.text) ?? "";
       lines.push(`### User (seq ${e.seq})\n`);
-      lines.push(`${text}\n`);
+      lines.push(fence(text) + "\n");
     } else if (e.type === "message.assistant") {
       const { text, thinking } = assistantText(e);
       lines.push(`### Assistant (seq ${e.seq})\n`);
       if (thinking) {
-        lines.push(`> **Thinking**: ${thinking.replace(/\n/g, " ")}\n`);
+        lines.push(`Thinking:\n\n${fence(thinking)}\n`);
       }
       if (text) {
-        lines.push(`${text}\n`);
+        lines.push(fence(text) + "\n");
       }
     } else if (e.type === "tool.call") {
       const name = str(p.name) ?? "tool";

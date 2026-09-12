@@ -19,7 +19,7 @@ function agit(args: string[]): { code: number; out: string } {
 }
 
 describe("agit export --markdown", () => {
-  it("exports a verified session as GitHub Flavored Markdown", () => {
+  it("exports a verified session as GitHub Flavored Markdown with correct token totals and fenced text", () => {
     const dir = mktemp();
     const imp = agit(["import", FIX, "--dir", dir]);
     expect(imp.code).toBe(0);
@@ -29,18 +29,24 @@ describe("agit export --markdown", () => {
 
     const md = r.out;
     expect(md).toContain("# Session Audit: demo-ratelimit-0001");
-    expect(md).toContain("- **Runtime**:");
+    expect(md).toContain("- **Runtime**: claude-code");
     expect(md).toContain("- **Head Hash**:");
     expect(md).toContain("## Usage & Models");
+    expect(md).toContain("- **Input Tokens**: 142");
+    expect(md).toContain("- **Output Tokens**: 1,055");
+    expect(md).toContain("## Files Touched");
+    expect(md).toContain("Structured edits only. Files changed by shell commands leave no record (SPEC §5.7)");
     expect(md).toContain("## Trajectory Timeline");
     expect(md).toContain("### User");
     expect(md).toContain("### Assistant");
+    // Text blocks must be safely fenced
+    expect(md).toContain("```");
   });
 
-  it("supports -md alias flag", () => {
+  it("supports --md alias flag", () => {
     const dir = mktemp();
     expect(agit(["import", FIX, "--dir", dir]).code).toBe(0);
-    const r = agit(["export", "demo-ratelimit-0001", "-md", "--dir", dir]);
+    const r = agit(["export", "demo-ratelimit-0001", "--md", "--dir", dir]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("# Session Audit: demo-ratelimit-0001");
   });
