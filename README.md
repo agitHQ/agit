@@ -277,12 +277,13 @@ fall out of that chain.
 
 Said plainly:
 
-- **Five adapters, with different limits.** Claude Code is the reference;
+- **Six adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
-  matching rules. ATIF is a standard rather than a runtime, and Cline's SDK
-  format is a published contract; neither carries file content agit can
-  hash — see below.
+  matching rules. GitHub Copilot CLI is mapped from session prompt turns and
+  suggested shell executions. ATIF is a standard rather than a runtime, and
+  Cline's SDK format is a published contract; neither carries file content
+  agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
