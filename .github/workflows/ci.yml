@@ -69,3 +69,9 @@ jobs:
         run: |
           diff /tmp/agit-ci/.agit/sessions/fixture-simple-0001/events.jsonl \
                fixtures/claude-code/simple.golden.jsonl
+      - name: import the LangGraph fixture and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/langgraph/simple.sqlite --dir /tmp/agit-ci
+          node dist/cli.js verify thread-agit-fixture-0001 --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/thread-agit-fixture-0001/events.jsonl \
+               fixtures/langgraph/simple.golden.jsonl
