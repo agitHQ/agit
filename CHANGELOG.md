@@ -3,6 +3,54 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Fixed
+
+Six high-severity findings from an adversarial review of everything shipped
+since 0.5.0. Each was reproduced against the real CLI before being fixed,
+and each reproduction is now a test.
+
+- **A hostile relay could choose a filename on the client.** The share id a
+  relay returns became `.agit/shares/<id>.json` on write and on the `rmSync`
+  that ends a share, so a relay answering `../../package` overwrote and then
+  deleted `package.json`. The client now holds the relay to the same id
+  alphabet the relay's own routes enforce, and refuses a writer token or link
+  path it would not use.
+- **A session id differing only in case could overwrite another session.** On
+  NTFS and APFS the exact-match existence check let a log for `DEMO-x` land
+  in the directory for `demo-x`, replacing its events under the old
+  `meta.json` so the victim then failed verification. The id comes from the
+  log, which on a pull comes from the relay. Refused on every platform now,
+  in `writeSession` itself, since a store has to survive being copied to a
+  case-insensitive filesystem.
+- **One malformed session took down every store-wide search.** A chain built
+  over `payload: null` verifies, because verification never looked at the
+  payload, and a bundle or pulled share could land one. Rendering it threw
+  out of `agit grep` and the MCP `agit_grep` loop, losing hits from every
+  healthy session. Payloads are checked at the read, and both searches now
+  isolate rendering per session as they already isolated parsing.
+- **One failed push wedged a live share, silently, with exit 0.** The
+  follower's `poll()` advances its own state, so events handed over during a
+  push the relay refused were gone for good; the relay then answered 409 to
+  every later push, the catch swallowed each, and the sharer saw nothing
+  while viewers stopped receiving events. Undelivered events are now held and
+  retried, each failure is reported, and giving up leaves the share open and
+  its resume state on disk rather than ending it and deleting the one thing
+  `--resume` needs. Tampering detected on the final push is no longer
+  swallowed either.
+- **A torn last line in the relay store was served as an event.** A crash
+  mid-append left a partial line that loaded as `share.events[N]`, so the
+  count and the head disagreed, the next push was glued onto the fragment,
+  and the restart after that lost it. A torn tail is now dropped and the file
+  truncated to its last complete line; a bad line anywhere else is left for
+  verification to name.
+- **A failed persist left the relay's in-memory head advanced.** Memory moved
+  before the disk write, so a full disk or a locked file returned 500 while
+  `/head` advertised events the disk did not hold, a retry was refused as a
+  duplicate, and the next push landed after a gap. The store is written
+  first now; if it throws, nothing has changed and the retry is right.
+
 ## 0.8.0 — 2026-09-11
 
 ### Added

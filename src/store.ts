@@ -37,6 +37,18 @@ export function assertSafeSessionId(id: string): void {
 
 export function writeSession(base: string, id: string, eventsJsonl: string, meta?: SessionMeta): void {
   assertSafeSessionId(id);
+  // Two ids that differ only in case are one directory on NTFS and APFS, so
+  // writing "DEMO-x" where "demo-x" exists lands in the existing session's
+  // directory and replaces its log under the old meta.json. Refused on every
+  // platform, not just those, because a store has to survive being copied to
+  // one. An exact match is an update to the same session and proceeds.
+  const clash = listSessionIds(base).find((x) => x.toLowerCase() === id.toLowerCase() && x !== id);
+  if (clash !== undefined) {
+    throw new Error(
+      `refusing to write session ${id}: it differs only in case from ${clash}, which already exists ` +
+        "(the two would be one directory on a case-insensitive filesystem)",
+    );
+  }
   const dir = sessionDir(base, id);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "events.jsonl"), eventsJsonl, "utf8");
@@ -93,6 +105,14 @@ export function readSessionEvents(base: string, id: string): AgitEvent[] {
       throw new Error(
         `event ${e.seq}: unknown type ${JSON.stringify(e.type)} — was this written by a newer agit?`,
       );
+    }
+    // SPEC §2 says payload is an object, and every renderer dereferences it
+    // on that assumption. verifyChain does not check it, and a chain built
+    // over `payload: null` verifies cleanly, so a bundle or a pulled share can
+    // land one here. Rejecting it at the read is what keeps that one session
+    // from taking down every verb that walks the store.
+    if (e.payload === null || typeof e.payload !== "object" || Array.isArray(e.payload)) {
+      throw new Error(`event ${e.seq}: payload is not an object — run \`agit verify\` on this session`);
     }
     events.push(e);
   }

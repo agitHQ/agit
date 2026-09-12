@@ -177,6 +177,16 @@ async function relayFetch(relayUrl: string, path: string, init?: RequestInit): P
   }
 }
 
+/**
+ * The shape of a share id the relay is allowed to hand us. This is the same
+ * alphabet the relay's own routes and store enforce, and it matters on the
+ * client for a reason the relay's copy does not cover: the id becomes a
+ * filename under .agit/shares/, both on write and on the rmSync that ends a
+ * share. A relay answering with "../../package" would have overwritten, and
+ * then deleted, a file outside the store. Anything from a relay is untrusted.
+ */
+const SHARE_ID = /^[A-Za-z0-9_-]{10,64}$/;
+
 export async function createShare(relayUrl: string, ttlMs?: number): Promise<ShareInfo> {
   const res = await relayFetch(relayUrl, "/api/shares", {
     method: "POST",
@@ -184,8 +194,31 @@ export async function createShare(relayUrl: string, ttlMs?: number): Promise<Sha
     body: JSON.stringify(ttlMs ? { ttlMs } : {}),
   });
   if (!res.ok) throw new Error(`relay refused share creation: ${res.status} ${await res.text()}`);
-  const body = (await res.json()) as { shareId: string; writerToken: string; ttlMs: number; path: string };
-  return { ...body, viewUrl: new URL(body.path, relayUrl).toString() };
+  const body = (await res.json()) as {
+    shareId?: unknown;
+    writerToken?: unknown;
+    ttlMs?: unknown;
+    path?: unknown;
+  };
+  if (typeof body.shareId !== "string" || !SHARE_ID.test(body.shareId)) {
+    throw new Error(
+      `relay returned a share id agit will not use as a filename: ${JSON.stringify(body.shareId)}`,
+    );
+  }
+  if (typeof body.writerToken !== "string" || body.writerToken === "") {
+    throw new Error("relay returned no writer token");
+  }
+  if (typeof body.path !== "string" || !/^\/s\/[A-Za-z0-9_-]{10,64}$/.test(body.path)) {
+    throw new Error(`relay returned a share path agit will not link to: ${JSON.stringify(body.path)}`);
+  }
+  const ttl =
+    typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) && body.ttlMs > 0 ? body.ttlMs : 0;
+  return {
+    shareId: body.shareId,
+    writerToken: body.writerToken,
+    ttlMs: ttl,
+    viewUrl: new URL(body.path, relayUrl).toString(),
+  };
 }
 
 export async function pushEvents(relayUrl: string, share: ShareInfo, events: AgitEvent[]): Promise<void> {
