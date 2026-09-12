@@ -396,6 +396,14 @@ export const atifAdapter: Adapter = {
       // when `stats` disagrees with the source.
       const llmCalls = num(step.llm_call_count);
       if (metrics !== undefined && llmCalls > 1) skip("cost-events-folded-into-one", llmCalls - 1);
+      // ATIF's cost_usd is a dollar figure. SPEC §5.9 keeps those out of the
+      // log — a price is a display-time computation from a table, and one
+      // hashed into an event is a stale snapshot nobody can verify — so a
+      // figure the document holds is counted, not carried. A null is
+      // pydantic's None: nothing there to count.
+      if (metrics !== undefined && metrics.cost_usd !== undefined && metrics.cost_usd !== null) {
+        skip("cost-usd-not-stored (SPEC §5.9)");
+      }
       if (metrics !== undefined) {
         drafts.push({
           ts,
@@ -414,13 +422,6 @@ export const atifAdapter: Adapter = {
               messageId: null,
               requestId: null,
               stepId: num(step.step_id),
-              // ATIF's cost_usd is `float | None`, and pydantic writes None
-              // as null. A null is a cost the producer did not know, not a
-              // cost of zero, so only a number the document holds is kept:
-              // this event is hashed, and "free" is not what it said.
-              ...(typeof metrics.cost_usd === "number" && Number.isFinite(metrics.cost_usd)
-                ? { costUsd: metrics.cost_usd }
-                : {}),
             },
           },
         });

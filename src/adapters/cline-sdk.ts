@@ -330,6 +330,13 @@ export const clineSdkAdapter: Adapter = {
         }
 
         const metrics = asRec(m.metrics);
+        // Cline's `metrics.cost` is a dollar figure. SPEC §5.9 keeps those
+        // out of the log — a price is a display-time computation from a
+        // table, and one hashed into an event is a stale snapshot nobody can
+        // verify — so it is counted, not carried.
+        if (metrics !== undefined && metrics.cost !== undefined && metrics.cost !== null) {
+          skip("cost-usd-not-stored (SPEC §5.9)");
+        }
         if (metrics !== undefined) {
           drafts.push({
             ts,
@@ -345,12 +352,6 @@ export const clineSdkAdapter: Adapter = {
               native: {
                 messageId: id,
                 requestId: null,
-                // Only a number the source held. A null, a string or a
-                // boolean here used to land as cost: 0, a figure the log
-                // never stated, inside a hashed payload.
-                ...(typeof metrics.cost === "number" && Number.isFinite(metrics.cost)
-                  ? { cost: metrics.cost }
-                  : {}),
               },
             },
           });

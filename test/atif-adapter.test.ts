@@ -525,18 +525,31 @@ describe("what goes into the hashed cost event", () => {
       }
     ).native;
 
-  it("keeps a cost the document holds, and leaves out one it says is unknown", () => {
-    // cost_usd is `float | None` and pydantic writes None as null. A null
-    // used to pass the presence check and be recorded as zero dollars in a
-    // hashed payload: "free" where the source said "unknown".
-    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: 0.021 })).costUsd).toBe(0.021);
-    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: null }))).not.toHaveProperty(
-      "costUsd",
+  it("never stores cost_usd, and counts the ones the document holds (SPEC §5.9)", () => {
+    // A dollar figure is a display-time computation from a pricing table;
+    // hashed into an event it is a stale snapshot nobody can verify, so the
+    // SPEC keeps it out of the log. Every shape leaves native without it;
+    // a figure the document did hold is counted so the import report names
+    // the drop, and a null (pydantic's None) is nothing to count.
+    const skipped = (lines: string[]): Record<string, number> => atifAdapter.convert(lines).skipped;
+    for (const m of [
+      metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: 0.021 }),
+      metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: null }),
+      metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: "0.02" }),
+      metrics({ prompt_tokens: 10, completion_tokens: 5 }),
+    ]) {
+      expect(native(m)).not.toHaveProperty("costUsd");
+    }
+    expect(skipped(metrics({ prompt_tokens: 10, cost_usd: 0.021 }))["cost-usd-not-stored (SPEC §5.9)"]).toBe(
+      1,
     );
-    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5, cost_usd: "0.02" }))).not.toHaveProperty(
-      "costUsd",
+    expect(skipped(metrics({ prompt_tokens: 10, cost_usd: "0.02" }))["cost-usd-not-stored (SPEC §5.9)"]).toBe(
+      1,
     );
-    expect(native(metrics({ prompt_tokens: 10, completion_tokens: 5 }))).not.toHaveProperty("costUsd");
+    expect(skipped(metrics({ prompt_tokens: 10, cost_usd: null }))).not.toHaveProperty(
+      "cost-usd-not-stored (SPEC §5.9)",
+    );
+    expect(skipped(metrics({ prompt_tokens: 10 }))).not.toHaveProperty("cost-usd-not-stored (SPEC §5.9)");
   });
 });
 

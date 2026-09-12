@@ -294,10 +294,13 @@ describe("what it declines, and says it declined", () => {
     expect(r2.skipped["message-timestamp-inherited"]).toBeUndefined();
   });
 
-  it("carries metrics.cost only when the source held a number", () => {
-    // A string, a null or a boolean used to land as cost: 0 inside the
-    // hashed payload, a figure the log never stated (openclaw's precedent
-    // is to record only what was actually a number).
+  it("never stores metrics.cost, and counts the ones the source held (SPEC §5.9)", () => {
+    // A dollar figure is a display-time computation from a pricing table;
+    // hashed into an event it is a stale snapshot nobody can verify, so the
+    // SPEC keeps it out of the log. The adapter used to carry it under
+    // native (and, before that, record a non-number as 0). Nothing of it
+    // is kept now, and each figure the source did hold is counted so the
+    // import report names the drop; a null is nothing to count.
     const text = [{ type: "text", text: "x" }];
     const r2 = clineSdkAdapter.convert(
       doc({}, [
@@ -305,14 +308,15 @@ describe("what it declines, and says it declined", () => {
         { id: "a2", role: "assistant", ts: 6, content: text, metrics: { inputTokens: 10, cost: null } },
         { id: "a3", role: "assistant", ts: 7, content: text, metrics: { inputTokens: 10, cost: true } },
         { id: "a4", role: "assistant", ts: 8, content: text, metrics: { inputTokens: 10, cost: 0.021 } },
+        { id: "a5", role: "assistant", ts: 9, content: text, metrics: { inputTokens: 10 } },
       ]),
     );
     const natives = r2.drafts
       .filter((d) => d.type === "cost")
       .map((d) => (d.payload as { native: Record<string, unknown> }).native);
-    expect(natives).toHaveLength(4);
-    for (const n of natives.slice(0, 3)) expect("cost" in n).toBe(false);
-    expect(natives[3]!.cost).toBe(0.021);
+    expect(natives).toHaveLength(5);
+    for (const n of natives) expect("cost" in n).toBe(false);
+    expect(r2.skipped["cost-usd-not-stored (SPEC §5.9)"]).toBe(3);
   });
 });
 

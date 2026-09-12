@@ -97,7 +97,10 @@ describe("openclaw adapter", () => {
     expect(costs).toHaveLength(2);
 
     // Same shape the other adapters emit: model, four token counts, and
-    // everything runtime-specific (provider, money) under native.
+    // everything runtime-specific under native. Not the dollar figure
+    // OpenClaw records beside its tokens: SPEC §5.9 keeps prices out of the
+    // log (a display-time computation, stale and unverifiable once hashed),
+    // and the drop is counted so the import report names it.
     expect(payloadOf(res.drafts, res.drafts.indexOf(costs[0]!))).toEqual({
       model: "gpt-5.5",
       usage: {
@@ -110,9 +113,9 @@ describe("openclaw adapter", () => {
         id: "msg-assistant-1",
         parentId: "msg-user-1",
         provider: "openai",
-        costUsd: 0.0031,
       },
     });
+    expect(res.skipped["cost-usd-not-stored (SPEC §5.9)"]).toBe(2); // one per usage record in the fixture
   });
 
   it("emits the same payload shape as the other adapters", () => {

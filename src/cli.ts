@@ -547,15 +547,37 @@ function refuseUnredacted(opts: Opts, id: string, verb: string): boolean {
 function refuseUnlessVerified(opts: Opts, id: string, verb: string, consequence: string): boolean {
   const meta = readSessionMeta(opts.dir, id);
   const check = verifyChain(readSessionLines(opts.dir, id), meta ?? undefined);
-  if (check.ok) return true;
-  const why = check.firstBroken
-    ? `event ${check.firstBroken.seq}: ${check.firstBroken.reason}`
-    : "chain does not verify";
-  console.error(`refusing to ${verb}: chain verification failed — ${why}`);
+  if (!check.ok) {
+    const why = check.firstBroken
+      ? `event ${check.firstBroken.seq}: ${check.firstBroken.reason}`
+      : "chain does not verify";
+    console.error(`refusing to ${verb}: chain verification failed — ${why}`);
+    console.error(
+      `  ${check.events} event${check.events === 1 ? "" : "s"} verified before the break; ${consequence}. Run: agit verify ${id.slice(0, 8)}`,
+    );
+    return false;
+  }
+  // The same verdict `agit verify` gives. A signature that does not match
+  // the head is the forgery signing exists to catch (a rechained log still
+  // carrying its original signature); publishing it would spread a claim
+  // of provenance the store itself rejects, so every verb that gates on
+  // verification gates on this too.
+  const bad = signatureLines(meta ?? undefined, id).filter((l) => l.startsWith("SIGNATURE DOES NOT MATCH"));
+  if (bad.length === 0) return true;
+  console.error(`refusing to ${verb}: ${bad[0]}`);
   console.error(
-    `  ${check.events} event${check.events === 1 ? "" : "s"} verified before the break; ${consequence}. Run: agit verify ${id.slice(0, 8)}`,
+    `  the chain is intact but a signature on it is not; ${consequence}. Run: agit verify ${id.slice(0, 8)}`,
   );
   return false;
+}
+
+/** "name@version", or what an adopted meta.json without an adapter can honestly say. */
+function adapterLabel(meta: SessionMeta): string {
+  const a = (meta as { adapter?: unknown }).adapter;
+  if (a === null || typeof a !== "object") return "unknown adapter";
+  const { name, version } = a as { name?: unknown; version?: unknown };
+  const n = typeof name === "string" && name !== "" ? name : "unknown";
+  return typeof version === "string" && version !== "" ? `${n}@${version}` : n;
 }
 
 /** A session already in the store, and the redaction mode it was imported under. */
@@ -1105,7 +1127,8 @@ function adoptBundle(opts: Opts, metaPath: string | null, raw: string): number {
   console.log(`adopted ${id}`);
   console.log(`  events      ${res.events}, chain intact${meta ? ", matches meta.json head" : ""}`);
   if (meta) {
-    console.log(`  origin      ${meta.adapter.name}@${meta.adapter.version}, imported ${meta.importedAt}`);
+    // A bundle's meta.json is someone else's file and need not name an adapter.
+    console.log(`  origin      ${adapterLabel(meta)}, imported ${meta.importedAt}`);
     // The recipient has the least context about how this log was produced,
     // and adoption is the one moment agit speaks to them. A --no-redact
     // origin leaves `redactions` empty, so silence here would read as
@@ -1494,8 +1517,7 @@ function cmdShow(opts: Opts): number {
   if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
   console.log(`  started     ${first.ts}`);
   console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
-  if (meta)
-    console.log(`  imported    ${meta.importedAt}  (adapter ${meta.adapter.name}@${meta.adapter.version})`);
+  if (meta) console.log(`  imported    ${meta.importedAt}  (adapter ${adapterLabel(meta)})`);
   if (meta?.base) {
     console.log(
       `  base        ${meta.base.kind} ${meta.base.ref} (${meta.base.files} files) — updates to files predating the session were verified against it`,
