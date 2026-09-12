@@ -243,6 +243,8 @@ export interface ShareState {
   relay: string;
   nativePath: string;
   createdAt: string;
+  /** Present when the share was started with --steer; same trust domain as the writer token. */
+  steerKey?: string;
 }
 
 export function sharesDir(base: string): string {

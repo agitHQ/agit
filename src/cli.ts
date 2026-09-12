@@ -56,8 +56,17 @@ import {
   parseShareRef,
   SessionFollower,
   StabilityError,
+  type InboxMessage,
   type ShareInfo,
 } from "./share.js";
+import {
+  newSteerKey,
+  runSteerHook,
+  STEERABLE_RUNTIMES,
+  steerHookConfig,
+  steerKeyMatches,
+  SteerQueue,
+} from "./steer.js";
 import {
   agitDir,
   addTag,
@@ -155,6 +164,15 @@ usage:
                                        is still running; viewer messages land here
   agit share --resume <share-id>       resume a live share after a crash (relay
                                        keeps the buffer; only the tail is pushed)
+  agit share <native.jsonl> --steer    also let viewers who hold the steer key
+                                       queue messages for the agent; delivered
+                                       at its next turn boundary (Claude Code)
+  agit steer <link> "<text>" --steer-key K
+                                       send a steering message from a terminal
+                                       instead of the share page (--name N)
+  agit hook                            Claude Code hook (Stop, UserPromptSubmit):
+                                       hands queued steering messages to the
+                                       agent; --config prints the settings.json
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
   agit relay --store <dir>             persist shares, so a restart keeps them
@@ -261,6 +279,10 @@ interface Opts {
   force?: boolean;
   store?: string;
   insecure: boolean;
+  steer: boolean;
+  steerKey?: string;
+  name?: string;
+  config: boolean;
   args: string[];
 }
 
@@ -282,6 +304,8 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     relay: DEFAULT_RELAY,
     static: false,
     resume: false,
+    steer: false,
+    config: false,
     trustedProxies: [],
     check: false,
     keepTagged: false,
@@ -376,6 +400,10 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--detach") opts.detach = true;
     else if (a === "--force") opts.force = true;
     else if (a === "--store") opts.store = need("--store");
+    else if (a === "--steer") opts.steer = true;
+    else if (a === "--steer-key") opts.steerKey = need("--steer-key");
+    else if (a === "--name") opts.name = need("--name");
+    else if (a === "--config") opts.config = true;
     else if (a === "--otel") opts.otel = true;
     else if (a === "--atif") opts.atif = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
@@ -443,6 +471,10 @@ async function main(): Promise<number> {
       return cmdRelay(opts);
     case "mcp":
       return cmdMcp(opts);
+    case "hook":
+      return cmdHook(opts);
+    case "steer":
+      return cmdSteer(opts);
     case "help":
       console.log(USAGE);
       return 0;
@@ -2728,6 +2760,76 @@ function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
   writeFileSync(remotesPath(dir), JSON.stringify(sorted, null, 2) + "\n", "utf8");
 }
 
+/**
+ * `agit hook` — the command Claude Code runs at Stop and UserPromptSubmit
+ * when a project opts into steering. Reads the hook's JSON from stdin, hands
+ * over whatever a live `agit share --steer` has queued for this session, and
+ * otherwise says nothing. Never exits non-zero: a steering hook that fails
+ * must not become an error in someone's session.
+ */
+async function cmdHook(opts: Opts): Promise<number> {
+  if (opts.config) {
+    console.log(steerHookConfig());
+    console.error(
+      "\n(put that in .claude/settings.json — project or user — and Claude Code runs `agit hook`",
+    );
+    console.error(
+      " at every Stop and UserPromptSubmit; it prints nothing unless a live share has queued a message)",
+    );
+    return 0;
+  }
+  let input: string;
+  try {
+    input = readFileSync(0, "utf8");
+  } catch {
+    return 0; // no stdin at all: not a hook invocation, nothing to deliver
+  }
+  const run = runSteerHook(opts.dir, input);
+  if (run.stdout !== "") process.stdout.write(run.stdout + "\n");
+  return run.exit;
+}
+
+/**
+ * `agit steer <link> "<text>" --steer-key K` — the share page's message box
+ * from a terminal, for a teammate who lives there. The same endpoint the
+ * page uses; the relay forwards the key to the sharer, who checks it.
+ */
+async function cmdSteer(opts: Opts): Promise<number> {
+  const [ref, text] = opts.args;
+  if (ref === undefined || text === undefined || text.trim() === "") {
+    console.error(
+      'usage: agit steer <share-link | share-id> "<message>" --steer-key <key> [--name <who>] [--relay <url>]',
+    );
+    return 2;
+  }
+  if (opts.steerKey === undefined || opts.steerKey === "") {
+    console.error("--steer-key is required: without it the message would land in the sharer's terminal only");
+    console.error("(that is what the share page does by default; agit steer is for reaching the agent).");
+    return 2;
+  }
+  let where: { relay: string; shareId: string };
+  try {
+    where = parseShareRef(ref, opts.relay);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 2;
+  }
+  const res = await fetch(new URL(`/api/shares/${where.shareId}/message`, where.relay), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: opts.name ?? "terminal", text, key: opts.steerKey }),
+  }).catch((err: unknown) => {
+    throw new Error(`cannot reach the relay at ${where.relay}`, { cause: err });
+  });
+  if (!res.ok) {
+    console.error(`relay refused the message: ${res.status} ${await res.text()}`);
+    return 1;
+  }
+  console.log("sent. The sharer's terminal shows it now; the agent reads it at its next turn boundary");
+  console.log("if the key was right — the relay does not know, only the sharer does.");
+  return 0;
+}
+
 async function cmdShare(opts: Opts): Promise<number> {
   if (opts.resume) return cmdShareResume(opts);
   const target = opts.args[0];
@@ -2781,7 +2883,31 @@ async function cmdShare(opts: Opts): Promise<number> {
     nativePath = null;
   }
 
-  const share = await createShare(opts.relay, ttlMs);
+  // Steering is wired per runtime, and only where the runtime documents a
+  // turn-boundary hook (src/steer.ts). Refused up front, before a share
+  // exists, so a refusal never leaves an orphan link on the relay.
+  let steerKey: string | null = null;
+  if (opts.steer) {
+    if (nativePath === null) {
+      console.error("--steer needs a live session: a static share has no agent to steer.");
+      return 2;
+    }
+    const adapter = pickAdapterFor(nativePath);
+    if (!adapter) {
+      console.error("no adapter recognizes this file");
+      return 1;
+    }
+    if (!STEERABLE_RUNTIMES.has(adapter.name)) {
+      console.error(
+        `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
+          " Only Claude Code (Stop / UserPromptSubmit hooks) is wired; share without --steer to keep messages terminal-only.",
+      );
+      return 2;
+    }
+    steerKey = newSteerKey();
+  }
+
+  const share = await createShare(opts.relay, ttlMs, { steer: steerKey !== null });
   if (nativePath !== null) {
     // Live shares are resumable after a crash: keep the credentials locally
     // (deleted again on a clean end — a surviving file means "resumable").
@@ -2793,12 +2919,17 @@ async function cmdShare(opts: Opts): Promise<number> {
       relay: opts.relay,
       nativePath,
       createdAt: new Date().toISOString(),
+      ...(steerKey !== null ? { steerKey } : {}),
     });
   }
   const expiry = new Date(Date.now() + share.ttlMs).toLocaleString();
   console.log(`\n  ${share.viewUrl}\n`);
   console.log(`  sharing the redacted event log — anyone with the link can read it until ${expiry}.`);
-  console.log("  viewer messages appear below; they are NOT injected into the running agent.");
+  if (steerKey === null) {
+    console.log("  viewer messages appear below; they are NOT injected into the running agent.");
+  } else {
+    printSteerBanner(steerKey);
+  }
   console.log(
     nativePath !== null
       ? `  Ctrl+C ends the share. If this process dies instead: agit share --resume ${share.shareId.slice(0, 8)}\n`
@@ -2814,7 +2945,9 @@ async function cmdShare(opts: Opts): Promise<number> {
     return 2;
   }
 
-  const inbox = openShareInbox(opts.relay, share);
+  let follower: SessionFollower | null = null;
+  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower?.sessionId ?? null) : null;
+  const inbox = openShareInbox(opts.relay, share, steer, steerKey);
   let keepOpen = false;
   try {
     if (staticEvents) {
@@ -2830,9 +2963,12 @@ async function cmdShare(opts: Opts): Promise<number> {
       await waitForSigint();
       return 0;
     }
-    const follower = followerFor(nativePath!, shareCfg);
+    follower = followerFor(nativePath!, shareCfg);
     if (!follower) return 1;
     const initial = follower.poll();
+    // The session id is known now: bind the steer inbox to it, which also
+    // clears anything an earlier share of this same session left queued.
+    steer?.flush();
     await pushAll(opts.relay, share, initial);
     console.log(`live: ${initial.length} events so far, tailing ${nativePath}`);
     return await liveLoop(opts.relay, share, follower, initial.length);
@@ -2852,10 +2988,30 @@ async function cmdShare(opts: Opts): Promise<number> {
   } finally {
     inbox.abort();
     if (!keepOpen) {
+      closeSteer(steer);
       await endShare(opts.relay, share);
       deleteShareState(opts.dir, share.shareId);
       console.log("share ended.");
     }
+  }
+}
+
+function printSteerBanner(steerKey: string): void {
+  console.log(`  steer key: ${steerKey}`);
+  console.log("  a viewer who enters that key sends messages to the agent, not just to this terminal;");
+  console.log("  they are handed over at the agent's next turn boundary (Claude Code Stop /");
+  console.log("  UserPromptSubmit hooks) and every one is shown here first. One-time setup per");
+  console.log("  project: agit hook --config");
+}
+
+/** End of share: drop the queue, but say what never reached the agent. */
+function closeSteer(steer: SteerQueue | null): void {
+  if (steer === null) return;
+  const undelivered = steer.close();
+  if (undelivered > 0) {
+    console.log(
+      `${undelivered} steering message(s) were queued but never reached the agent (no hook fired before the share ended).`,
+    );
   }
 }
 
@@ -2882,7 +3038,9 @@ async function cmdShareResume(opts: Opts): Promise<number> {
     writerToken: state.writerToken,
     ttlMs: state.ttlMs,
     viewUrl: state.viewUrl,
+    steer: typeof state.steerKey === "string",
   };
+  const steerKey = typeof state.steerKey === "string" ? state.steerKey : null;
   // --relay overrides; otherwise resume against the relay the share lives on.
   const relay = opts.relay !== DEFAULT_RELAY ? opts.relay : state.relay;
 
@@ -2932,8 +3090,13 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   console.log(
     `  resumed: relay holds ${head.events} events; pushing ${all.length - head.events} more, then tailing ${state.nativePath}`,
   );
+  if (steerKey !== null) printSteerBanner(steerKey);
   console.log("  Ctrl+C ends the share.\n");
-  const inbox = openShareInbox(relay, share);
+  // The follower has polled, so the session id is known and the queue binds
+  // at once. Not reset: messages queued before the crash are still owed to
+  // the agent, and the hook's cursor still says which ones it has had.
+  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower.sessionId) : null;
+  const inbox = openShareInbox(relay, share, steer, steerKey);
   // Only end the share once this process has successfully attached as its
   // writer. If the catch-up push fails (e.g. 409 because the original CLI is
   // in fact still alive and pushing), ending the share here would kill it
@@ -2966,6 +3129,7 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   } finally {
     inbox.abort();
     if (attached) {
+      closeSteer(steer);
       await endShare(relay, share);
       deleteShareState(opts.dir, share.shareId);
       console.log("share ended.");
@@ -2982,10 +3146,32 @@ function followerFor(nativePath: string, redaction: RedactionConfig): SessionFol
   return new SessionFollower(nativePath, adapter, redaction);
 }
 
-function openShareInbox(relayUrl: string, share: ShareInfo): AbortController {
+function openShareInbox(
+  relayUrl: string,
+  share: ShareInfo,
+  steer: SteerQueue | null = null,
+  steerKey: string | null = null,
+): AbortController {
   let lastViewers = -1;
+  const onMessage = (m: InboxMessage): void => {
+    const when = m.ts.slice(11, 19);
+    if (m.steer !== true) {
+      console.log(`◀ ${when} [${m.name}] ${m.text}`);
+      return;
+    }
+    // A steer claim. The relay forwarded the key without checking it; this
+    // is the only place that can. A wrong key is shown as a plain message,
+    // labelled, so the human still sees what was said — and nothing is
+    // queued for the agent.
+    if (steer !== null && steerKey !== null && steerKeyMatches(m.key, steerKey)) {
+      steer.enqueue({ ts: m.ts, name: m.name, text: m.text });
+      console.log(`◀ ${when} [${m.name}] ⇢ agent (queued for its next turn): ${m.text}`);
+    } else {
+      console.log(`◀ ${when} [${m.name}] (steer key rejected; terminal only) ${m.text}`);
+    }
+  };
   return openInbox(relayUrl, share, {
-    onMessage: (m) => console.log(`◀ ${m.ts.slice(11, 19)} [${m.name}] ${m.text}`),
+    onMessage,
     onInfo: (i) => {
       if (i.viewers !== lastViewers) {
         lastViewers = i.viewers;

@@ -5,6 +5,29 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## Unreleased
 
+### Added
+
+- **`agit share --steer`: teammates can redirect the agent, not just watch
+  it.** The share prints a steer key next to the link; a viewer who enters it
+  — on the page, or with `agit steer <link> "<text>" --steer-key K` from a
+  terminal — sends a message to the agent rather than only to the sharing
+  terminal. Nothing is injected mid-run: the message is queued under
+  `.agit/steer/` and handed over by Claude Code's own documented hooks at the
+  next turn boundary (`Stop`, so the agent continues instead of stopping;
+  `UserPromptSubmit`, so it rides with the next prompt when the agent was
+  idle), through `hookSpecificOutput.additionalContext`, under Claude Code's
+  own eight-continuation loop guard. `agit hook` is the command those hooks
+  run and `agit hook --config` prints the `settings.json` fragment. Every
+  message is shown in the sharing terminal first; a wrong key is shown,
+  labelled, and delivered to nowhere. The relay forwards a key to the writer
+  inbox only — other viewers see that a claim was made, never the key — and
+  cannot check it, because only the sharer holds it. Only Claude Code is
+  wired; `--steer` on any other runtime is refused with the reason (no
+  documented turn-boundary hook), and a relay that predates the flag is
+  refused too rather than promising a channel it would not carry. Protocol
+  v0 gains `steer` on share creation and `info`, and an optional `key` on
+  `/message`, both ignored by older peers.
+
 ### Fixed
 
 Six high-severity findings from an adversarial review of everything shipped

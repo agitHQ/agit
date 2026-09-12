@@ -51,6 +51,13 @@ interface Share {
   createdAt: number;
   ttlMs: number;
   ended: boolean;
+  /**
+   * The sharer opted into steering: a viewer message may carry a `key`,
+   * which the relay forwards to the writer inbox alone (never to other
+   * viewers) and does not check — only the sharer holds the steer key. The
+   * flag is published in `info` so the page can show the key field.
+   */
+  steer: boolean;
   /** Raw event JSON strings, index === seq. */
   events: string[];
   lastHash: string | null;
@@ -80,6 +87,7 @@ const LIMITS = {
   messageBody: 8 * 1024,
   messageText: 4000,
   messageName: 40,
+  steerKey: 64,
   msgsPerMinute: 30,
 };
 
@@ -110,6 +118,7 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         createdAt: meta.createdAt,
         ttlMs: meta.ttlMs,
         ended: meta.ended,
+        steer: meta.steer === true,
         events,
         // Recompute from what actually loaded rather than trusting the
         // recorded head: a truncated events file must not claim a head it
@@ -168,12 +177,14 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
       if (shares.size >= maxShares) return json(res, 503, { error: "relay full" });
       const body = (await readBody(req, LIMITS.messageBody)) ?? {};
       const ttlMs = clampNum((body as { ttlMs?: unknown }).ttlMs, 60_000, maxTtl, defaultTtl);
+      const steer = (body as { steer?: unknown }).steer === true;
       const share: Share = {
         id: randomBytes(16).toString("base64url"),
         writerToken: randomBytes(24).toString("base64url"),
         createdAt: Date.now(),
         ttlMs,
         ended: false,
+        steer,
         events: [],
         lastHash: null,
         viewers: new Set(),
@@ -187,12 +198,14 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         createdAt: share.createdAt,
         ttlMs: share.ttlMs,
         ended: false,
+        steer,
         lastHash: null,
       });
       return json(res, 201, {
         shareId: share.id,
         writerToken: share.writerToken,
         ttlMs,
+        steer,
         path: `/s/${share.id}`,
       });
     }
@@ -286,12 +299,25 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
         recent.push(now);
         share.msgTimes.set(sender, recent);
         const nameV = (body as { name?: unknown })?.name;
+        const keyV = (body as { key?: unknown })?.key;
         const msg = {
           name: typeof nameV === "string" ? nameV.slice(0, LIMITS.messageName) : "viewer",
           text: textV.slice(0, LIMITS.messageText),
           ts: new Date(now).toISOString(),
         };
-        broadcast(share, "msg", msg);
+        // A key is a viewer's claim to steer. Viewers see that a claim was
+        // made (so the chat reads honestly), never the key itself; the
+        // writer inbox gets the key and decides. Off a steering share the
+        // key is dropped: there is nothing on the other end to check it.
+        const key =
+          share.steer && typeof keyV === "string" && keyV !== "" ? keyV.slice(0, LIMITS.steerKey) : null;
+        if (key === null) {
+          broadcast(share, "msg", msg);
+        } else {
+          const claim = { ...msg, steer: true };
+          for (const v of share.viewers) writeOrShed(v, frameOf("msg", claim));
+          for (const i of share.inboxes) writeOrShed(i, frameOf("msg", { ...claim, key }));
+        }
         return json(res, 200, { delivered: true });
       }
 
@@ -358,12 +384,19 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
     return null;
   }
 
-  function infoOf(share: Share): { live: boolean; viewers: number; events: number; expiresAt: string } {
+  function infoOf(share: Share): {
+    live: boolean;
+    viewers: number;
+    events: number;
+    expiresAt: string;
+    steer: boolean;
+  } {
     return {
       live: !share.ended,
       viewers: share.viewers.size,
       events: share.events.length,
       expiresAt: new Date(share.createdAt + share.ttlMs).toISOString(),
+      steer: share.steer,
     };
   }
 
@@ -388,9 +421,13 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
   });
 
   function broadcast(share: Share, event: string, data: unknown): void {
-    const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const frame = frameOf(event, data);
     for (const res of [...share.viewers, ...share.inboxes]) writeOrShed(res, frame);
   }
+}
+
+function frameOf(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 function sendEvent(res: ServerResponse, seq: number, line: string): void {

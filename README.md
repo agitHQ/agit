@@ -165,14 +165,36 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **live while the agent is still running**: the CLI tails the native log
   and streams events; teammates watch in a browser (timeline, diffs, token
   meter) and can send messages that land in your terminal. **Watching is
-  read-only**: viewer messages reach the human at the keyboard, never the
-  agent (see below). A completed live stream is byte-identical to a full
+  read-only by default**: viewer messages reach the human at the keyboard,
+  never the agent; `--steer` is the opt-in that changes that, below. A
+  completed live stream is byte-identical to a full
   import — viewers can download `events.jsonl` and `agit verify` what they
   watched. If the sharing CLI dies, `agit share --resume <share-id>`
   reattaches to the same link and pushes only the missing tail. Links
   expire (24h default) and sharing is opt-in per session, always. A stored
   session whose chain does not verify is refused — `share`, `export`, `fork`
   and `pr` all name the failing event rather than publishing it.
+- **`agit share <native.jsonl> --steer`** — let teammates redirect the agent,
+  not just watch it. The share prints a **steer key** alongside the link; a
+  viewer who enters it (on the page, or from a terminal with
+  `agit steer <link> "<text>" --steer-key K`) sends a message *to the agent*
+  instead of only to your terminal. Nothing is injected mid-run and nothing
+  is typed on your behalf: the message is queued under `.agit/steer/`, and
+  **Claude Code's own hooks hand it over at the next turn boundary** —
+  `Stop`, so the agent picks it up instead of stopping, and
+  `UserPromptSubmit`, so it rides along with your next prompt if the agent
+  was idle. Both are the documented `hookSpecificOutput.additionalContext`
+  channel, subject to Claude Code's own loop guard (eight continuations in
+  a row, then it stops regardless). One-time setup per project:
+  `agit hook --config` prints the two-line `settings.json` fragment that
+  runs `agit hook` at those events; it prints nothing unless a live share
+  has queued something. Every steered message is shown in the sharing
+  terminal first, attributed, and a message with a wrong key is shown too —
+  labelled, and delivered to no one. The key never reaches other viewers;
+  the relay forwards it to the sharer alone, who is the only party that can
+  check it. Only Claude Code is wired, because only Claude Code documents a
+  turn-boundary hook; `--steer` on a Codex or OpenClaw session is refused
+  with that reason rather than promising a channel that does not exist.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -310,12 +332,15 @@ Said plainly:
   absent from the tree entirely, and a file deleted by a shell command
   still appears at its last logged content — only a structured deletion
   (`file.delete`) removes it.
-- **No message injection into a running session.** Sharing is watch-only:
-  viewer messages reach the sharing human's terminal, clearly attributed —
-  they are never fed to the agent. Claude Code has no supported way to
-  inject input into a live interactive session, and agit does not pretend
-  otherwise; if a runtime ever offers a real path, it gets wired
-  per-adapter, opt-in.
+- **No message injection mid-run, and steering is Claude Code only.**
+  Sharing is watch-only unless the sharer passes `--steer`, and even then a
+  message is never fed into a running turn: it waits for the runtime's own
+  turn boundary (Claude Code's `Stop` / `UserPromptSubmit` hooks) and is
+  delivered through the documented `additionalContext` channel, which the
+  agent weighs like any other context — a teammate's request, not a command
+  from the keyboard. Codex, OpenClaw, Cline and ATIF sessions have no
+  documented equivalent, so `--steer` refuses them; a runtime that gains one
+  gets wired the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
   HTTP on loopback, and binding beyond loopback without TLS is refused unless
@@ -383,9 +408,11 @@ are never executed, only displayed — the share page builds its DOM from
 Known credential patterns are redacted before events leave your machine
 (at import and during live shares alike) and counted in `meta.json`. Share
 links are unguessable 128-bit capabilities with TTLs; the relay holds
-everything in memory, binds loopback by default, and persists nothing. Never
-commit real session logs to this repo — tests run against synthetic
-fixtures.
+everything in memory, binds loopback by default, and persists nothing. A
+steer key is a second, separate capability: the link lets someone read, the
+key lets them queue a message for the agent, and the relay never learns
+whether a key was right — only the sharer holds it. Never commit real
+session logs to this repo — tests run against synthetic fixtures.
 
 ## Development
 

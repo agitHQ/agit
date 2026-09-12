@@ -40,13 +40,13 @@ relay and `agit verify` reproduces the same hashes.
 
 | method | path | auth | body / result |
 |---|---|---|---|
-| POST | `/api/shares` | — | `{ttlMs?}` → `{shareId, writerToken, ttlMs, path}` |
+| POST | `/api/shares` | — | `{ttlMs?, steer?}` → `{shareId, writerToken, ttlMs, steer, path}` |
 | POST | `/api/shares/:id/events` | writer | `{events: [AgitEvent…]}`; relay enforces `seq` contiguity and `prev` linkage, 409 on violation |
 | POST | `/api/shares/:id/end` | writer | marks the share ended |
 | GET | `/api/shares/:id/head` | writer | `{events, lastHash, ended}` — where the stored chain ends, for crash resume |
 | GET | `/api/shares/:id/stream` | link | SSE for viewers (below) |
 | GET | `/api/shares/:id/inbox` | writer | SSE: viewer messages + info |
-| POST | `/api/shares/:id/message` | link | `{text, name?}` → broadcast to everyone incl. the sharer's terminal |
+| POST | `/api/shares/:id/message` | link | `{text, name?, key?}` → broadcast to everyone incl. the sharer's terminal; `key` (steering shares only) goes to the writer inbox alone |
 | GET | `/api/shares/:id/events.jsonl` | link | the buffered log, verbatim — feed it to `agit verify` |
 | GET | `/s/:id` | link | the share page (inline HTML, CSP: no external resources) |
 
@@ -61,6 +61,10 @@ bits, base64url).
 - `info` — `{live, viewers, events, expiresAt}`; sent on connect and on any
   change.
 - `msg` — `{name, text, ts}`; a viewer message, broadcast to all streams.
+  On a share created with `steer: true`, a message that carried a `key`
+  is `{name, text, ts, steer: true}` to viewers and the same plus `key` to
+  the writer inbox — the claim is public, the key is not. `info` carries
+  `steer` so the page knows whether to offer the field.
 - comment frames (`:hb`) every 15s keep intermediaries from killing idle
   connections.
 
@@ -124,10 +128,20 @@ belongs to the edges: any viewer can download `events.jsonl` and run
 ## Viewer messages are not injection
 
 Messages go to the **sharing human's terminal**, clearly attributed, and are
-never fed to the agent. Claude Code has no supported way to inject input
-into a running interactive session; per the project rule — verify per
-runtime before promising — agit does not pretend otherwise. If a runtime
-ever offers a real injection path, it gets wired per-adapter, opt-in.
+not fed to the agent — unless the sharer created the share with
+`steer: true` and the message carries the steer key the sharer issued. Even
+then the relay's part is small and deliberately dumb: it forwards the key
+to the writer inbox, never to other viewers, and never checks it, because
+it does not hold it. The sharer compares it (constant time), queues the
+message on its own disk, and the runtime's documented turn-boundary hook
+(Claude Code: `Stop` and `UserPromptSubmit`, via `agit hook`) hands it to
+the agent as `additionalContext`. Nothing is injected mid-run. Per the
+project rule — verify per runtime before promising — only runtimes with a
+documented path are wired, and the sharer's CLI refuses `--steer` for the
+rest.
+
+The relay's rate limit on `/message` is per sender, so guessing a key costs
+30 tries a minute per address against 72 random bits.
 
 ## Deployment notes
 

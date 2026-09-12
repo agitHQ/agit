@@ -85,7 +85,8 @@ describe("applyUnifiedDiff: the no-newline marker", () => {
   });
 
   it("keeps the trailing newline off a modified file", () => {
-    const diff = "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n";
+    const diff =
+      "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n";
     expect(applyUnifiedDiff("a", diff)).toBe("b");
   });
 
@@ -132,7 +133,12 @@ describe("claude-code: a file written without a trailing newline", () => {
         model: "claude-opus-5",
         role: "assistant",
         content: [
-          { type: "tool_use", id: "tu1", name: "Write", input: { file_path: "/app/a.txt", content: CONTENT } },
+          {
+            type: "tool_use",
+            id: "tu1",
+            name: "Write",
+            input: { file_path: "/app/a.txt", content: CONTENT },
+          },
         ],
         stop_reason: "tool_use",
         usage: { input_tokens: 1, output_tokens: 1 },
@@ -357,8 +363,7 @@ describe("openclaw: an update that keeps a base file's missing final newline", (
             id: "functions.apply_patch:1",
             name: "apply_patch",
             arguments: {
-              input:
-                "*** Begin Patch\n*** Update File: existing.py\n@@\n-x = 1\n+x = 2\n*** End Patch",
+              input: "*** Begin Patch\n*** Update File: existing.py\n@@\n-x = 1\n+x = 2\n*** End Patch",
             },
           },
         ],

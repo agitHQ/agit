@@ -46,6 +46,8 @@ export interface PersistedShare {
   createdAt: number;
   ttlMs: number;
   ended: boolean;
+  /** Steering opted in when the share was created. Absent in stores written before it existed: off. */
+  steer?: boolean;
   lastHash: string | null;
 }
 
