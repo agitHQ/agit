@@ -1,0 +1,7 @@
+{"type":"session.start","session_id":"copilot-fixture-0001","timestamp":"2026-03-04T14:00:00.000Z","cwd":"/work/cli-tools"}
+{"type":"user.message","timestamp":"2026-03-04T14:00:01.000Z","text":"How do I list git commits formatted as graph?"}
+{"type":"tool.execution_start","timestamp":"2026-03-04T14:00:02.000Z","toolCallId":"call_copilot_001","toolName":"shell","input":{"command":"git log --graph --oneline -n 10"}}
+{"type":"tool.execution_complete","timestamp":"2026-03-04T14:00:03.000Z","toolCallId":"call_copilot_001","toolName":"shell","output":"* 1a2b3c4 chore: initial commit","success":true}
+{"type":"assistant.message","timestamp":"2026-03-04T14:00:04.000Z","model":"copilot-gpt-4o","explanation":"Use git log with --graph and --oneline flags.","text":"Run this command to view the commit graph."}
+{"type":"assistant.usage","timestamp":"2026-03-04T14:00:04.000Z","model":"copilot-gpt-4o","inputTokens":95,"outputTokens":35}
+{"type":"session.shutdown","timestamp":"2026-03-04T14:00:05.000Z"}
