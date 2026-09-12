@@ -9,6 +9,14 @@
 
 export class PatchError extends Error {}
 
+/**
+ * What `diff` writes after a file's last line when no newline follows it.
+ * Adapters emit it so the fact survives into the log; the appliers below and
+ * in blame.ts read it back. Only the leading "\" is ever matched, so a diff
+ * carrying any other wording of the same marker still applies.
+ */
+export const NO_NEWLINE_MARKER = "\\ No newline at end of file";
+
 export interface Hunk {
   oldStart: number;
   lines: string[]; // ' ' context, '-' delete, '+' add, '\' no-newline marker
@@ -21,6 +29,7 @@ export function applyUnifiedDiff(base: string | null, diff: string): string {
   const out: string[] = [];
   let cursor = 0; // index into baseLines
   let noNewlineAtEnd = false;
+  let sawMarker = false;
 
   for (const hunk of hunks) {
     const start = Math.max(0, hunk.oldStart - 1);
@@ -37,6 +46,7 @@ export function applyUnifiedDiff(base: string | null, diff: string): string {
       if (tag === "\\") {
         // "\ No newline at end of file" — applies to the previous emitted line.
         noNewlineAtEnd = true;
+        sawMarker = true;
         continue;
       }
       noNewlineAtEnd = false;
@@ -73,8 +83,24 @@ export function applyUnifiedDiff(base: string | null, diff: string): string {
   while (cursor < baseLines.length) out.push(baseLines[cursor++]!);
 
   if (out.length === 0) return "";
-  const trail = noNewlineAtEnd ? "" : base === null || base === "" ? "\n" : baseTrail ? "\n" : "";
-  return out.join("\n") + trail;
+  return out.join("\n") + (endsWithNewline() ? "\n" : "");
+
+  /**
+   * How the result ends.
+   *
+   * A marker after the last emitted line says outright that no newline
+   * follows it. A diff that carries the marker anywhere records the fact
+   * rather than omitting it, so not ending with one is equally a statement:
+   * the result does end with a newline, even where the base did not. Only a
+   * diff with no marker at all leaves the question open, and there the base's
+   * own ending is the best available answer — which is what logs imported
+   * before adapters wrote the marker depend on.
+   */
+  function endsWithNewline(): boolean {
+    if (noNewlineAtEnd) return false;
+    if (sawMarker) return true;
+    return base === null || base === "" ? true : baseTrail;
+  }
 }
 
 export function parseHunks(diff: string): Hunk[] {
