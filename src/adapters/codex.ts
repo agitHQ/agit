@@ -38,7 +38,7 @@
 
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
-import { applyUnifiedDiff } from "../patch.js";
+import { applyUnifiedDiff, NO_NEWLINE_MARKER } from "../patch.js";
 import { seedKnownFromBase } from "../base.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
@@ -526,7 +526,15 @@ function fileDiffPayload(
   };
 }
 
-/** A correct, if unminimized, full-file diff — used when the runtime gave none (adds). */
+/**
+ * A correct, if unminimized, full-file diff — used when the runtime gave none (adds).
+ *
+ * Each side carries the marker `diff` writes when its last line has no newline
+ * after it. Without it the diff describes a trailing newline the file does not
+ * have, so replaying it cannot reproduce `afterHash`: `agit fork` drops the
+ * file as unreconstructible and `agit blame` reports the mismatch as proof the
+ * file was edited outside the log.
+ */
 function synthesizeDiff(path: string, before: string | null, after: string): string {
   const header = before === null ? `--- /dev/null\n+++ b/${path}` : `--- a/${path}\n+++ b/${path}`;
   const split = (s: string): string[] => {
@@ -535,9 +543,15 @@ function synthesizeDiff(path: string, before: string | null, after: string): str
     if (lines[lines.length - 1] === "") lines.pop();
     return lines;
   };
+  const side = (text: string | null, tag: "-" | "+"): string[] => {
+    if (text === null || text === "") return [];
+    const out = split(text).map((l) => `${tag}${l}`);
+    if (!text.endsWith("\n")) out.push(NO_NEWLINE_MARKER);
+    return out;
+  };
   const b = before === null ? [] : split(before);
   const a = split(after);
-  const lines = [...b.map((l) => `-${l}`), ...a.map((l) => `+${l}`)];
+  const lines = [...side(before, "-"), ...side(after, "+")];
   return `${header}\n@@ -${b.length === 0 ? 0 : 1},${b.length} +${a.length === 0 ? 0 : 1},${a.length} @@\n${lines.join("\n")}\n`;
 }
 

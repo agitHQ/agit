@@ -34,6 +34,7 @@ import { createHash } from "node:crypto";
 import { applyUpdate, parseApplyPatch, type PatchHunk } from "./openclaw-patch.js";
 import type { DraftEvent, Json } from "../format/events.js";
 import { seedKnownFromBase } from "../base.js";
+import { NO_NEWLINE_MARKER } from "../patch.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "openclaw";
@@ -163,7 +164,16 @@ function absolutePath(cwd: string | undefined, p: string): string {
   return cwd.replace(/[\\/]+$/, "") + sep + p.replace(/[\\/]/g, sep);
 }
 
-/** A whole-file unified diff: valid for replay to apply and verify, if not the tightest to read. */
+/**
+ * A whole-file unified diff: valid for replay to apply and verify, if not the
+ * tightest to read.
+ *
+ * Each side carries the marker `diff` writes when its last line has no newline
+ * after it. Without it the diff describes a trailing newline the file does not
+ * have, so replaying it cannot reproduce `afterHash`: `agit fork` drops the
+ * file as unreconstructible and `agit blame` reports the mismatch as proof the
+ * file was edited outside the log.
+ */
 function synthesizeDiff(path: string, before: string | null, after: string): string {
   const header = before === null ? `--- /dev/null\n+++ b/${path}` : `--- a/${path}\n+++ b/${path}`;
   const split = (t: string): string[] => {
@@ -172,9 +182,15 @@ function synthesizeDiff(path: string, before: string | null, after: string): str
     if (lines[lines.length - 1] === "") lines.pop();
     return lines;
   };
+  const side = (text: string | null, tag: "-" | "+"): string[] => {
+    if (text === null || text === "") return [];
+    const out = split(text).map((l) => `${tag}${l}`);
+    if (!text.endsWith("\n")) out.push(NO_NEWLINE_MARKER);
+    return out;
+  };
   const b = before === null ? [] : split(before);
   const a = split(after);
-  const lines = [...b.map((l) => `-${l}`), ...a.map((l) => `+${l}`)];
+  const lines = [...side(before, "-"), ...side(after, "+")];
   return `${header}\n@@ -${b.length === 0 ? 0 : 1},${b.length} +${a.length === 0 ? 0 : 1},${a.length} @@\n${lines.join("\n")}\n`;
 }
 
