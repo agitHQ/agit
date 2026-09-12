@@ -202,7 +202,10 @@ describe("SessionFollower", () => {
 
     writeFileSync(path, tampered.join("\n") + "\n", "utf8");
     utimesSync(path, tick, tick);
-    expect(statSync(path).mtimeMs).toBe(tick.getTime());
+    // ext4 keeps nanoseconds and Node reports them as a float, so the value
+    // read back can sit a microsecond under the one written; what matters
+    // is that both polls see the same one, which the same utimes guarantees.
+    expect(statSync(path).mtimeMs).toBeCloseTo(tick.getTime(), 2);
 
     while (Date.now() - tick.getTime() <= MTIME_SETTLE_MS) await sleep(50);
     expect(() => follower.poll()).toThrow(StabilityError);
