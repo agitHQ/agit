@@ -40,7 +40,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { AgitEvent, Json } from "./format/events.js";
 import { sha256Hex } from "./format/hash.js";
-import { reconstructTree, treeRelativePath } from "./fork.js";
+import { reconstructTree, treeRelativePathOrNull } from "./fork.js";
 import { merge3 } from "./merge3.js";
 
 export type MergeOutcome =
@@ -97,7 +97,12 @@ export function baseTreeAt(sourceEvents: AgitEvent[], atSeq: number): Map<string
   const cwd = typeof start.cwd === "string" ? start.cwd : null;
   const { files } = reconstructTree(sourceEvents, atSeq);
   const map = new Map<string, string>();
-  for (const f of files) map.set(treeRelativePath(f.path, cwd), f.content);
+  for (const f of files) {
+    // A path that sanitizes to nothing was never written into the fork's
+    // tree either (writeFork skipped it), so it has nothing to merge.
+    const rel = treeRelativePathOrNull(f.path, cwd);
+    if (rel !== null) map.set(rel, f.content);
+  }
   return map;
 }
 
@@ -120,13 +125,15 @@ function deletionsAfter(forkEvents: AgitEvent[], atSeq: number, cwd: string | nu
     if (e.type === "file.delete") {
       const p = e.payload as { path?: Json; beforeHash?: Json };
       if (typeof p.path !== "string" || typeof p.beforeHash !== "string") continue;
-      out.set(treeRelativePath(p.path, cwd), p.beforeHash);
+      const rel = treeRelativePathOrNull(p.path, cwd);
+      if (rel !== null) out.set(rel, p.beforeHash);
       continue;
     }
     // A later edit or re-create of the same path retracts the deletion.
     if (e.type === "file.diff") {
       const p = e.payload as { path?: Json };
-      if (typeof p.path === "string") out.delete(treeRelativePath(p.path, cwd));
+      const rel = typeof p.path === "string" ? treeRelativePathOrNull(p.path, cwd) : null;
+      if (rel !== null) out.delete(rel);
     }
   }
   return out;

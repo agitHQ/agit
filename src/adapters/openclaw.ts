@@ -68,13 +68,14 @@ function num(value: unknown): number {
  * coerced to numbers so a field missing from one record cannot make two
  * imports of the same log differ (SPEC §7).
  *
- * OpenClaw's Usage carries `cost` as well, and it is kept — under native,
- * because SPEC's cost payload counts tokens and says nothing about money.
+ * OpenClaw's Usage carries `cost` as well. It is not kept: SPEC §5.9 keeps
+ * dollar amounts out of the log, since a price is a display-time computation
+ * from a table and one hashed into an event is a stale snapshot nobody can
+ * verify. The drop is reported through `skipped` so the import names it.
  */
 function usagePayload(message: RecordValue, native: Json): { [key: string]: Json } | undefined {
   const usage = asRecord(message.usage);
   if (!usage) return undefined;
-  const cost = asRecord(usage.cost);
 
   const nativeRecord = asRecord(native) ?? {};
   return {
@@ -88,7 +89,6 @@ function usagePayload(message: RecordValue, native: Json): { [key: string]: Json
     native: {
       ...nativeRecord,
       ...(typeof message.provider === "string" ? { provider: message.provider } : {}),
-      ...(cost && typeof cost.total === "number" ? { costUsd: cost.total } : {}),
     },
   };
 }
@@ -510,6 +510,8 @@ export const openclawAdapter: Adapter = {
 
         const usage = usagePayload(message, native);
         if (usage) {
+          if (asRecord(asRecord(message.usage)?.cost)?.total !== undefined)
+            skip("cost-usd-not-stored (SPEC §5.9)");
           drafts.push({
             ts,
             type: "cost",

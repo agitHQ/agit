@@ -175,6 +175,20 @@ export function treeRelativePath(filePath: string, cwd: string | null): string {
   return segments.join("/");
 }
 
+/**
+ * The same, for callers that would rather count a path than fail on it: a
+ * log can name "/", "." or a path of nothing but separators, and one such
+ * file should cost the fork, diff or merge that one file, not the whole
+ * operation.
+ */
+export function treeRelativePathOrNull(filePath: string, cwd: string | null): string | null {
+  try {
+    return treeRelativePath(filePath, cwd);
+  } catch {
+    return null;
+  }
+}
+
 export interface ForkResult {
   outDir: string;
   written: { rel: string; source: string; recovered: boolean }[];
@@ -196,7 +210,11 @@ export function writeFork(
   mkdirSync(treeRoot, { recursive: true });
   const written: ForkResult["written"] = [];
   for (const f of files) {
-    const rel = treeRelativePath(f.path, cwd);
+    const rel = treeRelativePathOrNull(f.path, cwd);
+    if (rel === null) {
+      skipped.push({ path: f.path, reason: "path sanitizes to nothing; cannot be placed in a tree" });
+      continue;
+    }
     const abs = resolve(treeRoot, rel);
     if (!abs.startsWith(treeRoot + sep)) throw new Error(`refusing path escape: ${f.path}`);
     mkdirSync(dirname(abs), { recursive: true });

@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import type { AgitEvent, Json } from "./format/events.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { reconstructTree, treeRelativePath } from "./fork.js";
+import { reconstructTree, treeRelativePathOrNull } from "./fork.js";
 import { listTreeFiles } from "./merge.js";
 import { usageTotals } from "./state.js";
 
@@ -64,12 +64,17 @@ function treeOf(events: AgitEvent[], at: number): { files: Map<string, string>; 
   const cwd = typeof start?.cwd === "string" ? start.cwd : null;
   const { files, skipped } = reconstructTree(events, at);
   const map = new Map<string, string>();
+  let unusable = 0;
   for (const f of files) {
     // Relative keys so two sessions with different absolute roots still line
-    // up — a fork's tree and its parent's rarely share a directory.
-    map.set(treeRelativePath(f.path, cwd), f.content);
+    // up — a fork's tree and its parent's rarely share a directory. A path
+    // that sanitizes to nothing cannot be keyed; it is counted with the
+    // files the tree could not reconstruct rather than failing the diff.
+    const rel = treeRelativePathOrNull(f.path, cwd);
+    if (rel === null) unusable++;
+    else map.set(rel, f.content);
   }
-  return { files: map, skipped: skipped.length };
+  return { files: map, skipped: skipped.length + unusable };
 }
 
 /** Work on one side; with `since`, only what happened after the shared point. */

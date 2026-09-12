@@ -153,6 +153,33 @@ each now guarded by a test that fails without its fix. By area:
   load, so a file without numeric `createdAt`/`ttlMs` no longer loads as a
   share that never expires and throws on every stream.
 
+Four items those fixers flagged as outside their file groups:
+
+- **Publishing verbs now refuse a signature `verify` rejects.** `export`,
+  `pr`, `push` and `share` gated on the chain alone, so a rechained log still
+  carrying its original signature — the forgery signing exists to catch, and
+  the one `verify` exits 1 on — could be exported, bundled, pushed and shared
+  as signed provenance. The gate now gives the same verdict `verify` does and
+  names the signature that failed.
+- **Dollar amounts are no longer stored in the log (SPEC §5.9).** The
+  OpenClaw, ATIF and Cline SDK adapters carried `cost.total`, `cost_usd` and
+  `metrics.cost` under `native` — a price is a display-time computation from
+  a table, and one hashed into an event is a stale snapshot nobody can
+  verify, which is why the SPEC forbids it. Each figure the source held is
+  counted as `cost-usd-not-stored (SPEC §5.9)` so the import report names
+  the drop. **The hash of an OpenClaw, ATIF or Cline import that carried a
+  price changes**; stored sessions still verify as they are, and a fresh
+  import of the same log now produces the SPEC's shape.
+- **One unusable path costs one file, not the operation.** A hash-verified
+  edit at `/`, `.` or a path of nothing but separators has no segments a
+  tree can place. `fork`, `diff` and `merge` threw `unusable path in log`
+  for the whole run; they now skip that file — `fork` names it in `SEED.md`,
+  `diff` counts it with the files it could not reconstruct — and carry on,
+  as the MCP `agit_diff` already did.
+- **An adopted `meta.json` without an adapter no longer crashes `show` or
+  the adoption summary**, which printed a TypeError where the origin line
+  belonged; it reads `unknown adapter`.
+
 ## 0.8.0 — 2026-09-11
 
 ### Added
