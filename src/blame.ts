@@ -54,49 +54,95 @@ interface Carried {
 }
 
 /**
+ * A file's lines plus how the file ends.
+ *
+ * The ending is not decoration here: it is hashed. Blame checks every replayed
+ * step against the event's `afterHash`, and a file that ends without a newline
+ * hashes differently from the same lines that end with one.
+ */
+interface CarriedFile {
+  lines: Carried[];
+  endsWithNewline: boolean;
+}
+
+const EMPTY_FILE: CarriedFile = { lines: [], endsWithNewline: false };
+
+/** The content these lines represent, exactly as the file had it. */
+function renderCarried(f: CarriedFile): string {
+  if (f.lines.length === 0) return "";
+  return f.lines.map((l) => l.text).join("\n") + (f.endsWithNewline ? "\n" : "");
+}
+
+/** Split recorded content into lines, remembering whether a newline ended it. */
+function carry(content: string, origin: Omit<Carried, "text">): CarriedFile {
+  const parts = content.split("\n");
+  const endsWithNewline = parts[parts.length - 1] === "";
+  if (endsWithNewline) parts.pop();
+  return { lines: parts.map((text) => ({ text, ...origin })), endsWithNewline };
+}
+
+/**
  * Apply one unified diff, carrying provenance.
  *
  * Same grammar and the same strictness as `applyUnifiedDiff`: context and
  * deletions must match, and anything else throws rather than fuzzy-matching.
  * Context lines keep whatever wrote them; only `+` lines take the new origin.
  */
-function applyCarrying(base: Carried[], diff: string, origin: Omit<Carried, "text">): Carried[] {
+function applyCarrying(base: CarriedFile, diff: string, origin: Omit<Carried, "text">): CarriedFile {
   const hunks = parseHunks(diff);
   const out: Carried[] = [];
   let cursor = 0;
+  let noNewlineAtEnd = false;
+  let sawMarker = false;
 
   for (const hunk of hunks) {
     const start = Math.max(0, hunk.oldStart - 1);
     if (start < cursor) throw new Error("hunks overlap or are out of order");
     while (cursor < start) {
-      if (cursor >= base.length) throw new Error("hunk start beyond end of base");
-      out.push(base[cursor++]!);
+      if (cursor >= base.lines.length) throw new Error("hunk start beyond end of base");
+      out.push(base.lines[cursor++]!);
     }
     for (const l of hunk.lines) {
       const tag = l[0];
       const text = l.slice(1);
-      if (tag === "\\") continue; // "\ No newline at end of file"
+      if (tag === "\\") {
+        // "\ No newline at end of file" — applies to the previous emitted line.
+        // Dropping it, as this did, made every file that ends without a
+        // newline hash differently from the event that recorded it, and blame
+        // reported that as proof of an edit made outside the log.
+        noNewlineAtEnd = true;
+        sawMarker = true;
+        continue;
+      }
+      noNewlineAtEnd = false;
       if (tag === " " || tag === "-") {
-        if (cursor >= base.length || base[cursor]!.text !== text) {
+        if (cursor >= base.lines.length || base.lines[cursor]!.text !== text) {
           throw new Error(`context mismatch at base line ${cursor + 1}`);
         }
-        if (tag === " ") out.push(base[cursor]!); // provenance survives context
+        if (tag === " ") out.push(base.lines[cursor]!); // provenance survives context
         cursor++;
       } else if (tag === "+") {
         out.push({ text, ...origin });
       } else if (l === "") {
-        if (cursor >= base.length || base[cursor]!.text !== "") {
+        if (cursor >= base.lines.length || base.lines[cursor]!.text !== "") {
           throw new Error(`context mismatch at base line ${cursor + 1}`);
         }
-        out.push(base[cursor]!);
+        out.push(base.lines[cursor]!);
         cursor++;
       } else {
         throw new Error(`unrecognized diff line: ${JSON.stringify(l)}`);
       }
     }
   }
-  while (cursor < base.length) out.push(base[cursor++]!);
-  return out;
+  while (cursor < base.lines.length) out.push(base.lines[cursor++]!);
+  return { lines: out, endsWithNewline: endsWithNewline() };
+
+  /** The same rule `applyUnifiedDiff` follows, so both agree on what was written. */
+  function endsWithNewline(): boolean {
+    if (out.length === 0 || noNewlineAtEnd) return false;
+    if (sawMarker) return true;
+    return base.lines.length === 0 ? true : base.endsWithNewline;
+  }
 }
 
 interface DiffPayload {
@@ -150,7 +196,7 @@ export function blameFile(sessions: { id: string; events: AgitEvent[] }[], path:
   }
   steps.sort((a, b) => a.e.ts.localeCompare(b.e.ts) || a.e.seq - b.e.seq);
 
-  let lines: Carried[] = [];
+  let file: CarriedFile = EMPTY_FILE;
   let verified = true;
   let divergedAtSeq: number | undefined;
   let divergedIn: string | undefined;
@@ -160,7 +206,7 @@ export function blameFile(sessions: { id: string; events: AgitEvent[] }[], path:
     if (!touched.includes(id)) touched.push(id);
     if (divergedAtSeq !== undefined) break; // nothing past it is knowable
     if (e.type === "file.delete") {
-      lines = [];
+      file = EMPTY_FILE;
       continue;
     }
     if (typeof p.diff !== "string" || typeof p.afterHash !== "string") continue;
@@ -170,18 +216,16 @@ export function blameFile(sessions: { id: string; events: AgitEvent[] }[], path:
     // content from what the runtime recorded, hash-checked. Those lines carry
     // no attribution — nothing in the store wrote them — which is exactly
     // what blame should say about them.
-    if (lines.length === 0 && p.kind !== "create" && typeof p.toolUseId === "string") {
+    if (file.lines.length === 0 && p.kind !== "create" && typeof p.toolUseId === "string") {
       const events = sessions.find((x) => x.id === id)?.events ?? [];
       const orig = originalFileFor(events, p.toolUseId);
       if (orig !== null && (typeof p.beforeHash !== "string" || sha256Hex(orig) === p.beforeHash)) {
-        const parts = orig.split("\n");
-        if (parts[parts.length - 1] === "") parts.pop();
-        lines = parts.map((text) => ({ text, session: null, seq: null, ts: null }));
+        file = carry(orig, { session: null, seq: null, ts: null });
       }
     }
-    let next: Carried[];
+    let next: CarriedFile;
     try {
-      next = applyCarrying(p.kind === "create" ? [] : lines, p.diff, origin);
+      next = applyCarrying(p.kind === "create" ? EMPTY_FILE : file, p.diff, origin);
     } catch {
       // The diff does not fit what we hold: something changed this file
       // outside structured edits. Stop here and keep the last state we could
@@ -192,21 +236,27 @@ export function blameFile(sessions: { id: string; events: AgitEvent[] }[], path:
       verified = false;
       break;
     }
-    if (sha256Hex(next.map((l) => l.text + "\n").join("")) !== p.afterHash) {
+    if (sha256Hex(renderCarried(next)) !== p.afterHash) {
       // We applied the diff but did not land on the content the event claims.
       divergedAtSeq = e.seq;
       divergedIn = id;
       verified = false;
       break;
     }
-    lines = next;
+    file = next;
   }
 
   return {
     path,
     // Every line here came out of a step that reproduced its own hash, so the
     // attribution stands even when a later step diverged.
-    lines: lines.map((l, i) => ({ line: i + 1, text: l.text, session: l.session, seq: l.seq, ts: l.ts })),
+    lines: file.lines.map((l, i) => ({
+      line: i + 1,
+      text: l.text,
+      session: l.session,
+      seq: l.seq,
+      ts: l.ts,
+    })),
     sessions: touched,
     verified,
     ...(divergedAtSeq !== undefined ? { divergedAtSeq, divergedIn } : {}),

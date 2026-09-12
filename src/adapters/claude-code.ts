@@ -11,6 +11,7 @@
 
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
+import { NO_NEWLINE_MARKER } from "../patch.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 export const ADAPTER_NAME = "claude-code";
@@ -414,8 +415,24 @@ function renderUnifiedDiff(path: string, before: string | null, after: string, h
   // Synthesize a correct, if unminimized, full-file diff.
   const beforeLines = before === null ? [] : splitLines(before);
   const afterLines = splitLines(after);
-  const lines = [...beforeLines.map((l) => `-${l}`), ...afterLines.map((l) => `+${l}`)];
+  const lines = [...sideLines(before, "-"), ...sideLines(after, "+")];
   return `${header}\n@@ -${beforeLines.length === 0 ? 0 : 1},${beforeLines.length} +${afterLines.length === 0 ? 0 : 1},${afterLines.length} @@\n${lines.join("\n")}\n`;
+}
+
+/**
+ * One side of a synthesized diff, with the marker `diff` writes when the last
+ * line has no newline after it.
+ *
+ * Without it the diff describes a trailing newline the file does not have, so
+ * replaying it cannot reproduce `afterHash`: `agit fork` drops the file as
+ * unreconstructible and `agit blame` reports the mismatch as proof the file
+ * was edited outside the log. Plenty of ordinary files end without a newline.
+ */
+function sideLines(text: string | null, tag: "-" | "+"): string[] {
+  if (text === null || text === "") return [];
+  const lines = splitLines(text).map((l) => `${tag}${l}`);
+  if (!text.endsWith("\n")) lines.push(NO_NEWLINE_MARKER);
+  return lines;
 }
 
 function isValidHunk(h: unknown): h is PatchHunk {
