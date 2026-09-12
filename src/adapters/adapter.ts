@@ -27,6 +27,13 @@ export interface ConvertOptions {
    * skips exactly as no base does.
    */
   base?: BaseTree;
+  /**
+   * For a file that holds several sessions (a LangGraph checkpoint database
+   * has one per thread): the native id of the one to import. Without it an
+   * adapter imports the only session there is, and refuses — naming the
+   * candidates — when there is more than one.
+   */
+  select?: string;
 }
 
 export interface Adapter {
@@ -35,4 +42,12 @@ export interface Adapter {
   /** Cheap sniff: could these lines be this runtime's native log? */
   detect(lines: string[]): boolean;
   convert(lines: string[], opts?: ConvertOptions): ConvertResult;
+  /**
+   * The same pair for a runtime whose log is not text. A binary adapter
+   * answers false to `detect` (there are no lines to recognize) and reads
+   * the file's bytes here instead; the import path tries these first, since
+   * a database read as UTF-8 is not a log with unusual lines but noise.
+   */
+  detectBytes?(bytes: Uint8Array): boolean;
+  convertBytes?(bytes: Uint8Array, opts?: ConvertOptions): ConvertResult;
 }

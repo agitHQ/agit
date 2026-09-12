@@ -50,7 +50,14 @@ export interface SessionMeta {
   sessionId: string;
   adapter: { name: string; version: string };
   importedAt: string;
-  source: { path: string; sha256: string; bytes: number; records: number };
+  source: {
+    path: string;
+    sha256: string;
+    bytes: number;
+    records: number;
+    /** For a file holding several sessions: which one this is (a LangGraph thread id). */
+    select?: string;
+  };
   skipped: Record<string, number>;
   redactions: Record<string, number>;
   /**

@@ -10,6 +10,7 @@ import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
+import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
 import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
@@ -46,6 +47,7 @@ import {
 import { toAtif, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
+import { walSidecarWarning } from "./sqlite.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -102,7 +104,14 @@ import {
   type StatsRow,
 } from "./stats.js";
 
-const ADAPTERS: Adapter[] = [claudeCodeAdapter, codexAdapter, openclawAdapter, atifAdapter, clineSdkAdapter];
+const ADAPTERS: Adapter[] = [
+  claudeCodeAdapter,
+  codexAdapter,
+  openclawAdapter,
+  atifAdapter,
+  clineSdkAdapter,
+  langgraphAdapter,
+];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
 const USAGE = `agit — git for running agents
@@ -115,6 +124,9 @@ usage:
                                        refuse this session without --allow-unredacted
   agit import --all [--since 7d]       find every session the supported runtimes
                                        have written and import what is new
+  agit import <checkpoints.sqlite>     import a LangGraph thread from its
+                       [--thread ID]   checkpoint database (one thread per
+                                       session; --thread picks among several)
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
          [--project P] [--sort KEY]    started (default), events, files or id
@@ -260,6 +272,7 @@ interface Opts {
   host?: string;
   trustedProxies: string[];
   base?: string;
+  thread?: string;
   redactPatterns?: string;
   check: boolean;
   tag?: string;
@@ -377,6 +390,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--host") opts.host = need("--host");
     else if (a === "--trusted-proxy") opts.trustedProxies.push(need("--trusted-proxy"));
     else if (a === "--base") opts.base = need("--base");
+    else if (a === "--thread") opts.thread = need("--thread");
     else if (a === "--redact-patterns") opts.redactPatterns = need("--redact-patterns");
     else if (a === "--check") opts.check = true;
     else if (a === "--tag") opts.tag = need("--tag");
@@ -586,6 +600,15 @@ interface KnownSource {
   noRedact: boolean;
 }
 
+/**
+ * The identity of one import: the file's bytes, plus which session in it
+ * when the file holds several. Without the second half, importing a second
+ * LangGraph thread from the same database answered "already imported".
+ */
+function sourceKey(sha256: string, select: string | undefined): string {
+  return select === undefined ? sha256 : `${sha256}#${select}`;
+}
+
 interface ImportOutcome {
   status: "imported" | "updated" | "unchanged" | "unrecognized";
   id?: string;
@@ -610,7 +633,10 @@ function knownSources(dir: string): Map<string, KnownSource> {
   for (const id of listSessionIds(dir)) {
     const meta = readSessionMeta(dir, id);
     if (meta?.source?.sha256) {
-      known.set(meta.source.sha256, { id, noRedact: meta.redaction?.enabled === false });
+      known.set(sourceKey(meta.source.sha256, meta.source.select), {
+        id,
+        noRedact: meta.redaction?.enabled === false,
+      });
     }
   }
   return known;
@@ -645,18 +671,27 @@ function baseTreeFor(opts: Opts): BaseTree | null | undefined {
   }
 }
 
+/**
+ * What an adapter is handed: a text log as its lines, or a file that is not
+ * text at all (a LangGraph checkpoint database) as its bytes.
+ */
+type NativeInput = { kind: "text"; raw: string; lines: string[] } | { kind: "bytes"; bytes: Uint8Array };
+
 /** Convert one native log into the store. Prints nothing; callers decide how much to say. */
 function importNativeLog(
   opts: Opts,
   path: string,
-  raw: string,
-  lines: string[],
+  input: NativeInput,
   known: Map<string, KnownSource>,
   redactCfg: RedactionConfig,
   base?: BaseTree,
 ): ImportOutcome {
-  const sha256 = sha256Hex(raw);
-  const hit = known.get(sha256);
+  const sha256 =
+    input.kind === "text"
+      ? sha256Hex(input.raw)
+      : sha256Hex(Buffer.from(input.bytes.buffer, input.bytes.byteOffset, input.bytes.byteLength));
+  const key = sourceKey(sha256, opts.thread);
+  const hit = known.get(key);
   // The source bytes alone stopped being a complete identity the moment
   // --no-redact made the stored output depend on a flag too. Re-import when
   // the requested mode differs from the stored one, so that re-importing
@@ -666,10 +701,21 @@ function importNativeLog(
     return { status: "unchanged", id: hit.id };
   }
 
-  const adapter = ADAPTERS.find((a) => a.detect(lines));
-  if (!adapter) return { status: "unrecognized" };
-
-  const converted = adapter.convert(lines, base ? { base } : undefined);
+  const convertOpts = {
+    ...(base ? { base } : {}),
+    ...(opts.thread !== undefined ? { select: opts.thread } : {}),
+  };
+  let adapter: Adapter | undefined;
+  let converted;
+  if (input.kind === "bytes") {
+    adapter = ADAPTERS.find((a) => a.detectBytes?.(input.bytes));
+    if (!adapter) return { status: "unrecognized" };
+    converted = adapter.convertBytes!(input.bytes, convertOpts);
+  } else {
+    adapter = ADAPTERS.find((a) => a.detect(input.lines));
+    if (!adapter) return { status: "unrecognized" };
+    converted = adapter.convert(input.lines, convertOpts);
+  }
   const redactions: RedactionCounts = {};
   // One pass, with the project's config. `redactCfg` is already the disabled
   // config under --no-redact, so redaction is off by that route rather than by
@@ -697,7 +743,13 @@ function importNativeLog(
     sessionId: converted.sessionId,
     adapter: { name: adapter.name, version: adapter.version },
     importedAt: new Date().toISOString(),
-    source: { path, sha256, bytes: statSync(path).size, records: converted.records },
+    source: {
+      path,
+      sha256,
+      bytes: statSync(path).size,
+      records: converted.records,
+      ...(opts.thread !== undefined ? { select: opts.thread } : {}),
+    },
     skipped: converted.skipped,
     redactions,
     ...(base
@@ -721,7 +773,7 @@ function importNativeLog(
     headHash: events[events.length - 1]!.hash,
   };
   writeSession(opts.dir, converted.sessionId, toJsonl(events), meta);
-  known.set(sha256, { id: converted.sessionId, noRedact: opts.noRedact });
+  known.set(key, { id: converted.sessionId, noRedact: opts.noRedact });
   return {
     status: previous ? "updated" : "imported",
     id: converted.sessionId,
@@ -914,7 +966,24 @@ function importPath(opts: Opts, target: string): number {
     }
     path = inner;
   }
-  const raw = readNativeLog(path);
+  // A runtime whose log is not text (a LangGraph checkpoint database) is
+  // recognized from its bytes, before anything tries to read it as UTF-8.
+  const bytes = readFileSync(path);
+  if (ADAPTERS.some((a) => a.detectBytes?.(bytes))) {
+    const stale = walSidecarWarning(path);
+    if (stale !== null) {
+      console.error(stale);
+      return 1;
+    }
+    const redactCfg = redactionConfigFor(opts);
+    if (redactCfg === null) return 2;
+    return printImportReport(
+      opts,
+      importNativeLog(opts, path, { kind: "bytes", bytes }, knownSources(opts.dir), redactCfg),
+    );
+  }
+
+  const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
 
   // Adoption gets the unfiltered text: dropping blank lines first would both
@@ -928,7 +997,7 @@ function importPath(opts: Opts, target: string): number {
   if (redactCfg === null) return 2;
   return printImportReport(
     opts,
-    importNativeLog(opts, path, raw, lines, knownSources(opts.dir), redactCfg, base),
+    importNativeLog(opts, path, { kind: "text", raw, lines }, knownSources(opts.dir), redactCfg, base),
   );
 }
 
@@ -1004,7 +1073,7 @@ function cmdImportDiscovered(opts: Opts): number {
       const lines = raw.split("\n").filter((l) => l.trim() !== "");
       outcome = looksLikeAgitLog(lines)
         ? { status: "unrecognized" }
-        : importNativeLog(opts, log.path, raw, lines, known, redactCfg, discoveredBase);
+        : importNativeLog(opts, log.path, { kind: "text", raw, lines }, known, redactCfg, discoveredBase);
     } catch (err) {
       tally.failed++;
       console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -2976,6 +3045,18 @@ async function cmdShare(opts: Opts): Promise<number> {
   let nativePath: string | null = null;
   let staticEvents: AgitEvent[] | null = null;
   if (existsSync(resolve(target)) && !listSessionIds(opts.dir).includes(target)) {
+    // A database is imported, not tailed: there is no line-oriented log to
+    // follow, and the adapter that reads it takes bytes.
+    if (
+      statSync(resolve(target)).isFile() &&
+      ADAPTERS.some((a) => a.detectBytes?.(readFileSync(resolve(target))))
+    ) {
+      console.error(
+        `${target} is a database, not a log: import it first (agit import ${target} [--thread ID]),`,
+      );
+      console.error("then share the session id.");
+      return 2;
+    }
     nativePath = resolve(target);
   } else {
     const id = resolveSessionId(opts.dir, target);

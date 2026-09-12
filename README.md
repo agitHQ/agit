@@ -41,9 +41,12 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `.agit/sessions/<id>/events.jsonl`, or **adopt** an agit log someone sent
   you (a `pr` bundle, a downloaded share log) — auto-detected, verified
   before it is stored, and kept byte for byte so the sender's hashes still
-  check out. Two adapters for native logs, also auto-detected:
-  **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`) and
-  **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`) — the
+  check out. Adapters for native logs, also auto-detected:
+  **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`),
+  **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`),
+  **OpenClaw**, **Cline SDK**, **ATIF** trajectories, and **LangGraph**
+  checkpoint databases (`agit import checkpoints.sqlite`, one thread per
+  session; `--thread <id>` picks one when a database holds several) — the
   same event log, the same verbs, whichever agent produced the session.
   `agit import --all` finds every session those runtimes have written on
   this machine (`~/.claude/projects`, `~/.codex/sessions`,
@@ -299,12 +302,13 @@ fall out of that chain.
 
 Said plainly:
 
-- **Five adapters, with different limits.** Claude Code is the reference;
+- **Six adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
-  matching rules. ATIF is a standard rather than a runtime, and Cline's SDK
-  format is a published contract; neither carries file content agit can
-  hash — see below.
+  matching rules. ATIF is a standard rather than a runtime, Cline's SDK
+  format is a published contract, and LangGraph's checkpoint database is
+  read from the runtime's own serialization; none of the three carries file
+  content agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -379,6 +383,23 @@ Said plainly:
   lines. Every `editor` and `apply_patch` call is counted in the import report
   as an edit agit cannot verify. The older VS Code globalStorage layout is
   undocumented and unversioned and is deliberately not read.
+- **A LangGraph import is the thread's current history, and no more.**
+  `agit import <checkpoints.sqlite>` reads what `langgraph-checkpoint-sqlite`
+  wrote — the SQLite file itself, with a zero-dependency reader for the file
+  format and for the msgpack the checkpointer serializes with — and maps the
+  `messages` channel (LangChain messages: human, AI with tool calls and
+  usage, tool results) onto the event log. What it follows is the parent
+  chain from the checkpoint the runtime itself treats as current; a branch
+  abandoned by `update_state`, a subgraph's own checkpoints, and any other
+  thread in the file are counted, not imported. LangGraph has no file-edit
+  construct, so there is no `file.diff` and nothing for `blame`, `fork`,
+  `merge` or `diff` to work with; a message has no timestamp of its own and
+  is dated by the checkpoint that first held it, which the report says. A
+  database still open in WAL mode keeps its newest pages in the `-wal`
+  sidecar; agit refuses such a file rather than read a stale one as
+  current. Graphs whose state has no `messages` channel, the beta
+  `DeltaChannel` snapshot form, and `pickle` checkpoints are refused or
+  counted by name.
 - **A signature does not prove when, and does not prove truth.**
   `agit sign` binds a head to a key, which is what the chain alone could
   never do. The timestamp inside it is signed, so it cannot be edited

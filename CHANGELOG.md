@@ -7,6 +7,26 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **LangGraph adapter.** `agit import <checkpoints.sqlite>` reads the
+  database `langgraph-checkpoint-sqlite` writes and imports one thread's
+  current history — human, AI (with tool calls and usage), and tool messages
+  from the `messages` channel — as an ordinary session. The file is read
+  directly: a zero-dependency SQLite reader (`src/sqlite.ts`: header, table
+  b-trees, overflow chains, the record format) and a MessagePack decoder
+  (`src/msgpack.ts`) for the checkpointer's serialization, each derived from
+  its format document and validated against fixtures the real runtime
+  wrote. The history followed is the parent chain from the checkpoint the
+  saver itself returns as current; abandoned branches, subgraph namespaces
+  and other threads are counted. `--thread <id>` picks a thread when a
+  database holds several (the import refuses and lists them otherwise), and
+  a database whose `-wal` sidecar holds unapplied pages is refused rather
+  than read stale. No `file.diff` — LangGraph has no file-edit construct —
+  and messages are dated by the checkpoint that first held them, counted.
+  Adapters may now be binary (`detectBytes` / `convertBytes` on the
+  interface), and `ConvertOptions.select` names a session within a file;
+  `meta.json`'s `source` records it, so two threads from one file are two
+  sessions rather than one "already imported".
+
 - **`agit share --steer`: teammates can redirect the agent, not just watch
   it.** The share prints a steer key next to the link; a viewer who enters it
   — on the page, or with `agit steer <link> "<text>" --steer-key K` from a
