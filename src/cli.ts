@@ -28,7 +28,7 @@ import { writeFork } from "./fork.js";
 import { renderSessionHtml } from "./html.js";
 import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
 import { discoverSessionLogs, parseSince } from "./discover.js";
-import { buildMatcher, grepEvents, GrepPatternError, renderHit } from "./grep.js";
+import { buildMatcher, grepEvents, GrepPatternError, renderHit, type GrepHit } from "./grep.js";
 import { mergeFork, readForkInfo } from "./merge.js";
 import { loadBaseTree, BaseTreeError, type BaseTree } from "./base.js";
 import {
@@ -1035,7 +1035,21 @@ function adoptBundle(opts: Opts, path: string, raw: string): number {
   }
 
   const jsonl = raw; // byte for byte, exactly as the origin published it
-  if (listSessionIds(opts.dir).includes(id)) {
+  // A session id that differs from an existing one only in case is treated as
+  // the same session on every platform, not just the ones where the
+  // filesystem would fold them. On NTFS and APFS an exact-match check let a
+  // log for "DEMO-..." land in the directory for "demo-...", replacing its
+  // events.jsonl under the old meta.json; the store also has to survive being
+  // copied to such a filesystem. The id comes from the log, which on a pull
+  // comes from the relay, so this is an attacker's choice to make.
+  const clash = listSessionIds(opts.dir).find((x) => x.toLowerCase() === id.toLowerCase());
+  if (clash !== undefined && clash !== id) {
+    console.error(
+      `refusing to adopt: session ${id} differs only in case from ${clash}, which already exists here`,
+    );
+    return 1;
+  }
+  if (clash === id) {
     // Re-adopting the same bundle is a no-op; a different log under the same
     // id is someone else's session and is never overwritten.
     const existing = readFileSync(join(sessionDir(opts.dir, id), "events.jsonl"), "utf8");
@@ -2382,10 +2396,18 @@ function cmdGrep(opts: Opts): number {
       continue;
     }
     searched++;
-    for (const hit of grepEvents(id, events, matches, {
-      type: opts.grepType,
-      path: opts.grepPath,
-    })) {
+    // Render per session as well as parse per session: an event that parses
+    // but cannot be rendered used to throw out of this loop and end the whole
+    // search, with hits from every earlier session already printed and every
+    // later one lost.
+    let sessionHits: GrepHit[];
+    try {
+      sessionHits = grepEvents(id, events, matches, { type: opts.grepType, path: opts.grepPath });
+    } catch {
+      console.error(`skipping ${id.slice(0, idWidth)}: an event cannot be rendered (agit verify it)`);
+      continue;
+    }
+    for (const hit of sessionHits) {
       if (opts.json) process.stdout.write(JSON.stringify(hit) + "\n");
       else console.log(renderHit(hit, idWidth));
       total++;
@@ -2793,6 +2815,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
 
   const inbox = openShareInbox(opts.relay, share);
+  let keepOpen = false;
   try {
     if (staticEvents) {
       await pushAll(opts.relay, share, staticEvents);
@@ -2813,11 +2836,26 @@ async function cmdShare(opts: Opts): Promise<number> {
     await pushAll(opts.relay, share, initial);
     console.log(`live: ${initial.length} events so far, tailing ${nativePath}`);
     return await liveLoop(opts.relay, share, follower, initial.length);
+  } catch (err) {
+    if (err instanceof UndeliveredError) {
+      // The log is fine; the relay is not. Ending the share here would make
+      // the events it never received unrecoverable, and deleting the state
+      // would make the resume hint a lie. Leave both, say so, exit 1.
+      keepOpen = true;
+      console.error(err.message);
+      console.error(
+        `the share is still open and resumable: agit share --resume ${share.shareId.slice(0, 8)}`,
+      );
+      return 1;
+    }
+    throw err;
   } finally {
     inbox.abort();
-    await endShare(opts.relay, share);
-    deleteShareState(opts.dir, share.shareId);
-    console.log("share ended.");
+    if (!keepOpen) {
+      await endShare(opts.relay, share);
+      deleteShareState(opts.dir, share.shareId);
+      console.log("share ended.");
+    }
   }
 }
 
@@ -2913,6 +2951,17 @@ async function cmdShareResume(opts: Opts): Promise<number> {
       console.error(err instanceof Error ? err.message : String(err));
       return 1;
     }
+    if (err instanceof UndeliveredError) {
+      // Same as a first-run share: the relay stopped taking events, the log
+      // is fine, so the share stays open and the state stays for another
+      // resume.
+      attached = false;
+      console.error(err.message);
+      console.error(
+        `the share is still open and resumable: agit share --resume ${share.shareId.slice(0, 8)}`,
+      );
+      return 1;
+    }
     throw err;
   } finally {
     inbox.abort();
@@ -2947,6 +2996,15 @@ function openShareInbox(relayUrl: string, share: ShareInfo): AbortController {
 }
 
 /** Tail the native log until Ctrl+C (or a stability failure), then seal the stream. */
+/**
+ * Thrown by liveLoop when events were polled but never accepted by the relay.
+ * The share is left open and its resume state kept, because the log on disk
+ * is fine and a later `agit share --resume` can deliver the rest. Distinct
+ * from StabilityError, where the log itself is compromised and ending the
+ * share is the right thing.
+ */
+class UndeliveredError extends Error {}
+
 async function liveLoop(
   relayUrl: string,
   share: ShareInfo,
@@ -2956,19 +3014,50 @@ async function liveLoop(
   let pushed = alreadyPushed;
   let ticking = false;
   let fatal: Error | null = null;
+  // Events the follower has handed over but the relay has not yet accepted.
+  // poll() advances the follower, so an event it returns will never be
+  // returned again; if the push that carried it failed, it used to be gone.
+  // The relay then answered 409 to every later push for the rest of the share
+  // (its contiguity check doing its job), the catch below swallowed each one,
+  // and the sharer saw nothing while viewers stopped receiving events.
+  let pending: AgitEvent[] = [];
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 30;
+
   const timer = setInterval(() => {
     if (ticking || fatal) return;
     ticking = true;
     void (async () => {
       try {
-        const fresh = follower.poll();
-        await pushAll(relayUrl, share, fresh);
-        pushed += fresh.length;
+        pending.push(...follower.poll());
+        if (pending.length > 0) {
+          await pushAll(relayUrl, share, pending);
+          pushed += pending.length;
+          pending = [];
+          if (consecutiveFailures > 0) console.error("relay reachable again; caught up.");
+          consecutiveFailures = 0;
+        }
       } catch (err) {
         if (err instanceof StabilityError) {
           fatal = err;
+          return;
         }
-        // Other errors (relay hiccup, file mid-write) retry next tick.
+        // A relay hiccup keeps `pending` intact for the next tick. Say so
+        // rather than retrying in silence, and give up rather than retrying
+        // forever, because a share that has not delivered anything for half
+        // a minute is not the live share the viewer thinks they are watching.
+        consecutiveFailures++;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (consecutiveFailures === 1 || consecutiveFailures % 10 === 0) {
+          console.error(
+            `push failed (${consecutiveFailures}x): ${msg} — ${pending.length} event(s) waiting, retrying`,
+          );
+        }
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          fatal = new UndeliveredError(
+            `giving up after ${consecutiveFailures} consecutive push failures; ${pending.length} event(s) were never delivered.`,
+          );
+        }
       } finally {
         ticking = false;
       }
@@ -2978,19 +3067,29 @@ async function liveLoop(
   await waitForSigint(() => fatal !== null);
   clearInterval(timer);
   if (fatal !== null) {
+    if ((fatal as Error) instanceof UndeliveredError) throw fatal as Error;
     console.error((fatal as Error).message);
     return 1;
   }
   try {
-    const tail = follower.finish();
+    const tail = [...pending, ...follower.finish()];
+    pending = [];
     await pushAll(relayUrl, share, tail);
     pushed += tail.length;
     if (tail.length > 0)
       console.log(
         `sealed the stream with its final ${tail.length} events — it now matches a full import exactly.`,
       );
-  } catch {
-    /* best effort on shutdown */
+  } catch (err) {
+    // Tampering detected at the very end is still tampering and ends the
+    // share. A network failure on the way out leaves it open for resume.
+    if (err instanceof StabilityError) {
+      console.error(err.message);
+      return 1;
+    }
+    throw new UndeliveredError(
+      `could not push the final events: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
   console.log(`shared ${pushed} events total.`);
   return 0;

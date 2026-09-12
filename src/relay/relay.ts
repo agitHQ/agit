@@ -324,15 +324,20 @@ export function startRelay(opts: RelayOptions = {}): Promise<RelayHandle> {
       last = ev.hash;
       seq++;
     }
-    for (const { line } of parsed) share.events.push(line);
-    share.lastHash = last;
-    // Written before the broadcast: a viewer must never see an event that
-    // would vanish on restart.
+    // Persist FIRST, then advance memory. The other order let a failed write
+    // (ENOSPC, EPERM, an antivirus holding the file) return 500 while the
+    // in-memory head had already moved: /head then advertised events the disk
+    // did not hold, a retry of the same batch was refused as a duplicate, and
+    // the writer's next push landed after a gap, leaving a hole in the on-disk
+    // chain that a restart served as seqs [0,1,2,6,7,8]. If the append throws
+    // now, nothing has changed and the client's retry is exactly right.
     store?.append(
       share.id,
       parsed.map((x) => x.line),
       last,
     );
+    for (const { line } of parsed) share.events.push(line);
+    share.lastHash = last;
     for (const v of share.viewers) {
       for (let i = share.events.length - parsed.length; i < share.events.length; i++)
         sendEvent(v, i, share.events[i]!);

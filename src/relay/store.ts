@@ -23,15 +23,20 @@
  */
 
 import {
+  appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
+  statSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Everything about a share that outlives the process. Viewers do not. */
@@ -56,6 +61,37 @@ export interface RelayStore {
   append(id: string, lines: string[], lastHash: string | null): void;
   setEnded(id: string, ended: boolean): void;
   remove(id: string): void;
+}
+
+function parses(line: string): boolean {
+  try {
+    JSON.parse(line);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Cut a file back to just after its last newline, discarding a torn final line. */
+function truncateToLastCompleteLine(p: string): void {
+  const buf = readFileSync(p);
+  const cut = buf.lastIndexOf(0x0a);
+  truncateSync(p, cut === -1 ? 0 : cut + 1);
+}
+
+/** True if the file is absent, empty, or ends in a newline — the states an append may follow. */
+function endsWithNewline(p: string): boolean {
+  if (!existsSync(p)) return true;
+  const size = statSync(p).size;
+  if (size === 0) return true;
+  const fd = openSync(p, "r");
+  try {
+    const b = Buffer.alloc(1);
+    readSync(fd, b, 0, 1, size - 1);
+    return b[0] === 0x0a;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Share ids are base64url from the relay; refuse anything that could escape the directory. */
@@ -104,6 +140,22 @@ export function openRelayStore(dir: string): RelayStore {
             events = readFileSync(eventsPath(id), "utf8")
               .split("\n")
               .filter((l) => l.trim() !== "");
+            // A crash mid-append leaves a partial last line. Serving it as an
+            // event made the count and the head disagree — /head reported N+1
+            // events with the hash of event N-1 — and because the torn line
+            // has no newline, the next accepted push was appended onto it and
+            // lost on the following restart. A torn tail is dropped, and only
+            // the tail: an unparseable line anywhere else is a real corruption
+            // that verify will name, not something to silently skip past.
+            const last = events[events.length - 1];
+            if (last !== undefined && !parses(last)) {
+              events.pop();
+              // Remove it from the file too. Dropping it from memory alone
+              // left it on disk, where the next append put it on its own line
+              // and the load after that served it as an event mid-chain.
+              truncateToLastCompleteLine(eventsPath(id));
+              console.error(`relay store: ${id} ended in a partial line (crash mid-write?); dropped it`);
+            }
           }
         } catch {
           console.error(`relay store: ${id} has unreadable events, serving what loaded`);
@@ -120,8 +172,12 @@ export function openRelayStore(dir: string): RelayStore {
 
     append(id: string, lines: string[], lastHash: string | null): void {
       if (!safeId(id) || lines.length === 0) return;
-      // Append-only, matching the thing being stored.
-      appendFileSync(eventsPath(id), lines.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
+      // Append-only, matching the thing being stored. If the file does not
+      // end in a newline (a torn tail that load() already dropped from
+      // memory), start on a fresh line rather than gluing onto the fragment.
+      const p = eventsPath(id);
+      const lead = endsWithNewline(p) ? "" : "\n";
+      appendFileSync(p, lead + lines.join("\n") + "\n", { encoding: "utf8", mode: 0o600 });
       try {
         const meta = JSON.parse(readFileSync(metaPath(id), "utf8")) as PersistedShare;
         writeMeta({ ...meta, lastHash });

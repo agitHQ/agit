@@ -439,7 +439,18 @@ function doGrep(dir: string, params: Record<string, unknown>): unknown {
       continue;
     }
     const verified = statusOf(dir, id).verified;
-    for (const hit of grepEvents(id, events, matches, { type, path: params.path === true })) {
+    // Rendering is per session too. A payload that parses but cannot be
+    // rendered (a null block inside an otherwise valid event) used to throw
+    // out of this loop and fail the whole search, losing hits from every
+    // healthy session. One bad session costs one session.
+    let sessionHits: GrepHit[];
+    try {
+      sessionHits = grepEvents(id, events, matches, { type, path: params.path === true });
+    } catch {
+      unreadable.push(id);
+      continue;
+    }
+    for (const hit of sessionHits) {
       found++;
       if (hits.length < limit) hits.push({ ...hit, verified });
     }
