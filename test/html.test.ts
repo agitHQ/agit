@@ -165,6 +165,19 @@ describe("renderSessionHtml", () => {
     }
   });
 
+  it("includes a search box, a type filter and a match count in the navbar", () => {
+    const html = renderSessionHtml([event(0, "session.start", { runtime: "claude" })]);
+    expect(html).toContain('id="searchBox"');
+    expect(html).toContain('id="typeFilter"');
+    expect(html).toContain('id="matchCount"');
+    // Wired up, not just markup: the filter functions and their listeners exist.
+    expect(html).toContain("function applyFilter()");
+    expect(html).toContain("function populateTypeFilter()");
+    expect(html).toContain("function jumpToMatch(");
+    expect(html).toContain('searchBox.addEventListener("input", applyFilter)');
+    expect(html).toContain('typeFilter.addEventListener("change", applyFilter)');
+  });
+
   it("embeds related sessions (a spawned subagent, or the parent that spawned this one)", () => {
     const parentEvents = [
       event(0, "session.start", { runtime: "claude" }),

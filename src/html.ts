@@ -62,6 +62,17 @@ h1 { margin: 0 0 6px; font-size: 18px; }
 }
 #navbar button:hover { background: #30363d; }
 #navbar .label { color: #8b949e; font-size: 12px; }
+#searchBox, #typeFilter {
+  font: inherit;
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+#searchBox { flex: 1; min-width: 120px; }
+#matchCount { white-space: nowrap; }
+.row[hidden] { display: none; }
 .openSub {
   font: inherit;
   cursor: pointer;
@@ -181,6 +192,9 @@ pre .hunk { color: #d2a8ff; }
   <div id="navbar">
     <span id="navLabel" class="label"></span>
     <button id="parentBtn" style="display:none"></button>
+    <input id="searchBox" type="text" placeholder="filter events… (Enter: next, Shift+Enter: prev)">
+    <select id="typeFilter"></select>
+    <span id="matchCount" class="label"></span>
   </div>
 </header>
 
@@ -226,6 +240,9 @@ var metaBox = document.getElementById("meta");
 var fileList = document.getElementById("flist");
 var navLabel = document.getElementById("navLabel");
 var parentBtn = document.getElementById("parentBtn");
+var searchBox = document.getElementById("searchBox");
+var typeFilter = document.getElementById("typeFilter");
+var matchCount = document.getElementById("matchCount");
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -576,6 +593,84 @@ function renderNav() {
   }
 }
 
+function populateTypeFilter() {
+  var prev = typeFilter.value || "all";
+  var seen = {};
+  var types = [];
+
+  events.forEach(function (e) {
+    if (!seen[e.type]) {
+      seen[e.type] = true;
+      types.push(e.type);
+    }
+  });
+
+  types.sort();
+
+  typeFilter.textContent = "";
+  typeFilter.appendChild(el("option", "", "all types"));
+  typeFilter.firstChild.value = "all";
+
+  types.forEach(function (t) {
+    var opt = el("option", "", t);
+    opt.value = t;
+    typeFilter.appendChild(opt);
+  });
+
+  typeFilter.value = seen[prev] ? prev : "all";
+}
+
+function matchesFilter(e, q, type) {
+  if (type !== "all" && e.type !== type) return false;
+  if (!q) return true;
+  return (e.type + " " + summary(e)).toLowerCase().indexOf(q) !== -1;
+}
+
+function applyFilter() {
+  var q = searchBox.value.trim().toLowerCase();
+  var type = typeFilter.value || "all";
+  var rows = timeline.children;
+  var visible = 0;
+
+  for (var i = 0; i < events.length; i++) {
+    var ok = matchesFilter(events[i], q, type);
+    if (rows[i]) rows[i].hidden = !ok;
+    if (ok) visible++;
+  }
+
+  matchCount.textContent = visible + "/" + events.length;
+}
+
+function jumpToMatch(dir) {
+  var rows = Array.prototype.filter.call(timeline.children, function (r) {
+    return !r.hidden;
+  });
+  if (!rows.length) return;
+
+  var curIdx = -1;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].classList.contains("sel")) curIdx = i;
+  }
+
+  var nextIdx = curIdx === -1
+    ? 0
+    : dir === "prev"
+      ? (curIdx - 1 + rows.length) % rows.length
+      : (curIdx + 1) % rows.length;
+
+  var target = rows[nextIdx];
+  select(Number(target.dataset.seq));
+  target.scrollIntoView({ block: "nearest" });
+}
+
+searchBox.addEventListener("input", applyFilter);
+typeFilter.addEventListener("change", applyFilter);
+searchBox.addEventListener("keydown", function (ev) {
+  if (ev.key !== "Enter") return;
+  ev.preventDefault();
+  jumpToMatch(ev.shiftKey ? "prev" : "next");
+});
+
 /**
  * Switch the whole view to another embedded session — a spawned subagent,
  * or (via the parent button) up to the session that spawned this one. The
@@ -597,6 +692,8 @@ function loadSession(id) {
   renderFiles();
   renderMeta();
   renderNav();
+  populateTypeFilter();
+  applyFilter();
 
   if (events.length > 0) {
     select(events[0].seq);
