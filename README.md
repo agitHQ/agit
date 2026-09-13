@@ -48,15 +48,17 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
   trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
-  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), and **OpenCode**'s
-  session database (`agit import ~/.local/share/opencode/opencode.db`) —
-  the same event log,
+  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
+  logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
+  **OpenCode**'s session database
+  (`agit import ~/.local/share/opencode/opencode.db`) — the same event log,
   the same verbs, whichever agent produced the session. A database holds sessions rather
   than a session: every one in it is imported, one line each, and
   `--thread <id>` names just one. `agit import --all` finds every session
   those runtimes have written on this machine (`~/.claude/projects`,
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
   database beside them, `~/.gemini/tmp/*/chats`,
+  `~/.kimi/sessions/*/*/wire.jsonl`,
   `~/.local/share/opencode/opencode*.db`) and imports what is new;
   `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
@@ -320,14 +322,15 @@ fall out of that chain.
 
 Said plainly:
 
-- **Eight adapters, with different limits.** Claude Code is the reference;
+- **Nine adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. ATIF is a standard rather than a runtime, Cline's SDK
   format is a published contract, LangGraph's and OpenCode's databases are
-  read from each runtime's own schema, and Gemini CLI's recording is folded
-  the way its own loader folds it; none of the five carries file content
-  agit can hash — see below.
+  read from each runtime's own schema, Gemini CLI's recording is folded the
+  way its own loader folds it, and Kimi Code's wire log is folded the way
+  its own replay folds it; none of the six carries file content agit can
+  hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -417,6 +420,21 @@ Said plainly:
   legacy single-document `.json` form is read too. Derived from the source
   and checked against a fixture built to it; a real recording that
   disagrees names its unmapped records in the import report.
+- **A Kimi Code import reads the wire, not the context.** Kimi keeps a
+  session's model context in `context.jsonl` (no timestamps) and its event
+  stream in `wire.jsonl` (each record stamped); `agit import wire.jsonl`
+  reads the latter, folding it the way Kimi's own replay does — streamed
+  text and thinking pieces merge into one assistant message per step, a
+  tool call's argument parts fold into it, the step's `token_usage` becomes
+  its `cost`, and a `/clear` turn drops what came before. The session id
+  is the directory the file sits in, as Kimi's docs say; the wire names no
+  model and no working directory, so both are null rather than guessed.
+  Interrupted and retried steps, notifications, approvals and every other
+  wire message agit has no event for are counted by name, as is a diff
+  display block — a viewer's excerpt of an edit, not the file — so there
+  is no `file.diff`. Derived from the source and checked against a fixture
+  built to it; a real wire log that disagrees names its unmapped messages
+  in the import report.
 - **An OpenCode import has no file history either.** `agit import
   opencode.db` reads the `session`, `message` and `part` tables OpenCode
   writes (its drizzle schema and generated DDL, its v1 session schema for

@@ -26,6 +26,18 @@
  *                 trajectory artifacts (`*.trajectory.jsonl`), and archives
  *                 (`*.jsonl.deleted…` / `.reset…` / `.bak…`, which do not end
  *                 in `.jsonl` and so never match).
+ *  - Gemini CLI   ~/.gemini/tmp/<project>/chats/session-*.jsonl, a subagent's
+ *                 under chats/<parent session id>/<id>.jsonl, and the legacy
+ *                 single-document session-*.json — ChatRecordingService in
+ *                 packages/core/src/services/chatRecordingService.ts and
+ *                 Storage.getProjectTempDir() in packages/core/src/config/
+ *                 storage.ts (the global runtime dir is ~/.gemini).
+ *  - Kimi Code    $KIMI_SHARE_DIR (default ~/.kimi)/sessions/<md5 of the work
+ *                 dir>/<session id>/wire.jsonl, and a subagent's under
+ *                 <session id>/subagents/<agent id>/wire.jsonl —
+ *                 docs/en/configuration/data-locations.md and
+ *                 src/kimi_cli/session.py. context.jsonl beside it is the
+ *                 model context, without timestamps, and is not a log.
  *
  * Discovery is a directory listing, nothing more: no daemon, no hooks, no
  * state of its own. Retroactive import stays the default — a log written
@@ -157,6 +169,31 @@ function xdgDataDir(home: string, env: NodeJS.ProcessEnv): string {
   return override ? resolve(override) : join(home, ".local", "share");
 }
 
+/** Kimi Code: sessions/<work dir hash>/<session id>/wire.jsonl, and each subagent's below it. */
+function scanKimiCode(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const workDir of listDir(sessionsRoot)) {
+    const byHash = join(sessionsRoot, workDir);
+    if (!isDir(byHash)) continue;
+    for (const session of listDir(byHash)) {
+      const dir = join(byHash, session);
+      const wire = join(dir, "wire.jsonl");
+      if (isFile(wire)) record("kimi-code", wire, out);
+      const subagents = join(dir, "subagents");
+      if (!isDir(subagents)) continue;
+      for (const agent of listDir(subagents)) {
+        const sub = join(subagents, agent, "wire.jsonl");
+        if (isFile(sub)) record("kimi-code", sub, out);
+      }
+    }
+  }
+}
+
+/** The share dir Kimi Code itself would use: the env override, else ~/.kimi. */
+function kimiShareDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.KIMI_SHARE_DIR?.trim();
+  return override ? resolve(override) : join(home, ".kimi");
+}
+
 /** The state dir OpenClaw itself would use: the env override, else ~/.openclaw. */
 function openClawStateDir(home: string, env: NodeJS.ProcessEnv): string {
   const override = env.OPENCLAW_STATE_DIR?.trim();
@@ -181,6 +218,7 @@ export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = proce
     { runtime: "openclaw", dir: join(openClawStateDir(home, env), "agents"), scan: scanOpenClaw },
     { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
     { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
+    { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
   ];
   const logs: DiscoveredLog[] = [];
   const roots: ScanRoot[] = [];

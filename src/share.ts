@@ -137,7 +137,7 @@ export class SessionFollower {
     let drafts: DraftEvent[];
     let sessionId: string;
     try {
-      const res = this.adapter.convert(lines, { live });
+      const res = this.adapter.convert(lines, { live, path: this.path });
       drafts = res.drafts;
       sessionId = res.sessionId;
     } catch {
