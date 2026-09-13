@@ -35,6 +35,7 @@
 
 import { createHash } from "node:crypto";
 import type { AgitEvent, Json, SessionMeta } from "./format/events.js";
+import { fileStateAt } from "./state.js";
 import { verifySignature } from "./sign.js";
 
 // --- shared -----------------------------------------------------------------
@@ -711,4 +712,169 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
       agitVerifyWith: `agit verify ${sessionId}`,
     },
   };
+}
+
+// --- Markdown ------------------------------------------------------------
+
+/**
+ * Inline code that stays inline whatever the text holds: a run of backticks
+ * one longer than any inside, and a space on each side when the text starts
+ * or ends with one (CommonMark strips exactly one). A tool name or path
+ * with a backtick in it used to close the span and turn the rest into
+ * Markdown structure.
+ */
+function inlineCode(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  const ticks = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+}
+
+/** A fenced block whose fence is longer than any backtick run inside it. */
+function fenced(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  const ticks = "`".repeat(Math.max(3, longest + 1));
+  return `${ticks}\n${text}\n${ticks}`;
+}
+
+/** A GFM table cell: a pipe would end it, a newline would end the row. */
+function cell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+/**
+ * A session as a Markdown audit report — the view that drops into a PR
+ * body or a review ticket. A fold over the stored events, like the other
+ * exporters, and refused for an unverified session by the same gate.
+ *
+ * Everything a log contributes is untrusted text: message bodies and tool
+ * output go into fenced blocks, names and paths into inline code, both
+ * built so the text cannot close them; a table cell escapes its pipes. An
+ * "audit" that let a user message turn itself into a heading, or a file
+ * the agent read aloud plant a tracking image, would be worse than none.
+ *
+ * Token totals come from the cost events' `usage` (SPEC §5.9), all four
+ * counts, the same fold `agit stats` runs. The file list is the structured
+ * edits the log holds and says so (SPEC §5.7). The report states what the
+ * store established about the log — chain verified, signatures and their
+ * verdicts — rather than leaving a reader to assume it.
+ */
+export function toMarkdown(events: AgitEvent[], meta: SessionMeta | null): string {
+  const sessionId = events[0]?.session ?? meta?.sessionId ?? "unknown";
+  const runtime = firstOf(events, "session.start", "runtime") ?? "unknown";
+  const runtimeVersion = firstOf(events, "session.start", "runtimeVersion");
+  const cwd = firstOf(events, "session.start", "cwd");
+  const first = events[0];
+  const last = events[events.length - 1];
+
+  const out: string[] = [];
+  out.push(`# Session audit: ${inlineCode(sessionId)}`, "");
+  out.push(`- **Runtime**: ${inlineCode(runtime)}${runtimeVersion ? ` ${inlineCode(runtimeVersion)}` : ""}`);
+  if (cwd !== null) out.push(`- **Working directory**: ${inlineCode(cwd)}`);
+  if (first && last) out.push(`- **Span**: ${first.ts} to ${last.ts}`);
+  out.push(`- **Events**: ${events.length}`);
+  if (last) out.push(`- **Head hash**: ${inlineCode(last.hash)}`);
+  // `agit export` refuses a session whose chain does not verify, so a
+  // report that exists is a report over a verified chain.
+  out.push(`- **Chain**: verified, ${events.length} event${events.length === 1 ? "" : "s"} hash-linked`);
+  const sigs = signatureVerdicts(meta);
+  if (sigs.length === 0) {
+    out.push("- **Signatures**: none (unsigned)");
+  } else {
+    for (const s of sigs) {
+      out.push(
+        `- **Signature**: ${s.ok ? "verifies" : "DOES NOT MATCH"} — key ${inlineCode(s.keyFingerprint ?? "(unreadable)")}` +
+          (s.at !== null ? ` at ${s.at}` : ""),
+      );
+    }
+  }
+  if (meta?.importedAt) out.push(`- **Imported**: ${meta.importedAt}`);
+  out.push("");
+
+  // Usage: the same fold as `agit stats`, over the four counts SPEC §5.9 names.
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  const models = new Set<string>();
+  let calls = 0;
+  for (const e of events) {
+    if (e.type !== "cost") continue;
+    calls++;
+    const u = usageOf(e);
+    usage.inputTokens += u.inputTokens ?? 0;
+    usage.outputTokens += u.outputTokens ?? 0;
+    usage.cacheReadInputTokens += u.cacheReadInputTokens ?? 0;
+    usage.cacheCreationInputTokens += u.cacheCreationInputTokens ?? 0;
+    const model = str(payload(e).model);
+    if (model !== null) models.add(model);
+  }
+  if (calls > 0) {
+    const n = (v: number): string => v.toLocaleString("en-US");
+    out.push("## Usage", "");
+    out.push(
+      `- **Models**: ${models.size > 0 ? [...models].sort().map(inlineCode).join(", ") : "(not recorded)"}`,
+    );
+    out.push(`- **API messages**: ${calls}`);
+    out.push(`- **Input tokens**: ${n(usage.inputTokens)}`);
+    out.push(`- **Output tokens**: ${n(usage.outputTokens)}`);
+    out.push(`- **Cache read tokens**: ${n(usage.cacheReadInputTokens)}`);
+    out.push(`- **Cache creation tokens**: ${n(usage.cacheCreationInputTokens)}`);
+    out.push("");
+  }
+
+  // Files: the same fold `show` and `ls` use — created or modified over the
+  // session, deleted if a structured deletion ended it, with the edit count.
+  const files = [...fileStateAt(events).values()].sort((a, b) => a.path.localeCompare(b.path));
+  if (files.length > 0) {
+    out.push("## Files touched", "");
+    out.push("| Action | Path | Edits |", "|---|---|---|");
+    for (const f of files) {
+      const action = f.deletedAtSeq !== undefined ? "delete" : f.kind;
+      out.push(`| ${cell(inlineCode(action))} | ${cell(inlineCode(f.path))} | ${f.edits} |`);
+    }
+    out.push("");
+    out.push(
+      "> Structured edits only (SPEC §5.7): a file changed through a shell command leaves no record, " +
+        "so this is a lower bound on what the session touched, not the complete set.",
+      "",
+    );
+  }
+
+  // Timeline: messages fenced, tool calls named, results by outcome. A
+  // heading after a run of list items gets the blank line Markdown wants.
+  out.push("## Timeline", "");
+  const heading = (h: string): void => {
+    if (out[out.length - 1] !== "") out.push("");
+    out.push(h, "");
+  };
+  for (const e of events) {
+    const p = payload(e);
+    switch (e.type) {
+      case "message.user":
+        heading(`### ${e.seq} · user · ${e.ts}`);
+        out.push(fenced(str(p.text) ?? ""), "");
+        break;
+      case "message.assistant": {
+        const { text, thinking } = assistantText(e);
+        const model = str(p.model);
+        heading(`### ${e.seq} · assistant · ${e.ts}${model !== null ? ` · ${inlineCode(model)}` : ""}`);
+        if (thinking !== "") out.push("Thinking:", "", fenced(thinking), "");
+        if (text !== "") out.push(fenced(text), "");
+        break;
+      }
+      case "tool.call":
+        out.push(`- **${e.seq} tool call** ${inlineCode(str(p.name) ?? "unknown")}`);
+        break;
+      case "tool.result":
+        out.push(`- **${e.seq} tool result** ${p.isError === true ? "error" : "ok"}`);
+        break;
+      case "file.diff":
+        out.push(`- **${e.seq} file ${str(p.kind) ?? "modify"}** ${inlineCode(str(p.path) ?? "?")}`);
+        break;
+      case "file.delete":
+        out.push(`- **${e.seq} file delete** ${inlineCode(str(p.path) ?? "?")}`);
+        break;
+      default:
+        break;
+    }
+  }
+  return out.join("\n") + "\n";
 }

@@ -5,6 +5,19 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## Unreleased
 
+### Added
+
+- **`agit export --markdown`: a Markdown audit report** for a PR body or a
+  review ticket — provenance (head hash, chain verified, each signature's
+  verdict), usage totals as `stats` counts them with all four token counts,
+  the files touched with the SPEC §5.7 floor stated, and a fenced timeline.
+  Log text is fenced with a fence longer than any backtick run it holds,
+  names and paths sit in inline code built the same way, and table cells
+  escape their pipes, so nothing in a session can write structure into the
+  report. Takes `export-html`'s gates: an unverified session is refused and
+  an unredacted one needs `--allow-unredacted`. Contributed by
+  @thegoodengineer (#120).
+
 ### Fixed
 
 - **The SQLite and msgpack readers answer hostile bytes with their own
