@@ -10,6 +10,7 @@ import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
+import { geminiCliAdapter } from "./adapters/gemini-cli.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
 import type { Adapter } from "./adapters/adapter.js";
@@ -111,6 +112,7 @@ const ADAPTERS: Adapter[] = [
   atifAdapter,
   clineSdkAdapter,
   langgraphAdapter,
+  geminiCliAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
