@@ -81,3 +81,9 @@ jobs:
           node dist/cli.js verify 1736589300000 --dir /tmp/agit-ci
           diff /tmp/agit-ci/.agit/sessions/1736589300000/events.jsonl \
                fixtures/cline-classic/1736589300000.golden.jsonl
+      - name: import the Roo Code task directory and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/roo-code/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b --dir /tmp/agit-ci
+          node dist/cli.js verify 0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b/events.jsonl \
+               fixtures/roo-code/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b.golden.jsonl

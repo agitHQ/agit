@@ -52,6 +52,12 @@
  *                 Linux, per VS Code's own settings docs; Insiders is
  *                 "Code - Insiders" beside it. Other editors that host the
  *                 extension are imported by path.
+ *  - Roo Code     the same task directories under the editor's
+ *                 User/globalStorage/rooveterinaryinc.roo-cline
+ *                 (src/utils/storage.ts in RooCodeInc/Roo-Code; the
+ *                 `customStoragePath` setting can move them, in which case
+ *                 they are imported by path). Read by the cline-classic
+ *                 adapter, which tells the two dialects apart.
  *
  * Discovery is a directory listing, nothing more: no daemon, no hooks, no
  * state of its own. Retroactive import stays the default — a log written
@@ -214,11 +220,11 @@ function scanClineSdk(sessionsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
-/** Cline 3.x task directories: tasks/<taskId>/api_conversation_history.json. */
-function scanClineClassic(tasksRoot: string, out: DiscoveredLog[]): void {
+/** Cline 3.x (and Roo Code) task directories: tasks/<taskId>/api_conversation_history.json. */
+function scanClineClassic(tasksRoot: string, out: DiscoveredLog[], runtime = "cline-classic"): void {
   for (const taskId of listDir(tasksRoot)) {
     const transcript = join(tasksRoot, taskId, "api_conversation_history.json");
-    if (isFile(transcript)) record("cline-classic", transcript, out);
+    if (isFile(transcript)) record(runtime, transcript, out);
   }
 }
 
@@ -285,6 +291,11 @@ export function discoverSessionLogs(
       runtime: "cline-classic",
       dir: join(userData, "User", "globalStorage", "saoudrizwan.claude-dev", "tasks"),
       scan: scanClineClassic,
+    })),
+    ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
+      runtime: "roo-code",
+      dir: join(userData, "User", "globalStorage", "rooveterinaryinc.roo-cline", "tasks"),
+      scan: (dir: string, out: DiscoveredLog[]) => scanClineClassic(dir, out, "roo-code"),
     })),
   ];
   const logs: DiscoveredLog[] = [];

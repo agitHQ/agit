@@ -39,6 +39,14 @@ const CASES: { adapter: Adapter; fixture: string }[] = [
     adapter: clineClassicAdapter,
     fixture: F("cline-classic", "1789136000000", "api_conversation_history.json"),
   },
+  {
+    adapter: clineClassicAdapter,
+    fixture: F("roo-code", "0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b", "api_conversation_history.json"),
+  },
+  {
+    adapter: clineClassicAdapter,
+    fixture: F("roo-code", "0192f0e1-d2c3-7b4a-9586-7768594a3b2c", "api_conversation_history.json"),
+  },
   { adapter: geminiCliAdapter, fixture: F("gemini-cli", "session.jsonl") },
   { adapter: kimiCodeAdapter, fixture: F("kimi-code", "01JRZ3K2Y7Q8W6X5V4T3S2R1P0", "wire.jsonl") },
 ];

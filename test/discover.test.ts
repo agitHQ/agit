@@ -54,6 +54,8 @@ describe("discoverSessionLogs", () => {
       ["cline-classic", false, 0],
       ["cline-classic", false, 0],
       ["cline-classic", false, 0],
+      ["roo-code", false, 0],
+      ["roo-code", false, 0],
     ]);
   });
 
@@ -97,6 +99,8 @@ describe("discoverSessionLogs", () => {
       "cline-classic",
       "cline-classic",
       "cline-classic",
+      "roo-code",
+      "roo-code",
     ]);
   });
 

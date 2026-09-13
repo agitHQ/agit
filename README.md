@@ -48,7 +48,8 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   them: `agit import openclaw-agent.sqlite`), **Cline** — both the SDK
   messages file new sessions land in and the 3.x task directories an
   installed history still sits in (`agit import <globalStorage>/tasks/<id>`)
-  — **ATIF** trajectories, **LangGraph** checkpoint databases
+  — **Roo Code**'s task directories, which are the same layout in its own
+  dialect, **ATIF** trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
   (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
   logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
@@ -63,7 +64,8 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `~/.kimi/sessions/*/*/wire.jsonl`,
   `~/.local/share/opencode/opencode*.db`, `~/.cline/data/sessions` and
   `~/.cline/data/tasks`, and VS Code's
-  `User/globalStorage/saoudrizwan.claude-dev/tasks`) and imports what is new;
+  `User/globalStorage/{saoudrizwan.claude-dev,rooveterinaryinc.roo-cline}/tasks`)
+  and imports what is new;
   `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
@@ -432,9 +434,20 @@ Said plainly:
   `DiffViewProvider.saveChanges` shows it carries a normalized copy — line
   endings rewritten to the model's, trailing whitespace trimmed, one newline
   appended — so a hash over it is not a hash over the bytes on disk, and none
-  is emitted. Roo Code's fork of this layout is not claimed. Derived from the
-  source and checked against fixtures built to it, one per tool-call shape;
-  a real task that disagrees names its unmapped blocks in the import report.
+  is emitted. **Roo Code's task directories are read by the same adapter,
+  in Roo's dialect**, from Roo's own source (archived May 2026): the same
+  two files, but a UUID task id, Roo's tool and parameter names, an XML-era
+  result written as two blocks (the `[name for '…'] Result:` frame, then the
+  content), native results with no framing, `toolError` as JSON by the end,
+  condensed-context summaries and truncation markers in the transcript, and
+  no `conversationHistoryIndex` ever — so older Roo tasks pair with the
+  timeline by request order, and usage is paired only when the request and
+  turn counts agree. Which dialect a task is in is decided from the
+  directory name (milliseconds are Cline's, a UUID is Roo's) or the
+  transcript's own tells, recorded in `session.start`, and reported as
+  runtime `cline` or `roo-code`. Derived from the sources and checked
+  against fixtures built to them, one per tool-call shape per dialect; a
+  real task that disagrees names its unmapped blocks in the import report.
 - **A Gemini CLI import is the recording as Gemini CLI itself would load
   it.** `agit import session-*.jsonl` reads what `ChatRecordingService`
   writes: a metadata line, then messages appended again each time their
