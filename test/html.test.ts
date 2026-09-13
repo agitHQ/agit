@@ -164,4 +164,35 @@ describe("renderSessionHtml", () => {
       expect(quotes % 2, `unbalanced quotes: ${line.trim().slice(0, 70)}`).toBe(0);
     }
   });
+
+  it("includes a search box, a type filter and a match count in the navbar", () => {
+    const html = renderSessionHtml([event(0, "session.start", { runtime: "claude" })]);
+    expect(html).toContain('id="searchBox"');
+    expect(html).toContain('id="typeFilter"');
+    expect(html).toContain('id="matchCount"');
+    // Wired up, not just markup: the filter functions and their listeners exist.
+    expect(html).toContain("function applyFilter()");
+    expect(html).toContain("function populateTypeFilter()");
+    expect(html).toContain("function jumpToMatch(");
+    expect(html).toContain('searchBox.addEventListener("input", applyFilter)');
+    expect(html).toContain('typeFilter.addEventListener("change", applyFilter)');
+  });
+
+  it("embeds related sessions (a spawned subagent, or the parent that spawned this one)", () => {
+    const parentEvents = [
+      event(0, "session.start", { runtime: "claude" }),
+      event(1, "message.user", { text: "hi" }),
+    ];
+    const subEvents = [
+      {
+        ...event(0, "session.start", { runtime: "claude", native: { parentSessionId: "test-session" } }),
+        session: "sub-1",
+      },
+    ];
+    const html = renderSessionHtml(parentEvents, null, {
+      "sub-1": { events: subEvents, meta: null },
+    });
+    expect(html).toContain('"sub-1"');
+    expect(html).toContain("parentSessionId");
+  });
 });

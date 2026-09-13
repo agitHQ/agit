@@ -9,6 +9,8 @@ const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const DEMO = join(ROOT, "fixtures", "claude-code", "demo.jsonl");
 const CODEX = join(ROOT, "fixtures", "codex", "edits.jsonl");
+const SUBAGENT_PARENT = join(ROOT, "fixtures", "claude-code", "subagent-parent.jsonl");
+const SUBAGENT_CHILD = join(ROOT, "fixtures", "claude-code", "subagent-child.jsonl");
 
 function agit(args: string[]): { code: number; out: string } {
   try {
@@ -122,6 +124,70 @@ describe("export-html --at and size (#59)", () => {
     const r = agit(["export-html", "demo", "--at", "99", "--out", join(store, "x.html"), "--dir", store]);
     expect(r.code).toBe(2);
     expect(r.out).toContain("--at 99 is outside this session");
+  });
+
+  it("refuses to overwrite an existing --out, unless --force is passed", () => {
+    const store = storeWith(DEMO);
+    const out = join(store, "again.html");
+    expect(agit(["export-html", "demo", "--out", out, "--dir", store]).code).toBe(0);
+
+    const again = agit(["export-html", "demo", "--out", out, "--dir", store]);
+    expect(again.code).toBe(1);
+    expect(again.out).toContain("refusing to overwrite existing");
+    expect(again.out).toContain("--force");
+
+    const forced = agit(["export-html", "demo", "--out", out, "--dir", store, "--force"]);
+    expect(forced.code).toBe(0);
+  });
+});
+
+describe("export-html and show link a spawned subagent to its parent", () => {
+  function pairStore(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agit-hyg-"));
+    expect(agit(["import", SUBAGENT_PARENT, "--dir", dir]).code).toBe(0);
+    expect(agit(["import", SUBAGENT_CHILD, "--dir", dir]).code).toBe(0);
+    return dir;
+  }
+
+  it("agit show names the parent from the subagent, and the subagent from the parent", () => {
+    const store = pairStore();
+
+    const child = agit(["show", "fixture-child-agent-01", "--dir", store]);
+    expect(child.code).toBe(0);
+    expect(child.out).toContain("parent      fixture-parent-0001");
+
+    const parent = agit(["show", "fixture-parent-0001", "--dir", store]);
+    expect(parent.code).toBe(0);
+    expect(parent.out).toContain("spawned     1 subagent:");
+    expect(parent.out).toContain("fixture-child-agent-01");
+  });
+
+  it("a full export embeds the linked subagent so the viewer can navigate to it", () => {
+    const store = pairStore();
+    const out = join(store, "parent.html");
+    const r = agit(["export-html", "fixture-parent-0001", "--out", out, "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("related     1 linked session embedded");
+
+    const html = readFileSync(out, "utf8");
+    const data = JSON.parse(
+      html.match(/<script type="application\/json" id="session-data">([\s\S]*?)<\/script>/)![1]!,
+    );
+    expect(Object.keys(data.related)).toEqual(["fixture-child-agent-01"]);
+  });
+
+  it("a --at prefix export embeds no related sessions — only a full export claims the family", () => {
+    const store = pairStore();
+    const out = join(store, "prefix.html");
+    const r = agit(["export-html", "fixture-parent-0001", "--at", "1", "--out", out, "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("related");
+
+    const html = readFileSync(out, "utf8");
+    const data = JSON.parse(
+      html.match(/<script type="application\/json" id="session-data">([\s\S]*?)<\/script>/)![1]!,
+    );
+    expect(data.related).toEqual({});
   });
 });
 

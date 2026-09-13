@@ -1,7 +1,21 @@
 import type { AgitEvent, SessionMeta } from "./format/events.js";
 
-export function renderSessionHtml(events: AgitEvent[], meta?: SessionMeta | null): string {
-  const data = JSON.stringify({ events, meta: meta ?? null })
+/**
+ * Other sessions to embed alongside the primary one, keyed by session id —
+ * subagent sessions spawned from it (or the parent it was spawned from),
+ * discovered via `session.start.payload.native.parentSessionId` and a
+ * `tool.result` `structured.agentId` (Claude Code's own `toolUseResult`).
+ * The viewer lets you jump into one and back without a second export or a
+ * network fetch: everything is already in the page.
+ */
+export type RelatedSessions = Record<string, { events: AgitEvent[]; meta: SessionMeta | null }>;
+
+export function renderSessionHtml(
+  events: AgitEvent[],
+  meta?: SessionMeta | null,
+  related?: RelatedSessions,
+): string {
+  const data = JSON.stringify({ events, meta: meta ?? null, related: related ?? {} })
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")
     .replace(/&/g, "\\u0026")
@@ -35,6 +49,45 @@ h1 { margin: 0 0 6px; font-size: 18px; }
   font-size: 12px;
   white-space: pre-wrap;
 }
+#navbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+#navbar button {
+  font: inherit;
+  cursor: pointer;
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 3px 10px;
+}
+#navbar button:hover { background: #30363d; }
+#navbar .label { color: #8b949e; font-size: 12px; }
+#searchBox, #typeFilter {
+  font: inherit;
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+#searchBox { flex: 1; min-width: 120px; }
+#matchCount { white-space: nowrap; }
+.row[hidden] { display: none; }
+.openSub {
+  font: inherit;
+  cursor: pointer;
+  background: #1f2933;
+  color: #7ee787;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-top: 8px;
+}
+.openSub:hover { background: #263a2c; }
 .layout {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
@@ -140,6 +193,13 @@ pre .hunk { color: #d2a8ff; }
 <header>
   <h1>agit · session</h1>
   <div id="meta" class="meta"></div>
+  <div id="navbar">
+    <span id="navLabel" class="label"></span>
+    <button id="parentBtn" style="display:none"></button>
+    <input id="searchBox" type="text" placeholder="filter events… (Enter: next, Shift+Enter: prev)">
+    <select id="typeFilter"></select>
+    <span id="matchCount" class="label"></span>
+  </div>
 </header>
 
 <main class="layout">
@@ -162,13 +222,31 @@ pre .hunk { color: #d2a8ff; }
 var DATA = JSON.parse(
   document.getElementById("session-data")?.textContent ?? "{}"
 );
-var events = DATA.events || [];
-var meta = DATA.meta || null;
+
+var sessions = {};
+var rootId = DATA.events && DATA.events.length ? DATA.events[0].session : null;
+if (rootId) sessions[rootId] = { events: DATA.events || [], meta: DATA.meta || null };
+var relatedData = DATA.related || {};
+Object.keys(relatedData).forEach(function (id) {
+  sessions[id] = {
+    events: relatedData[id].events || [],
+    meta: relatedData[id].meta || null
+  };
+});
+
+var currentId = rootId;
+var events = rootId ? sessions[rootId].events : [];
+var meta = rootId ? sessions[rootId].meta : null;
 
 var timeline = document.getElementById("timeline");
 var detail = document.getElementById("detail");
 var metaBox = document.getElementById("meta");
 var fileList = document.getElementById("flist");
+var navLabel = document.getElementById("navLabel");
+var parentBtn = document.getElementById("parentBtn");
+var searchBox = document.getElementById("searchBox");
+var typeFilter = document.getElementById("typeFilter");
+var matchCount = document.getElementById("matchCount");
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -344,6 +422,19 @@ function select(seq) {
             oneLine(JSON.stringify(p.structured), 600)
         )
       );
+
+      var agentId = p.structured && p.structured.agentId;
+      if (typeof agentId === "string" && sessions[agentId]) {
+        var openBtn = el(
+          "button",
+          "openSub",
+          "→ open subagent " + agentId.slice(0, 8)
+        );
+        openBtn.addEventListener("click", function () {
+          loadSession(agentId);
+        });
+        detail.appendChild(openBtn);
+      }
     }
 
   } else if (e.type === "file.diff") {
@@ -488,13 +579,136 @@ function renderMeta() {
   metaBox.textContent = lines.join("\\n");
 }
 
-events.forEach(addEvent);
-renderFiles();
-renderMeta();
+function renderNav() {
+  navLabel.textContent = "session " + currentId;
 
-if (events.length > 0) {
-  select(events[0].seq);
+  var first = events[0];
+  var p = (first && first.payload) || {};
+  var native = p.native && typeof p.native === "object" ? p.native : {};
+  var parentId = typeof native.parentSessionId === "string" ? native.parentSessionId : null;
+
+  if (parentId && sessions[parentId]) {
+    parentBtn.style.display = "";
+    parentBtn.textContent = "↑ parent " + parentId.slice(0, 8);
+    parentBtn.onclick = function () {
+      loadSession(parentId);
+    };
+  } else {
+    parentBtn.style.display = "none";
+  }
 }
+
+function populateTypeFilter() {
+  var prev = typeFilter.value || "all";
+  var seen = {};
+  var types = [];
+
+  events.forEach(function (e) {
+    if (!seen[e.type]) {
+      seen[e.type] = true;
+      types.push(e.type);
+    }
+  });
+
+  types.sort();
+
+  typeFilter.textContent = "";
+  typeFilter.appendChild(el("option", "", "all types"));
+  typeFilter.firstChild.value = "all";
+
+  types.forEach(function (t) {
+    var opt = el("option", "", t);
+    opt.value = t;
+    typeFilter.appendChild(opt);
+  });
+
+  typeFilter.value = seen[prev] ? prev : "all";
+}
+
+function matchesFilter(e, q, type) {
+  if (type !== "all" && e.type !== type) return false;
+  if (!q) return true;
+  return (e.type + " " + summary(e)).toLowerCase().indexOf(q) !== -1;
+}
+
+function applyFilter() {
+  var q = searchBox.value.trim().toLowerCase();
+  var type = typeFilter.value || "all";
+  var rows = timeline.children;
+  var visible = 0;
+
+  for (var i = 0; i < events.length; i++) {
+    var ok = matchesFilter(events[i], q, type);
+    if (rows[i]) rows[i].hidden = !ok;
+    if (ok) visible++;
+  }
+
+  matchCount.textContent = visible + "/" + events.length;
+}
+
+function jumpToMatch(dir) {
+  var rows = Array.prototype.filter.call(timeline.children, function (r) {
+    return !r.hidden;
+  });
+  if (!rows.length) return;
+
+  var curIdx = -1;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].classList.contains("sel")) curIdx = i;
+  }
+
+  var nextIdx = curIdx === -1
+    ? 0
+    : dir === "prev"
+      ? (curIdx - 1 + rows.length) % rows.length
+      : (curIdx + 1) % rows.length;
+
+  var target = rows[nextIdx];
+  select(Number(target.dataset.seq));
+  target.scrollIntoView({ block: "nearest" });
+}
+
+searchBox.addEventListener("input", applyFilter);
+typeFilter.addEventListener("change", applyFilter);
+searchBox.addEventListener("keydown", function (ev) {
+  if (ev.key !== "Enter") return;
+  ev.preventDefault();
+  jumpToMatch(ev.shiftKey ? "prev" : "next");
+});
+
+/**
+ * Switch the whole view to another embedded session — a spawned subagent,
+ * or (via the parent button) up to the session that spawned this one. The
+ * parent link is data (session.start.payload.native.parentSessionId), so it is
+ * always correct regardless of how you navigated here — unlike a
+ * back-in-history stack, it still points the right way through a chain of
+ * several subagents (parent -> sub1 -> sub2: sub2's "parent" is sub1's own
+ * session, not the root).
+ */
+function loadSession(id) {
+  if (!sessions[id]) return;
+
+  currentId = id;
+  events = sessions[id].events;
+  meta = sessions[id].meta;
+
+  timeline.textContent = "";
+  events.forEach(addEvent);
+  renderFiles();
+  renderMeta();
+  renderNav();
+  populateTypeFilter();
+  applyFilter();
+
+  if (events.length > 0) {
+    select(events[0].seq);
+  } else {
+    detail.textContent = "";
+    detail.appendChild(el("div", "muted", "No events."));
+  }
+}
+
+if (rootId) loadSession(rootId);
 </script>
 </body>
 </html>

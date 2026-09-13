@@ -61,6 +61,24 @@ describe("discoverSessionLogs", () => {
     ]);
   });
 
+  it("finds a subagent's own transcript nested under <session>/subagents/", () => {
+    const home = fakeHome();
+    const proj = join(home, ".claude", "projects", "C--proj");
+    const top = put(join(proj, "sess.jsonl"));
+    const sub = put(join(proj, "sess-uuid", "subagents", "agent-abc.jsonl"));
+    // Noise beside the subagent transcript must not be picked up.
+    put(join(proj, "sess-uuid", "subagents", "notes.txt"));
+
+    const { logs } = discoverSessionLogs(home, {});
+    expect(logs.map((l) => [l.runtime, l.path])).toEqual(
+      expect.arrayContaining([
+        ["claude-code", top],
+        ["claude-code", sub],
+      ]),
+    );
+    expect(logs).toHaveLength(2);
+  });
+
   it("skips OpenClaw checkpoints, trajectories and archives, which share a session's id", () => {
     const home = fakeHome();
     const dir = join(home, ".openclaw", "agents", "main", "sessions");

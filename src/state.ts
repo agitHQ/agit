@@ -240,8 +240,12 @@ const str = (v: Json | undefined): string => (typeof v === "string" ? v : "");
 export function eventLine(e: AgitEvent): string {
   const p = e.payload as { [k: string]: Json };
   switch (e.type) {
-    case "session.start":
-      return `session.start  runtime=${str(p.runtime)} ${str(p.runtimeVersion)}`.trimEnd();
+    case "session.start": {
+      const native = p.native as { [k: string]: Json } | null | undefined;
+      const parentId = native && typeof native === "object" ? native.parentSessionId : undefined;
+      const parent = typeof parentId === "string" ? ` parent=${parentId.slice(0, 8)}` : "";
+      return `session.start  runtime=${str(p.runtime)} ${str(p.runtimeVersion)}${parent}`.trimEnd();
+    }
     case "session.end":
       return `session.end    reason=${str(p.reason)}`;
     case "message.user":
@@ -257,8 +261,12 @@ export function eventLine(e: AgitEvent): string {
     }
     case "tool.call":
       return `tool.call      ${str(p.name)} ${excerpt(firstArg(p.input), 70)}`;
-    case "tool.result":
-      return `tool.result    ${p.isError === true ? "ERROR " : ""}${excerpt(str(p.output), 76)}`;
+    case "tool.result": {
+      const structured = p.structured as { [k: string]: Json } | null | undefined;
+      const agentId = structured && typeof structured === "object" ? structured.agentId : undefined;
+      const link = typeof agentId === "string" ? `  → agent=${agentId}` : "";
+      return `tool.result    ${p.isError === true ? "ERROR " : ""}${excerpt(str(p.output), 76)}${link}`;
+    }
     case "file.diff": {
       const { added, removed } = diffStat(str(p.diff));
       return `file.diff      ${str(p.kind)} ${str(p.path)} (+${added} -${removed})`;

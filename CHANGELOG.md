@@ -7,6 +7,24 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **A spawned subagent's session links to its parent, and the exported
+  viewer navigates between them** (#138, by @gowtham-m0). Claude Code writes
+  a subagent's turns to `<project>/<session>/subagents/agent-<id>.jsonl`,
+  every record carrying `isSidechain: true`, its own `agentId`, and the
+  *parent's* `sessionId` — checked against real logs. `import --all` finds
+  those files; the adapter stores such a transcript under its `agentId`
+  (the parent's id is already the parent's), and records the link under
+  `session.start.payload.native` — `parentSessionId` and `agentId` — where
+  SPEC §6 keeps a runtime's own identifiers, so the documented event shape
+  is unchanged. The parent side needs nothing new: Claude Code's own
+  `toolUseResult.agentId` on the spawning `Agent` call already rides in
+  `tool.result.structured`. `agit show` names the parent from the subagent
+  and the subagents from the parent; `replay --timeline` marks both; a full
+  `export-html` embeds the connected family so the viewer can open a
+  subagent from the tool result that spawned it and go back up, and gains a
+  search box, a type filter and a match count; `export-html --force`
+  overwrites an existing `--out`.
+
 - **`--steer` works for pi sessions.** pi's extension API
   (`packages/coding-agent/docs/extensions.md`) documents both halves of the
   channel: a `before_agent_start` handler may return `{ message }` to

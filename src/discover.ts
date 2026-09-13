@@ -123,14 +123,31 @@ function record(runtime: string, path: string, out: DiscoveredLog[]): void {
   out.push({ runtime, path, mtimeMs: st.mtimeMs, bytes: st.size });
 }
 
-/** Claude Code: one JSONL per session, directly under each project directory. */
+/**
+ * Claude Code: one JSONL per session, directly under each project directory,
+ * plus one JSONL per subagent spawned during a session, nested at
+ * `<project>/<session-uuid>/subagents/agent-<id>.jsonl`. Both are native
+ * session logs in the same format (the adapter tells subagent transcripts
+ * apart by `isSidechain` and stores them under their agentId, SPEC §13) — a
+ * directory listing one level deeper finds them the same way as the rest.
+ */
 function scanClaudeCode(root: string, out: DiscoveredLog[]): void {
   for (const project of listDir(root)) {
     const dir = join(root, project);
     if (!isDir(dir)) continue;
     for (const name of listDir(dir)) {
       const p = join(dir, name);
-      if (name.endsWith(".jsonl") && isFile(p)) record("claude-code", p, out);
+      if (name.endsWith(".jsonl") && isFile(p)) {
+        record("claude-code", p, out);
+        continue;
+      }
+      if (!isDir(p)) continue;
+      const subagents = join(p, "subagents");
+      if (!isDir(subagents)) continue;
+      for (const subName of listDir(subagents)) {
+        const subPath = join(subagents, subName);
+        if (subName.endsWith(".jsonl") && isFile(subPath)) record("claude-code", subPath, out);
+      }
     }
   }
 }

@@ -183,3 +183,65 @@ describe("claude-code adapter", () => {
     expect(verify.events).toBe(18);
   });
 });
+
+const PARENT_FIXTURE = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "..",
+  "fixtures",
+  "claude-code",
+  "subagent-parent.jsonl",
+);
+const CHILD_FIXTURE = join(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "..",
+  "fixtures",
+  "claude-code",
+  "subagent-child.jsonl",
+);
+const parentLines = readFileSync(PARENT_FIXTURE, "utf8")
+  .split("\n")
+  .filter((l) => l.trim() !== "");
+const childLines = readFileSync(CHILD_FIXTURE, "utf8")
+  .split("\n")
+  .filter((l) => l.trim() !== "");
+
+describe("claude-code adapter — subagent transcripts", () => {
+  it("stores a parent session under its own sessionId, untouched", () => {
+    const res = claudeCodeAdapter.convert(parentLines);
+    expect(res.sessionId).toBe("fixture-parent-0001");
+    const start = payloadOf(res.drafts, 0);
+    expect(start.native).toBeUndefined();
+  });
+
+  it("a sidechain record with an agentId is stored under that agentId, linked back to its parent", () => {
+    const res = claudeCodeAdapter.convert(childLines);
+    // Every record in a subagent's own transcript carries the *parent's*
+    // sessionId — that id already belongs to the parent, so the subagent
+    // must be keyed by its own agentId instead, or importing both would
+    // collide.
+    expect(res.sessionId).toBe("fixture-child-agent-01");
+    const start = payloadOf(res.drafts, 0);
+    // Under native, where SPEC §6 keeps a runtime's own identifiers.
+    expect(start.native).toEqual({
+      parentSessionId: "fixture-parent-0001",
+      agentId: "fixture-child-agent-01",
+    });
+    expect(start.parentSessionId).toBeUndefined();
+  });
+
+  it("a sidechain record with no agentId falls back to the native sessionId (no false link)", () => {
+    const res = claudeCodeAdapter.convert(
+      childLines.map((l) => l.replace(/,"agentId":"fixture-child-agent-01"/g, "")),
+    );
+    expect(res.sessionId).toBe("fixture-parent-0001");
+    const start = payloadOf(res.drafts, 0);
+    expect(start.native).toBeUndefined();
+  });
+
+  it("a tool.result carrying toolUseResult.agentId keeps it in structured, for the caller to link", () => {
+    const res = claudeCodeAdapter.convert(parentLines);
+    const result = res.drafts.find((d) => d.type === "tool.result")!;
+    const structured = (result.payload as Record<string, Json>).structured as Record<string, Json>;
+    expect(structured.agentId).toBe("fixture-child-agent-01");
+  });
+});

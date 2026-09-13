@@ -29,6 +29,9 @@ interface NativeRecord {
   requestId?: string;
   message?: NativeMessage;
   toolUseResult?: Json;
+  /** Set on a subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`). */
+  isSidechain?: boolean;
+  agentId?: string;
   [key: string]: unknown;
 }
 
@@ -111,6 +114,8 @@ export const claudeCodeAdapter: Adapter = {
     let runtimeVersion: string | null = null;
     let cwd: string | null = null;
     let gitBranch: string | null = null;
+    let agentId: string | null = null;
+    let isSidechain = false;
 
     let firstTs: string | null = null;
     let lastTs: string | null = null;
@@ -155,6 +160,8 @@ export const claudeCodeAdapter: Adapter = {
       const rec = parsed as NativeRecord;
 
       if (sessionId === null && typeof rec.sessionId === "string") sessionId = rec.sessionId;
+      if (agentId === null && typeof rec.agentId === "string") agentId = rec.agentId;
+      if (rec.isSidechain === true) isSidechain = true;
 
       const type = rec.type;
       const isConversation =
@@ -280,6 +287,16 @@ export const claudeCodeAdapter: Adapter = {
       throw new Error("no conversation records found — is this a Claude Code session log?");
     }
 
+    // A subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`)
+    // carries the *parent's* sessionId on every record — that id is already
+    // taken in the store by the parent itself, so the subagent is stored
+    // under its agentId instead, with the parent linked from
+    // session.start's native ids (SPEC §6: native identifiers live under
+    // payload.native, so §5.1's fields are untouched); `agit show` and
+    // `agit replay --timeline` surface the link.
+    const isSubagent = isSidechain && agentId !== null;
+    const finalSessionId = isSubagent ? agentId! : sessionId;
+
     const drafts: DraftEvent[] = [
       {
         ts: firstTs,
@@ -293,6 +310,7 @@ export const claudeCodeAdapter: Adapter = {
           // No model here: it belongs to message.assistant/cost events, and a
           // live share may begin before the first assistant record exists.
           adapter: { name: ADAPTER_NAME, version: ADAPTER_VERSION },
+          ...(isSubagent ? { native: { parentSessionId: sessionId, agentId } } : {}),
         },
       },
       ...body,
@@ -301,7 +319,7 @@ export const claudeCodeAdapter: Adapter = {
       drafts.push({ ts: lastTs, type: "session.end", payload: { reason: "log-end", synthesized: true } });
     }
 
-    return { sessionId, drafts, records, skipped };
+    return { sessionId: finalSessionId, drafts, records, skipped };
   },
 };
 
