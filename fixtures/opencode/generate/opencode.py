@@ -12,10 +12,17 @@ Rows are inserted out of the order OpenCode reads them in, so a reader that
 trusted rowid order would produce a different chain. Content is synthetic.
 
     python fixtures/opencode/generate/opencode.py fixtures/opencode/opencode.sqlite
+
+With --live, a third session is added whose last assistant message is still
+streaming — no `time.completed`, a text part so far and a tool part in the
+`running` state — the shape a live share meets while OpenCode is mid-turn:
+
+    python fixtures/opencode/generate/opencode.py fixtures/opencode/opencode-live.sqlite --live
 """
 import json, os, sqlite3, sys
 
 out = sys.argv[1]
+LIVE = len(sys.argv) > 2 and sys.argv[2] == "--live"
 if os.path.exists(out):
     os.remove(out)
 
@@ -121,7 +128,7 @@ def user(sid, mid, t, text, extra_parts=()):
         rows_p.append((f"prt_{mid[4:]}_{i:02d}", mid, sid, t, t, json.dumps(p)))
 
 
-def assistant(sid, mid, parent, t, parts, tokens, finish="stop"):
+def assistant(sid, mid, parent, t, parts, tokens, finish="stop", completed=True):
     # A part row is created when the part is: a tool part at its start, a
     # step-finish after the step's last part, markers a beat after the
     # previous one. `completed` is stamped after the last part.
@@ -136,18 +143,17 @@ def assistant(sid, mid, parent, t, parts, tokens, finish="stop"):
         stamped.append((f"prt_{mid[4:]}_{i:02d}", mid, sid, now, now, json.dumps(p)))
         if "end" in time:
             now = time["end"]
-    completed = now + 400
-    rows_m.append(
-        (
-            mid, sid, t, completed,
-            json.dumps({
-                "role": "assistant", "time": {"created": t, "completed": completed}, "parentID": parent,
-                "modelID": MODEL["modelID"], "providerID": MODEL["providerID"], "mode": "build", "agent": "build",
-                "path": {"cwd": "/home/dev/demo", "root": "/home/dev/demo"}, "cost": 0.0042,
-                "tokens": tokens, "finish": finish,
-            }),
-        )
-    )
+    done = now + 400
+    time = {"created": t, "completed": done} if completed else {"created": t}
+    data = {
+        "role": "assistant", "time": time, "parentID": parent,
+        "modelID": MODEL["modelID"], "providerID": MODEL["providerID"], "mode": "build", "agent": "build",
+        "path": {"cwd": "/home/dev/demo", "root": "/home/dev/demo"}, "cost": 0.0042 if completed else 0,
+        "tokens": tokens,
+    }
+    if completed:
+        data["finish"] = finish
+    rows_m.append((mid, sid, t, done if completed else now, json.dumps(data)))
     rows_p.extend(stamped)
 
 
@@ -196,6 +202,33 @@ assistant(
     [{"type": "text", "text": "It toggles verbose logging.", "time": {"start": T0 + 102100}}],
     {"input": 30, "output": 8, "reasoning": 0, "cache": {"read": 0, "write": 0}},
 )
+
+# --- session C (--live only): the last message is still streaming -----------
+if LIVE:
+    C = "ses_fixturecccc0003"
+    session(C, "Still running", T0 + 200000)
+    user(C, "msg_c000", T0 + 201000, "Run the linter and fix what it finds")
+    assistant(
+        C, "msg_c001", "msg_c000", T0 + 202000,
+        [
+            {"type": "text", "text": "Running it now.", "time": {"start": T0 + 202100}},
+            {"type": "tool", "callID": "call_c1", "tool": "bash",
+             "state": {"status": "completed", "input": {"command": "npm run lint"}, "output": "3 problems", "title": "npm run lint", "metadata": {}, "time": {"start": T0 + 202200, "end": T0 + 205000}}},
+            {"type": "step-finish", "reason": "tool-calls", "cost": 0.001, "tokens": {"input": 60, "output": 12, "reasoning": 0, "cache": {"read": 0, "write": 0}}},
+        ],
+        {"input": 60, "output": 12, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        finish="tool-calls",
+    )
+    assistant(
+        C, "msg_c002", "msg_c001", T0 + 206000,
+        [
+            {"type": "text", "text": "Fixing the first", "time": {"start": T0 + 206100}},
+            {"type": "tool", "callID": "call_c2", "tool": "edit",
+             "state": {"status": "running", "input": {"filePath": "src/a.ts"}, "time": {"start": T0 + 206500}}},
+        ],
+        {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        completed=False,
+    )
 
 # Out of read order on purpose: the reader must sort as OpenCode does.
 for r in reversed(rows_m):

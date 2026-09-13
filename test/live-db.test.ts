@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { hermesAdapter } from "../src/adapters/hermes.js";
+import { opencodeAdapter } from "../src/adapters/opencode.js";
 import { buildChain, toJsonl } from "../src/format/hash.js";
 import { type RedactionCounts, redactDeep } from "../src/redact.js";
 import { startRelay, type RelayHandle } from "../src/relay/relay.js";
@@ -39,6 +40,58 @@ function agitAsync(args: string[]): Promise<{ code: number; stdout: string; stde
     child.stdin!.end("");
   });
 }
+
+describe("an OpenCode session still streaming", () => {
+  const LIVE_DB = join(ROOT, "fixtures", "opencode", "opencode-live.sqlite");
+  const SESSION = "ses_fixturecccc0003";
+
+  it("holds a message with no time.completed back under live, and streams it whole once it has one", () => {
+    const bytes = new Uint8Array(readFileSync(LIVE_DB));
+    const live = opencodeAdapter.convertBytes!(bytes, { select: SESSION, live: true });
+    const full = opencodeAdapter.convertBytes!(bytes, { select: SESSION });
+    expect(live.drafts.map((d) => d.type)).toEqual([
+      "session.start",
+      "message.user",
+      "message.assistant",
+      "tool.call",
+      "tool.result",
+      "cost",
+    ]);
+    expect(live.skipped["live:message-in-progress-held-back"]).toBe(1);
+    // What was streamed is exactly the head of the full conversion.
+    expect(full.drafts.slice(0, live.drafts.length)).toEqual(live.drafts);
+    expect(full.drafts.slice(live.drafts.length).map((d) => d.type)).toEqual([
+      "message.assistant",
+      "tool.call",
+      "cost",
+      "session.end",
+    ]);
+    expect(full.skipped["tool-part-running"]).toBe(1);
+  });
+
+  it("is followed without a rewrite: the in-progress turn arrives when the share ends, as an import would add it", () => {
+    const dir = mktemp();
+    const db = join(dir, "opencode.db");
+    copyFileSync(LIVE_DB, db);
+    const follower = new SessionFollower(db, opencodeAdapter, undefined, SESSION);
+    const first = follower.poll();
+    expect(first.map((e) => e.type)).toEqual([
+      "session.start",
+      "message.user",
+      "message.assistant",
+      "tool.call",
+      "tool.result",
+      "cost",
+    ]);
+    expect(follower.poll()).toEqual([]); // the text part may have grown; nothing streamed changes
+    const tail = follower.finish();
+    expect(tail.map((e) => e.type)).toEqual(["message.assistant", "tool.call", "cost", "session.end"]);
+    const full = opencodeAdapter.convertBytes!(readSqliteWithWal(db).bytes, { select: SESSION });
+    const counts: RedactionCounts = {};
+    for (const d of full.drafts) d.payload = redactDeep(d.payload, counts);
+    expect(toJsonl([...first, ...tail])).toBe(toJsonl(buildChain(full.sessionId, full.drafts)));
+  });
+});
 
 describe("a database followed live", () => {
   it("streams the session as its WAL grows, holds totals and the end back, and matches an import", () => {
