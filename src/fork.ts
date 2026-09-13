@@ -54,6 +54,27 @@ interface DiffPayload {
   toolUseId?: Json;
 }
 
+/**
+ * The file's text from the latest complete read before `beforeSeq`, if an
+ * adapter vouched for one: a tool.result whose `native.readOf` names the path
+ * and `native.complete` is true means its `output` is the file exactly as
+ * read (pi's `read` with nothing truncated, for one). The caller still
+ * checks it against the edit's beforeHash; the tag only says where to look.
+ */
+function completeReadFor(events: AgitEvent[], path: string, beforeSeq: number): string | null {
+  let found: string | null = null;
+  for (const e of events) {
+    if (e.seq >= beforeSeq) break;
+    if (e.type !== "tool.result") continue;
+    const p = e.payload as { output?: Json; native?: Json };
+    const n = p.native;
+    if (n === null || typeof n !== "object" || Array.isArray(n)) continue;
+    const native = n as { [k: string]: Json };
+    if (native.readOf === path && native.complete === true && typeof p.output === "string") found = p.output;
+  }
+  return found;
+}
+
 /** Full originalFile content from the tool.result matching a file.diff, if the runtime recorded one. */
 function originalFileFor(events: AgitEvent[], toolUseId: string, at: number): string | null {
   for (const e of events) {
@@ -96,8 +117,12 @@ export function reconstructTree(events: AgitEvent[], at: number): TreeReconstruc
     if (diverged) base = null; // our chain no longer matches reality
     if (base === null && p.kind !== "create") {
       // Pre-existing or diverged file: recover the full pre-edit content the
-      // runtime recorded, if any — and only trust it if it hashes right.
-      const orig = typeof p.toolUseId === "string" ? originalFileFor(events, p.toolUseId, at) : null;
+      // runtime recorded, if any — the edit's own originalFile, else the
+      // latest complete read of the path before it — and only trust it if
+      // it hashes right.
+      const orig =
+        (typeof p.toolUseId === "string" ? originalFileFor(events, p.toolUseId, at) : null) ??
+        (typeof p.beforeHash === "string" ? completeReadFor(events, path, e.seq) : null);
       if (orig !== null && (typeof p.beforeHash !== "string" || sha256Hex(orig) === p.beforeHash)) {
         base = orig;
         recovered.add(path);
@@ -109,8 +134,8 @@ export function reconstructTree(events: AgitEvent[], at: number): TreeReconstruc
         // redaction, and that is the cause, not a missing record.
         const why =
           orig === null
-            ? "no recorded originalFile to recover from"
-            : "the recorded originalFile does not hash to beforeHash";
+            ? "no recorded originalFile or complete read to recover from"
+            : "the recorded originalFile or read does not hash to beforeHash";
         const redacted =
           p.diff.includes("[REDACTED:") || (orig !== null && orig.includes("[REDACTED:"))
             ? " — content was redacted on import, so its recorded hash cannot be reproduced"
