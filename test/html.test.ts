@@ -185,7 +185,7 @@ describe("renderSessionHtml", () => {
     ];
     const subEvents = [
       {
-        ...event(0, "session.start", { runtime: "claude", parentSessionId: "test-session" }),
+        ...event(0, "session.start", { runtime: "claude", native: { parentSessionId: "test-session" } }),
         session: "sub-1",
       },
     ];

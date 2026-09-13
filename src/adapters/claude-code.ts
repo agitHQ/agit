@@ -290,8 +290,10 @@ export const claudeCodeAdapter: Adapter = {
     // A subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`)
     // carries the *parent's* sessionId on every record — that id is already
     // taken in the store by the parent itself, so the subagent is stored
-    // under its agentId instead, with the parent linked from session.start
-    // (surfaced by `agit show`/`agit replay --timeline`, SPEC §13).
+    // under its agentId instead, with the parent linked from
+    // session.start's native ids (SPEC §6: native identifiers live under
+    // payload.native, so §5.1's fields are untouched); `agit show` and
+    // `agit replay --timeline` surface the link.
     const isSubagent = isSidechain && agentId !== null;
     const finalSessionId = isSubagent ? agentId! : sessionId;
 
@@ -308,7 +310,7 @@ export const claudeCodeAdapter: Adapter = {
           // No model here: it belongs to message.assistant/cost events, and a
           // live share may begin before the first assistant record exists.
           adapter: { name: ADAPTER_NAME, version: ADAPTER_VERSION },
-          ...(isSubagent ? { parentSessionId: sessionId, agentId } : {}),
+          ...(isSubagent ? { native: { parentSessionId: sessionId, agentId } } : {}),
         },
       },
       ...body,

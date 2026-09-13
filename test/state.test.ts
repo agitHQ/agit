@@ -99,7 +99,7 @@ describe("timeline lines for subagent linking", () => {
       {
         ts: "2026-01-01T00:00:00.000Z",
         type: "session.start",
-        payload: { runtime: "claude-code", parentSessionId: "parent-0001" },
+        payload: { runtime: "claude-code", native: { parentSessionId: "parent-0001" } },
       },
     ]);
     expect(timelineLines(evs)[0]).toContain("parent=parent-0");

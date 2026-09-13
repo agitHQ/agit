@@ -210,8 +210,7 @@ describe("claude-code adapter — subagent transcripts", () => {
     const res = claudeCodeAdapter.convert(parentLines);
     expect(res.sessionId).toBe("fixture-parent-0001");
     const start = payloadOf(res.drafts, 0);
-    expect(start.parentSessionId).toBeUndefined();
-    expect(start.agentId).toBeUndefined();
+    expect(start.native).toBeUndefined();
   });
 
   it("a sidechain record with an agentId is stored under that agentId, linked back to its parent", () => {
@@ -222,8 +221,12 @@ describe("claude-code adapter — subagent transcripts", () => {
     // collide.
     expect(res.sessionId).toBe("fixture-child-agent-01");
     const start = payloadOf(res.drafts, 0);
-    expect(start.parentSessionId).toBe("fixture-parent-0001");
-    expect(start.agentId).toBe("fixture-child-agent-01");
+    // Under native, where SPEC §6 keeps a runtime's own identifiers.
+    expect(start.native).toEqual({
+      parentSessionId: "fixture-parent-0001",
+      agentId: "fixture-child-agent-01",
+    });
+    expect(start.parentSessionId).toBeUndefined();
   });
 
   it("a sidechain record with no agentId falls back to the native sessionId (no false link)", () => {
@@ -232,8 +235,7 @@ describe("claude-code adapter — subagent transcripts", () => {
     );
     expect(res.sessionId).toBe("fixture-parent-0001");
     const start = payloadOf(res.drafts, 0);
-    expect(start.parentSessionId).toBeUndefined();
-    expect(start.agentId).toBeUndefined();
+    expect(start.native).toBeUndefined();
   });
 
   it("a tool.result carrying toolUseResult.agentId keeps it in structured, for the caller to link", () => {

@@ -1,16 +1,20 @@
 import type { AgitEvent, SessionMeta } from "./format/events.js";
 
 /**
- * Other sessions to embed alongside the primary one, keyed by session id \u2014
+ * Other sessions to embed alongside the primary one, keyed by session id —
  * subagent sessions spawned from it (or the parent it was spawned from),
- * discovered via `session.start.payload.parentSessionId` and a `tool.result`
- * `structured.agentId` (SPEC \u00a79). The viewer lets you jump into one and back
- * without a second export or a network fetch: everything is already in the
- * page.
+ * discovered via `session.start.payload.native.parentSessionId` and a
+ * `tool.result` `structured.agentId` (Claude Code's own `toolUseResult`).
+ * The viewer lets you jump into one and back without a second export or a
+ * network fetch: everything is already in the page.
  */
 export type RelatedSessions = Record<string, { events: AgitEvent[]; meta: SessionMeta | null }>;
 
-export function renderSessionHtml(events: AgitEvent[], meta?: SessionMeta | null, related?: RelatedSessions): string {
+export function renderSessionHtml(
+  events: AgitEvent[],
+  meta?: SessionMeta | null,
+  related?: RelatedSessions,
+): string {
   const data = JSON.stringify({ events, meta: meta ?? null, related: related ?? {} })
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")
@@ -580,7 +584,8 @@ function renderNav() {
 
   var first = events[0];
   var p = (first && first.payload) || {};
-  var parentId = typeof p.parentSessionId === "string" ? p.parentSessionId : null;
+  var native = p.native && typeof p.native === "object" ? p.native : {};
+  var parentId = typeof native.parentSessionId === "string" ? native.parentSessionId : null;
 
   if (parentId && sessions[parentId]) {
     parentBtn.style.display = "";
@@ -674,7 +679,7 @@ searchBox.addEventListener("keydown", function (ev) {
 /**
  * Switch the whole view to another embedded session — a spawned subagent,
  * or (via the parent button) up to the session that spawned this one. The
- * parent link is data (session.start.payload.parentSessionId), so it is
+ * parent link is data (session.start.payload.native.parentSessionId), so it is
  * always correct regardless of how you navigated here — unlike a
  * back-in-history stack, it still points the right way through a chain of
  * several subagents (parent -> sub1 -> sub2: sub2's "parent" is sub1's own

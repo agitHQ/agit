@@ -241,7 +241,9 @@ export function eventLine(e: AgitEvent): string {
   const p = e.payload as { [k: string]: Json };
   switch (e.type) {
     case "session.start": {
-      const parent = typeof p.parentSessionId === "string" ? ` parent=${p.parentSessionId.slice(0, 8)}` : "";
+      const native = p.native as { [k: string]: Json } | null | undefined;
+      const parentId = native && typeof native === "object" ? native.parentSessionId : undefined;
+      const parent = typeof parentId === "string" ? ` parent=${parentId.slice(0, 8)}` : "";
       return `session.start  runtime=${str(p.runtime)} ${str(p.runtimeVersion)}${parent}`.trimEnd();
     }
     case "session.end":

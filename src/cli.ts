@@ -1657,13 +1657,19 @@ function cmdLs(opts: Opts): number {
  * would need one; it does not exist yet, and this command does not guess
  * at where forks might be.
  */
-/** Distinct agentIds this session's Agent/Task tool calls launched (SPEC §13), in first-seen order. */
+/** Distinct agentIds this session's Agent tool calls launched (Claude Code's `toolUseResult.agentId`), in first-seen order. */
 function spawnedAgentIds(events: AgitEvent[]): string[] {
   const seen = new Set<string>();
   for (const e of events) {
     if (e.type !== "tool.result") continue;
     const structured = (e.payload as { structured?: Json }).structured;
-    if (structured === null || structured === undefined || typeof structured !== "object" || Array.isArray(structured)) continue;
+    if (
+      structured === null ||
+      structured === undefined ||
+      typeof structured !== "object" ||
+      Array.isArray(structured)
+    )
+      continue;
     const agentId = (structured as { [k: string]: Json }).agentId;
     if (typeof agentId === "string") seen.add(agentId);
   }
@@ -1679,8 +1685,8 @@ function isSessionSafeToEmbed(opts: Opts, id: string): boolean {
 }
 
 /**
- * Every session reachable from `rootId` by following `parentSessionId` up
- * and spawned agentIds down (SPEC §13) — the connected family of sessions
+ * Every session reachable from `rootId` by following `native.parentSessionId`
+ * up and spawned agentIds down — the connected family of sessions
  * `export-html` embeds so its viewer can navigate between them without a
  * second export or a network fetch. Skips a session that is not imported,
  * unverified, or unredacted without `--allow-unredacted`, and says so.
@@ -1699,7 +1705,7 @@ function collectRelatedSessions(
 
   const neighborsOf = (id: string, events: AgitEvent[]): string[] => {
     const start = (events[0]?.payload ?? {}) as { [k: string]: Json };
-    const parentId = typeof start.parentSessionId === "string" ? start.parentSessionId : null;
+    const parentId = parentSessionIdOf(start);
     return [...(parentId ? [parentId] : []), ...spawnedAgentIds(events)];
   };
 
@@ -1724,6 +1730,14 @@ function collectRelatedSessions(
     }
   }
   return { related, skipped };
+}
+
+/** A spawned subagent names its parent under session.start's native ids (claude-code.ts). */
+function parentSessionIdOf(start: { [k: string]: unknown }): string | null {
+  const native = start.native;
+  if (native === null || typeof native !== "object" || Array.isArray(native)) return null;
+  const parent = (native as { [k: string]: unknown }).parentSessionId;
+  return typeof parent === "string" ? parent : null;
 }
 
 function cmdShow(opts: Opts): number {
@@ -1785,7 +1799,7 @@ function cmdShow(opts: Opts): number {
           // chain, and a script filtering `ls --json` by tag wants them here too.
           tags: notes.tags,
           note: notes.note ?? null,
-          parentSessionId: typeof start.parentSessionId === "string" ? start.parentSessionId : null,
+          parentSessionId: parentSessionIdOf(start),
           spawnedAgentIds: spawnedAgentIds(events),
         },
         null,
@@ -1799,10 +1813,11 @@ function cmdShow(opts: Opts): number {
   console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
   if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
   if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
-  if (typeof start.parentSessionId === "string") {
-    const parentKnown = listSessionIds(opts.dir).includes(start.parentSessionId);
+  const parentSessionId = parentSessionIdOf(start);
+  if (parentSessionId !== null) {
+    const parentKnown = listSessionIds(opts.dir).includes(parentSessionId);
     console.log(
-      `  parent      ${start.parentSessionId}  (subagent of that session — agit show ${start.parentSessionId}${parentKnown ? "" : ", not yet imported"})`,
+      `  parent      ${parentSessionId}  (subagent of that session — agit show ${parentSessionId}${parentKnown ? "" : ", not yet imported"})`,
     );
   }
   console.log(`  started     ${first.ts}`);
@@ -1833,7 +1848,9 @@ function cmdShow(opts: Opts): number {
     const known = listSessionIds(opts.dir);
     console.log(`  spawned     ${spawned.length} subagent${spawned.length === 1 ? "" : "s"}:`);
     for (const agentId of spawned) {
-      console.log(`    ${agentId}  (agit show ${agentId}${known.includes(agentId) ? "" : ", not yet imported"})`);
+      console.log(
+        `    ${agentId}  (agit show ${agentId}${known.includes(agentId) ? "" : ", not yet imported"})`,
+      );
     }
   }
 
@@ -2915,7 +2932,8 @@ function cmdExportHtml(opts: Opts): number {
   // A prefix (--at) is not the whole story for a related session either —
   // only a full export embeds the family of sessions it was spawned into
   // or spawned itself.
-  const { related, skipped } = at === undefined ? collectRelatedSessions(opts, id, events) : { related: {}, skipped: [] };
+  const { related, skipped } =
+    at === undefined ? collectRelatedSessions(opts, id, events) : { related: {}, skipped: [] };
 
   // meta.json describes the whole log; a prefix must not claim its head.
   const html = renderSessionHtml(events, at === undefined ? meta : null, related);
@@ -2929,7 +2947,9 @@ function cmdExportHtml(opts: Opts): number {
   );
   const relatedCount = Object.keys(related).length;
   if (relatedCount > 0) {
-    console.log(`  related     ${relatedCount} linked session${relatedCount === 1 ? "" : "s"} embedded (parent/subagents) — navigable in the viewer`);
+    console.log(
+      `  related     ${relatedCount} linked session${relatedCount === 1 ? "" : "s"} embedded (parent/subagents) — navigable in the viewer`,
+    );
   }
   for (const s of skipped) console.log(`  skipped     ${s}`);
   if (bytes > 10e6) console.log("  large page — the viewer renders every event; --at N exports a prefix");
