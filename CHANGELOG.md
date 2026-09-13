@@ -7,6 +7,21 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Gemini CLI adapter.** `agit import session-*.jsonl` reads the
+  recordings `ChatRecordingService` writes under
+  `~/.gemini/tmp/<project>/chats/` — a metadata line, messages re-appended
+  as their tokens and tool calls land, `$set` and `$rewindTo` records —
+  and folds them by id the way Gemini CLI's own loader does. Messages,
+  thoughts, tool calls with their `success`/`error` results, and one `cost`
+  per model message (with cached tokens as cache reads) come through;
+  rewound messages, cancelled and in-flight tool calls, and `info` /
+  `warning` / `error` lines are counted by name. A live share holds the
+  last message back until a newer one settles it, and stops on a rewind.
+  The legacy single-document form is read too, and `import --all` scans
+  the chats directories. No `file.diff`: Gemini CLI records no file content.
+  Started by @thegoodengineer (#117); the adapter was rebuilt on the
+  runtime's source before merging, since the original read a per-line
+  `role`/`parts` shape the recorder does not write.
 - **`agit export --markdown`: a Markdown audit report** for a PR body or a
   review ticket — provenance (head hash, chain verified, each signature's
   verdict), usage totals as `stats` counts them with all four token counts,

@@ -117,6 +117,26 @@ function scanOpenClaw(agentsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** Gemini CLI: tmp/<project>/chats/<recording>, one level of subagent directories below. */
+function scanGeminiCli(tmpRoot: string, out: DiscoveredLog[]): void {
+  const recording = (name: string): boolean => name.endsWith(".jsonl") || name.endsWith(".json");
+  for (const project of listDir(tmpRoot)) {
+    const chats = join(tmpRoot, project, "chats");
+    if (!isDir(chats)) continue;
+    for (const name of listDir(chats)) {
+      const p = join(chats, name);
+      if (isDir(p)) {
+        for (const inner of listDir(p)) {
+          const q = join(p, inner);
+          if (recording(inner) && isFile(q)) record("gemini-cli", q, out);
+        }
+      } else if (recording(name) && isFile(p)) {
+        record("gemini-cli", p, out);
+      }
+    }
+  }
+}
+
 /** The state dir OpenClaw itself would use: the env override, else ~/.openclaw. */
 function openClawStateDir(home: string, env: NodeJS.ProcessEnv): string {
   const override = env.OPENCLAW_STATE_DIR?.trim();
@@ -139,6 +159,7 @@ export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = proce
     { runtime: "claude-code", dir: join(home, ".claude", "projects"), scan: scanClaudeCode },
     { runtime: "codex", dir: join(home, ".codex", "sessions"), scan: (d, o) => scanCodex(d, o) },
     { runtime: "openclaw", dir: join(openClawStateDir(home, env), "agents"), scan: scanOpenClaw },
+    { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
   ];
   const logs: DiscoveredLog[] = [];
   const roots: ScanRoot[] = [];

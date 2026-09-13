@@ -46,14 +46,16 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`),
   **OpenClaw** (its JSONL transcripts, or the agent database that holds
   them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
-  trajectories, and **LangGraph** checkpoint databases
-  (`agit import checkpoints.sqlite`) — the same event log, the same verbs,
-  whichever agent produced the session. A database holds sessions rather
+  trajectories, **LangGraph** checkpoint databases
+  (`agit import checkpoints.sqlite`), and **Gemini CLI** recordings
+  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`) — the same event log,
+  the same verbs, whichever agent produced the session. A database holds sessions rather
   than a session: every one in it is imported, one line each, and
   `--thread <id>` names just one. `agit import --all` finds every session
   those runtimes have written on this machine (`~/.claude/projects`,
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
-  database beside them) and imports what is new; `--latest`
+  database beside them, `~/.gemini/tmp/*/chats`) and imports what is new;
+  `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
   sessions are found the same way as today's.
@@ -315,13 +317,14 @@ fall out of that chain.
 
 Said plainly:
 
-- **Six adapters, with different limits.** Claude Code is the reference;
+- **Seven adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. ATIF is a standard rather than a runtime, Cline's SDK
-  format is a published contract, and LangGraph's checkpoint database is
-  read from the runtime's own serialization; none of the three carries file
-  content agit can hash — see below.
+  format is a published contract, LangGraph's checkpoint database is read
+  from the runtime's own serialization, and Gemini CLI's recording is folded
+  the way its own loader folds it; none of the four carries file content
+  agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -396,6 +399,21 @@ Said plainly:
   lines. Every `editor` and `apply_patch` call is counted in the import report
   as an edit agit cannot verify. The older VS Code globalStorage layout is
   undocumented and unversioned and is deliberately not read.
+- **A Gemini CLI import is the recording as Gemini CLI itself would load
+  it.** `agit import session-*.jsonl` reads what `ChatRecordingService`
+  writes: a metadata line, then messages appended again each time their
+  tokens or tool calls land, `$set` updates and `$rewindTo` marks. The
+  adapter folds those by id exactly as the CLI's loader does, so a rewound
+  turn is gone and a message's final form is what is recorded; the fold's
+  losses (rewound messages, cancelled or unfinished tool calls, `info` /
+  `warning` / `error` lines) are counted by name. A live share holds the
+  last message back until a newer one settles it, since the last message is
+  the one the writer re-pushes; a rewind during a live share stops it as
+  the rewrite of streamed history it is. No `file.diff`: an edit is a tool
+  call whose result is prose, and no content is recorded beside it. The
+  legacy single-document `.json` form is read too. Derived from the source
+  and checked against a fixture built to it; a real recording that
+  disagrees names its unmapped records in the import report.
 - **A LangGraph import is the thread's current history, and no more.**
   `agit import <checkpoints.sqlite>` reads what `langgraph-checkpoint-sqlite`
   wrote — the SQLite file itself, with a zero-dependency reader for the file
