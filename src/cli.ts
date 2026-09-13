@@ -15,6 +15,7 @@ import { geminiCliAdapter } from "./adapters/gemini-cli.js";
 import { kimiCodeAdapter } from "./adapters/kimi-code.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
+import { piAdapter } from "./adapters/pi.js";
 import { opencodeAdapter } from "./adapters/opencode.js";
 import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
@@ -120,6 +121,7 @@ const ADAPTERS: Adapter[] = [
   geminiCliAdapter,
   opencodeAdapter,
   kimiCodeAdapter,
+  piAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 

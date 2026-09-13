@@ -52,6 +52,10 @@
  *                 Linux, per VS Code's own settings docs; Insiders is
  *                 "Code - Insiders" beside it. Other editors that host the
  *                 extension are imported by path.
+ *  - pi           $PI_CODING_AGENT_DIR (default ~/.pi/agent)/sessions/
+ *                 --<cwd>--/<timestamp>_<session id>.jsonl —
+ *                 packages/coding-agent/docs/session-format.md and
+ *                 src/config.ts getAgentDir() in badlogic/pi-mono.
  *  - Roo Code     the same task directories under the editor's
  *                 User/globalStorage/rooveterinaryinc.roo-cline
  *                 (src/utils/storage.ts in RooCodeInc/Roo-Code; the
@@ -208,6 +212,23 @@ function scanKimiCode(sessionsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** pi sessions: sessions/--<cwd>--/<timestamp>_<id>.jsonl. */
+function scanPi(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const project of listDir(sessionsRoot)) {
+    const dir = join(sessionsRoot, project);
+    if (!isDir(dir)) continue;
+    for (const name of listDir(dir)) {
+      if (name.endsWith(".jsonl") && isFile(join(dir, name))) record("pi", join(dir, name), out);
+    }
+  }
+}
+
+/** The agent dir pi itself would use: the env override, else ~/.pi/agent. */
+function piAgentDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.PI_CODING_AGENT_DIR?.trim();
+  return override ? resolve(override) : join(home, ".pi", "agent");
+}
+
 /** Cline SDK sessions: data/sessions/<id>/<id>.messages.json. */
 function scanClineSdk(sessionsRoot: string, out: DiscoveredLog[]): void {
   for (const id of listDir(sessionsRoot)) {
@@ -285,6 +306,7 @@ export function discoverSessionLogs(
     { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
     { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
     { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
+    { runtime: "pi", dir: join(piAgentDir(home, env), "sessions"), scan: scanPi },
     { runtime: "cline-sdk", dir: join(cline, "data", "sessions"), scan: scanClineSdk },
     { runtime: "cline-classic", dir: join(cline, "data", "tasks"), scan: scanClineClassic },
     ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
