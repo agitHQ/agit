@@ -70,6 +70,7 @@ import {
   runSteerHook,
   STEERABLE_RUNTIMES,
   steerHookConfig,
+  steerHookDescription,
   steerKeyMatches,
   SteerQueue,
 } from "./steer.js";
@@ -189,13 +190,16 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit share <native.jsonl> --steer    also let viewers who hold the steer key
                                        queue messages for the agent; delivered
-                                       at its next turn boundary (Claude Code)
+                                       at its next turn boundary (Claude Code,
+                                       Gemini CLI)
   agit steer <link> "<text>" --steer-key K
                                        send a steering message from a terminal
                                        instead of the share page (--name N)
-  agit hook                            Claude Code hook (Stop, UserPromptSubmit):
-                                       hands queued steering messages to the
-                                       agent; --config prints the settings.json
+  agit hook                            the hook Claude Code (Stop, UserPromptSubmit)
+                                       or Gemini CLI (AfterAgent, BeforeAgent)
+                                       runs: hands queued steering messages to
+                                       the agent; --config [runtime] prints the
+                                       settings.json fragment
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
   agit relay --store <dir>             persist shares, so a restart keeps them
@@ -3093,13 +3097,27 @@ function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
  */
 async function cmdHook(opts: Opts): Promise<number> {
   if (opts.config) {
-    console.log(steerHookConfig());
-    console.error(
-      "\n(put that in .claude/settings.json — project or user — and Claude Code runs `agit hook`",
-    );
-    console.error(
-      " at every Stop and UserPromptSubmit; it prints nothing unless a live share has queued a message)",
-    );
+    const runtime = opts.args[0] ?? "claude-code";
+    if (!STEERABLE_RUNTIMES.has(runtime)) {
+      console.error(`agit hook --config takes one of: ${[...STEERABLE_RUNTIMES].join(", ")}`);
+      return 2;
+    }
+    console.log(steerHookConfig(runtime));
+    if (runtime === "gemini-cli") {
+      console.error(
+        "\n(put that in .gemini/settings.json — project or ~/.gemini — and Gemini CLI runs `agit hook`",
+      );
+      console.error(
+        " at every AfterAgent and BeforeAgent; it prints nothing unless a live share has queued a message)",
+      );
+    } else {
+      console.error(
+        "\n(put that in .claude/settings.json — project or user — and Claude Code runs `agit hook`",
+      );
+      console.error(
+        " at every Stop and UserPromptSubmit; it prints nothing unless a live share has queued a message)",
+      );
+    }
     return 0;
   }
   let input: string;
@@ -3235,6 +3253,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   // turn-boundary hook (src/steer.ts). Refused up front, before a share
   // exists, so a refusal never leaves an orphan link on the relay.
   let steerKey: string | null = null;
+  let steerRuntime = "claude-code";
   if (opts.steer) {
     if (nativePath === null) {
       console.error("--steer needs a live session: a static share has no agent to steer.");
@@ -3248,10 +3267,12 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!STEERABLE_RUNTIMES.has(adapter.name)) {
       console.error(
         `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
-          " Only Claude Code (Stop / UserPromptSubmit hooks) is wired; share without --steer to keep messages terminal-only.",
+          " Only Claude Code (Stop / UserPromptSubmit) and Gemini CLI (AfterAgent / BeforeAgent) are wired;" +
+          " share without --steer to keep messages terminal-only.",
       );
       return 2;
     }
+    steerRuntime = adapter.name;
     steerKey = newSteerKey();
   }
 
@@ -3276,7 +3297,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   if (steerKey === null) {
     console.log("  viewer messages appear below; they are NOT injected into the running agent.");
   } else {
-    printSteerBanner(steerKey);
+    printSteerBanner(steerKey, steerRuntime);
   }
   console.log(
     nativePath !== null
@@ -3335,12 +3356,21 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
 }
 
-function printSteerBanner(steerKey: string): void {
+function printSteerBanner(steerKey: string, runtime: string): void {
   console.log(`  steer key: ${steerKey}`);
   console.log("  a viewer who enters that key sends messages to the agent, not just to this terminal;");
-  console.log("  they are handed over at the agent's next turn boundary (Claude Code Stop /");
-  console.log("  UserPromptSubmit hooks) and every one is shown here first. One-time setup per");
-  console.log("  project: agit hook --config");
+  console.log(`  they are handed over at the agent's next turn boundary (${steerHookDescription(runtime)})`);
+  console.log("  and every one is shown here first. One-time setup per project:");
+  console.log(`  agit hook --config${runtime === "claude-code" ? "" : ` ${runtime}`}`);
+}
+
+/** Which adapter reads a native log, for the resume banner; "claude-code" when none does. */
+function followerAdapterName(nativePath: string): string {
+  try {
+    return pickAdapterFor(nativePath)?.name ?? "claude-code";
+  } catch {
+    return "claude-code";
+  }
 }
 
 /** End of share: drop the queue, but say what never reached the agent. */
@@ -3429,7 +3459,7 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   console.log(
     `  resumed: relay holds ${head.events} events; pushing ${all.length - head.events} more, then tailing ${state.nativePath}`,
   );
-  if (steerKey !== null) printSteerBanner(steerKey);
+  if (steerKey !== null) printSteerBanner(steerKey, followerAdapterName(state.nativePath));
   console.log("  Ctrl+C ends the share.\n");
   // The follower has polled, so the session id is known and the queue binds
   // at once. Not reset: messages queued before the crash are still owed to

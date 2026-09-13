@@ -3,6 +3,22 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`--steer` works for Gemini CLI sessions.** Gemini CLI documents a
+  turn-boundary hook (docs/hooks/reference.md): an `AfterAgent` hook's
+  blocking `decision` sends its `reason` to the agent as the next prompt —
+  in `client.ts` the history is kept and the continuation runs under
+  `stop_hook_active` — and `BeforeAgent`'s `additionalContext` rides with
+  the next prompt when the agent was idle. `agit hook` now answers both
+  (its `session_id` is the recording's `sessionId`, so a live share of a
+  Gemini recording queues under the id the hooks present), and `agit hook
+  --config gemini-cli` prints the `settings.json` fragment (milliseconds,
+  a `name`, per Gemini's schema). Derived from the source; not yet
+  exercised against a running Gemini CLI, unlike Claude Code's path.
+
 ## 0.10.0 — 2026-09-13
 
 ### Added

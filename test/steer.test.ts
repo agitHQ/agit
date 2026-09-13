@@ -203,6 +203,56 @@ describe("the hook", () => {
     expect(p2.hookSpecificOutput.hookEventName).toBe("UserPromptSubmit");
   });
 
+  it("hands queued messages to Gemini CLI's AfterAgent as a blocking reason and to BeforeAgent as context", () => {
+    // AfterAgent has no context field: a blocking decision's `reason` is
+    // "sent to the agent as a new prompt" (docs/hooks/reference.md), and
+    // client.ts keeps the history and continues with it. BeforeAgent takes
+    // additionalContext like Claude Code's UserPromptSubmit.
+    const dir = mktemp();
+    queueSteer(dir, SID, { ts: "2026-09-12T10:00:01.000Z", name: "alice", text: "check the tests too" });
+    const after = runSteerHook(
+      dir,
+      hookInput("AfterAgent", { prompt: "x", prompt_response: "y", stop_hook_active: false }),
+    );
+    const parsed = JSON.parse(after.stdout) as {
+      decision: string;
+      reason: string;
+      hookSpecificOutput?: unknown;
+    };
+    expect(parsed.decision).toBe("block");
+    expect(parsed.reason).toContain("[10:00:01] alice: check the tests too");
+    expect(parsed.hookSpecificOutput).toBeUndefined();
+    expect(runSteerHook(dir, hookInput("AfterAgent", { stop_hook_active: true })).stdout).toBe("");
+
+    queueSteer(dir, SID, { ts: "2026-09-12T10:00:02.000Z", name: "bob", text: "and the docs" });
+    const before = JSON.parse(runSteerHook(dir, hookInput("BeforeAgent", { prompt: "carry on" })).stdout) as {
+      hookSpecificOutput: { hookEventName: string; additionalContext: string };
+    };
+    expect(before.hookSpecificOutput.hookEventName).toBe("BeforeAgent");
+    expect(before.hookSpecificOutput.additionalContext).toContain("bob: and the docs");
+  });
+
+  it("prints a settings fragment per runtime: seconds for Claude Code, milliseconds and a name for Gemini CLI", () => {
+    const claude = JSON.parse(steerHookConfig()) as {
+      hooks: Record<string, { hooks: Record<string, unknown>[] }[]>;
+    };
+    expect(Object.keys(claude.hooks).sort()).toEqual(["Stop", "UserPromptSubmit"]);
+    expect(claude.hooks.Stop![0]!.hooks[0]!.timeout).toBe(10);
+    const gemini = JSON.parse(steerHookConfig("gemini-cli")) as {
+      hooks: Record<string, { hooks: Record<string, unknown>[] }[]>;
+    };
+    expect(Object.keys(gemini.hooks).sort()).toEqual(["AfterAgent", "BeforeAgent"]);
+    expect(gemini.hooks.AfterAgent![0]!.hooks[0]).toMatchObject({
+      command: "agit hook",
+      name: "agit-steer",
+      timeout: 10_000,
+    });
+    const cli = agit(["hook", "--config", "gemini-cli"]);
+    expect(cli.code).toBe(0);
+    expect(JSON.parse(cli.stdout)).toEqual(gemini);
+    expect(agit(["hook", "--config", "codex"]).code).toBe(2);
+  });
+
   it("is silent for every other event, for a subagent, for garbage, and for an unknown session", () => {
     const dir = mktemp();
     queueSteer(dir, SID, { ts: "t", name: "n", text: "x" });
@@ -417,6 +467,37 @@ describe("agit share --steer, end to end", () => {
     expect((await agitAsync(["steer", link, "two", "--steer-key", key])).code).toBe(0);
     await new Promise((r) => cli.on("close", r));
     expect(out).toContain("2 steering message(s) were queued but never reached the agent");
+  }, 60_000);
+
+  it("accepts --steer on a Gemini CLI recording, keyed by the recording's own session id", async () => {
+    const dir = mktemp();
+    const gemini = join(ROOT, "fixtures", "gemini-cli", "session.jsonl");
+    const native = join(dir, "session-x.jsonl");
+    writeFileSync(native, readFileSync(gemini));
+    const { base } = await relay();
+    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 6000);
+    let out = "";
+    let err = "";
+    cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
+    cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
+    for (let i = 0; i < 60 && !/steer key: /.test(out); i++) await sleep(100);
+    expect(out, out + err).toContain("Gemini CLI AfterAgent / BeforeAgent hooks");
+    expect(out).toContain("agit hook --config gemini-cli");
+    const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
+    const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
+    await sleep(1500);
+    expect((await agitAsync(["steer", link, "use the other tool", "--steer-key", key])).code).toBe(0);
+    await sleep(800);
+    // Queued under the Gemini session id, which is what its hooks will present as session_id.
+    const sid = "0c3d7a1e-5b2f-4c8a-9d6e-1f2a3b4c5d6e";
+    expect(existsSync(steerInboxPath(dir, sid)), out + err).toBe(true);
+    const hook = await agitAsync(
+      ["hook", "--dir", dir],
+      JSON.stringify({ hook_event_name: "AfterAgent", session_id: sid }),
+    );
+    expect(JSON.parse(hook.stdout)).toMatchObject({ decision: "block" });
+    expect(hook.stdout).toContain("use the other tool");
+    await new Promise((r) => cli.on("close", r));
   }, 60_000);
 
   it("refuses runtimes without a documented hook, static shares, and a relay that ignores the flag", async () => {
