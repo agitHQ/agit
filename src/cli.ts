@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
+import { clineClassicAdapter } from "./adapters/cline-classic.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
 import { geminiCliAdapter } from "./adapters/gemini-cli.js";
@@ -114,6 +115,7 @@ const ADAPTERS: Adapter[] = [
   openclawAdapter,
   atifAdapter,
   clineSdkAdapter,
+  clineClassicAdapter,
   langgraphAdapter,
   geminiCliAdapter,
   opencodeAdapter,
@@ -136,6 +138,9 @@ usage:
                                        checkpoint database, an OpenClaw agent
                                        database or OpenCode's opencode.db;
                                        --thread picks one
+  agit import <cline task dir>         a Cline 3.x task directory: its
+                                       transcript, dated from the timeline
+                                       beside it where the transcript is not
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
          [--project P] [--sort KEY]    started (default), events, files or id
@@ -1028,14 +1033,20 @@ function importPath(opts: Opts, target: string): number {
     console.error(`no such file: ${path}`);
     return 1;
   }
-  // `agit pr` writes a directory; accept it as directly as a file.
+  // `agit pr` writes a directory; accept it as directly as a file. So is a
+  // Cline task directory, whose transcript is the file the adapter reads
+  // (the timeline beside it is found from that path).
   if (statSync(path).isDirectory()) {
-    const inner = join(path, "events.jsonl");
-    if (!existsSync(inner)) {
-      console.error(`${path} is a directory with no events.jsonl in it`);
+    const bundle = join(path, "events.jsonl");
+    const clineTask = join(path, "api_conversation_history.json");
+    if (existsSync(bundle)) path = bundle;
+    else if (existsSync(clineTask)) path = clineTask;
+    else {
+      console.error(
+        `${path} is a directory with no events.jsonl (an agit bundle) and no api_conversation_history.json (a Cline task) in it`,
+      );
       return 1;
     }
-    path = inner;
   }
   // A runtime whose log is not text (a LangGraph checkpoint database, an
   // OpenClaw agent database) is recognized from its bytes, before anything

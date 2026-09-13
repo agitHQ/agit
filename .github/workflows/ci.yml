@@ -75,3 +75,9 @@ jobs:
           node dist/cli.js verify thread-agit-fixture-0001 --dir /tmp/agit-ci
           diff /tmp/agit-ci/.agit/sessions/thread-agit-fixture-0001/events.jsonl \
                fixtures/langgraph/simple.golden.jsonl
+      - name: import the Cline task directory and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/cline-classic/1736589300000 --dir /tmp/agit-ci
+          node dist/cli.js verify 1736589300000 --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/1736589300000/events.jsonl \
+               fixtures/cline-classic/1736589300000.golden.jsonl

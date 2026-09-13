@@ -7,6 +7,27 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Cline 3.x task directories import (`cline-classic`, #63).** The
+  `<globalStorage>/tasks/<taskId>/` layout every release up to 3.89 wrote,
+  read from that release's source: `api_conversation_history.json` for the
+  transcript, with XML tool calls split by a port of Cline's own
+  `parseAssistantMessageV2` and paired with the `[name for '…'] Result:`
+  text that follows, native `tool_use` / `tool_result` by id, `thinking`
+  kept, `metrics` and `modelInfo` read where the message carries them; and
+  `ui_messages.json` beside it for the tasks that predate those stamps —
+  each transcript message dated by the first timeline entry Cline wrote
+  after it (`conversationHistoryIndex`), or by request order for a timeline
+  older than that field, and its request's `api_req_started` token counts
+  used where the message has no `metrics`. `<environment_details>` blocks
+  are counted, not filed as user text. `agit import <task directory>`
+  works directly, and `import --all` scans `~/.cline/data/tasks`,
+  `~/.cline/data/sessions` (the SDK files, not scanned before) and VS
+  Code's `globalStorage/saoudrizwan.claude-dev/tasks` on each platform
+  (`CLINE_DIR`, `APPDATA`, `XDG_CONFIG_HOME` honoured). No `file.diff`:
+  `<final_file_content>` is the normalized text `DiffViewProvider.saveChanges`
+  returns, not the saved bytes, so nothing is hashed from it — the finding
+  that closes the "classic verifies" hope on #63.
+
 - **`--steer` works for Gemini CLI sessions.** Gemini CLI documents a
   turn-boundary hook (docs/hooks/reference.md): an `AfterAgent` hook's
   blocking `decision` sends its `reason` to the agent as the next prompt —

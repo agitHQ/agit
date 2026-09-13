@@ -50,6 +50,10 @@ describe("discoverSessionLogs", () => {
       ["gemini-cli", false, 0],
       ["opencode", false, 0],
       ["kimi-code", false, 0],
+      ["cline-sdk", false, 0],
+      ["cline-classic", false, 0],
+      ["cline-classic", false, 0],
+      ["cline-classic", false, 0],
     ]);
   });
 
@@ -89,6 +93,10 @@ describe("discoverSessionLogs", () => {
       "gemini-cli",
       "opencode",
       "kimi-code",
+      "cline-sdk",
+      "cline-classic",
+      "cline-classic",
+      "cline-classic",
     ]);
   });
 

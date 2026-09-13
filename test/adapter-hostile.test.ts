@@ -8,11 +8,12 @@
  * Mutations are seeded, so a failure here reproduces.
  */
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { atifAdapter } from "../src/adapters/atif.js";
 import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
+import { clineClassicAdapter } from "../src/adapters/cline-classic.js";
 import { clineSdkAdapter } from "../src/adapters/cline-sdk.js";
 import { codexAdapter } from "../src/adapters/codex.js";
 import { geminiCliAdapter } from "../src/adapters/gemini-cli.js";
@@ -30,6 +31,14 @@ const CASES: { adapter: Adapter; fixture: string }[] = [
   { adapter: openclawAdapter, fixture: F("openclaw", "edits.jsonl") },
   { adapter: atifAdapter, fixture: F("atif", "simple.json") },
   { adapter: clineSdkAdapter, fixture: F("cline-sdk", "simple.messages.json") },
+  {
+    adapter: clineClassicAdapter,
+    fixture: F("cline-classic", "1736589300000", "api_conversation_history.json"),
+  },
+  {
+    adapter: clineClassicAdapter,
+    fixture: F("cline-classic", "1789136000000", "api_conversation_history.json"),
+  },
   { adapter: geminiCliAdapter, fixture: F("gemini-cli", "session.jsonl") },
   { adapter: kimiCodeAdapter, fixture: F("kimi-code", "01JRZ3K2Y7Q8W6X5V4T3S2R1P0", "wire.jsonl") },
 ];
@@ -108,7 +117,7 @@ function mutations(lines: string[], seed: number, count: number): string[][] {
 
 describe("text adapters over hostile lines", () => {
   for (const [i, { adapter, fixture }] of CASES.entries()) {
-    it(`${adapter.name}: returns or throws a plain Error, never a built-in one`, () => {
+    it(`${adapter.name} over ${relative(ROOT, fixture)}: returns or throws a plain Error, never a built-in one`, () => {
       const lines = readFileSync(fixture, "utf8")
         .split("\n")
         .filter((l) => l.trim() !== "");
