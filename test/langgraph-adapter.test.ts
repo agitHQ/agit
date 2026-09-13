@@ -276,8 +276,9 @@ describe("the adapter over the runtime's own checkpoints", () => {
     // Thread A ran once, then update_state was applied against an older
     // checkpoint and the graph continued from there. The saver's current
     // checkpoint (greatest id) is on the new branch, so the history is the
-    // edit and what followed; the four checkpoints of the abandoned branch,
-    // the six a subgraph wrote, and the other threads' sixteen are counted.
+    // edit and what followed; the four checkpoints of the abandoned branch
+    // and the six a subgraph wrote are counted. Other threads are their own
+    // sessions, not skips of this one.
     const a = langgraphAdapter.convertBytes!(bytes(EDGES), { select: THREAD_A });
     expect(payloads(a.drafts, "message.user").map((p) => p.text)).toEqual([
       "Read my note.",
@@ -288,7 +289,6 @@ describe("the adapter over the runtime's own checkpoints", () => {
     ).toEqual(["After the edit.", "(subgraph ran)"]);
     expect(a.records).toBe(15);
     expect(a.skipped).toEqual({
-      "checkpoint-in-other-thread": 16,
       "subgraph-checkpoint": 6,
       "checkpoint-off-current-branch": 4,
       "message-type:system": 1,
@@ -329,15 +329,17 @@ describe("agit import on a LangGraph database", () => {
     );
     expect(agit(["export", "thread-agit-fixture-0001", "--atif", "--dir", dir]).code).toBe(0);
     expect(agit(["export", "thread-agit-fixture-0001", "--otel", "--dir", dir]).code).toBe(0);
-    expect(readSessionMeta(dir, "thread-agit-fixture-0001")!.source.select).toBeUndefined();
+    // A single-thread database still records which thread it was.
+    expect(readSessionMeta(dir, "thread-agit-fixture-0001")!.source.select).toBe("thread-agit-fixture-0001");
 
+    // Several threads: every one is imported, one line each; --thread names one.
     const many = agit(["import", EDGES, "--dir", dir]);
-    expect(many.code).toBe(1);
-    expect(many.out).toContain("--thread");
-    expect(agit(["import", EDGES, "--thread", "thread-B", "--dir", dir]).out).toContain("imported thread-B");
-    expect(agit(["import", EDGES, "--thread", THREAD_A, "--dir", dir]).out).toContain("imported langgraph-");
-    // The same file again, same thread: unchanged. A different thread was never "already imported".
+    expect(many.code, many.out).toBe(0);
+    expect(many.out).toContain("3 sessions");
+    expect(many.out).toContain("3 imported, 0 updated, 0 unchanged");
     expect(agit(["import", EDGES, "--thread", "thread-B", "--dir", dir]).out).toContain("unchanged thread-B");
+    expect(agit(["import", EDGES, "--thread", THREAD_A, "--dir", dir]).out).toContain("unchanged langgraph-");
+    expect(agit(["import", EDGES, "--thread", "nope", "--dir", dir]).code).toBe(1);
     expect(readSessionMeta(dir, "thread-B")!.source.select).toBe("thread-B");
     expect(readSessionEvents(dir, "thread-B").length).toBe(10);
   });

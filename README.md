@@ -44,13 +44,16 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   check out. Adapters for native logs, also auto-detected:
   **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`),
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`),
-  **OpenClaw**, **Cline SDK**, **ATIF** trajectories, and **LangGraph**
-  checkpoint databases (`agit import checkpoints.sqlite`, one thread per
-  session; `--thread <id>` picks one when a database holds several) — the
-  same event log, the same verbs, whichever agent produced the session.
-  `agit import --all` finds every session those runtimes have written on
-  this machine (`~/.claude/projects`, `~/.codex/sessions`,
-  `~/.openclaw/agents/*/sessions`) and imports what is new; `--latest`
+  **OpenClaw** (its JSONL transcripts, or the agent database that holds
+  them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
+  trajectories, and **LangGraph** checkpoint databases
+  (`agit import checkpoints.sqlite`) — the same event log, the same verbs,
+  whichever agent produced the session. A database holds sessions rather
+  than a session: every one in it is imported, one line each, and
+  `--thread <id>` names just one. `agit import --all` finds every session
+  those runtimes have written on this machine (`~/.claude/projects`,
+  `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
+  database beside them) and imports what is new; `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
   sessions are found the same way as today's.
