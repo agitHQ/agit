@@ -66,11 +66,10 @@ function retype(value: unknown, next: () => number, depth = 0): unknown {
   if (value !== null && typeof value === "object") {
     const keys = Object.keys(value as object);
     if (keys.length === 0) return value;
-    const copy = { ...(value as Record<string, unknown>) };
+    const record = value as Record<string, unknown>;
     const k = keys[Math.floor(next() * keys.length)]!;
-    if (next() < 0.2) delete copy[k];
-    else copy[k] = retype(copy[k], next, depth + 1);
-    return copy;
+    if (next() < 0.2) return Object.fromEntries(Object.entries(record).filter(([key]) => key !== k));
+    return { ...record, [k]: retype(record[k], next, depth + 1) };
   }
   return choices[Math.floor(next() * choices.length)];
 }
