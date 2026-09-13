@@ -319,7 +319,25 @@ export const opencodeAdapter: Adapter = {
       return iso;
     };
 
+    // A live share must only ever extend what it streamed, and OpenCode
+    // rewrites an in-progress assistant message's parts in place as tokens
+    // land (the text part's `text` grows; a tool part's `state` moves from
+    // `running` to `completed`). So under `live` a message with no
+    // `time.completed` yet — and anything after it — is held back until it
+    // completes; the poll that finds it complete streams it whole.
+    let held = 0;
+    const streamed: MessageRow[] = [];
     for (const m of messages) {
+      const time = asRec(m.data.time);
+      if (opts?.live && str(m.data.role) === "assistant" && ms(time?.completed) === null) {
+        held = messages.length - streamed.length;
+        break;
+      }
+      streamed.push(m);
+    }
+    if (held > 0) skip("live:message-in-progress-held-back", held);
+
+    for (const m of streamed) {
       const role = str(m.data.role);
       const time = asRec(m.data.time);
       const mts = stamp(ms(time?.created) ?? m.timeCreated);

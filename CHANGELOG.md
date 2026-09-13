@@ -3,6 +3,19 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Fixed
+
+- **A live share of an OpenCode session no longer stops on the turn in
+  progress.** OpenCode rewrites an in-progress assistant message's parts in
+  place as tokens land, so a poll mid-turn saw streamed rows change and
+  stopped the share as a rewrite. Under `live` the adapter now holds back a
+  message with no `time.completed` yet — and anything after it — until it
+  completes, and the poll that finds it complete streams it whole; the
+  held-back count is reported. Fixture: `opencode-live.sqlite`, generated
+  with `--live`, a session whose last message is still streaming.
+
 ## 0.14.0 — 2026-09-13
 
 ### Added
