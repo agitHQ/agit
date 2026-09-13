@@ -338,6 +338,36 @@ Session ids accept unique prefixes, git-style. The inspection verbs are
 fully local: no server, no network calls, no telemetry. Only `share` talks
 to a relay — one you run.
 
+### Adapter matrix
+
+What each runtime's log lets agit do, at a glance; the reasons and edges are
+in "What does not work yet" below. *Verified* means a `file.diff` whose
+hashes are over bytes agit holds and the runtime wrote; *window* means an
+update verifies only while agit already holds the file (a create, an
+earlier verified edit, a complete read, or `--base`).
+
+| Runtime | Reads | `file.diff` | Live `share` | `--steer` | Derived from |
+|---|---|---|---|---|---|
+| Claude Code | `~/.claude/projects/<p>/<uuid>.jsonl`, and `<uuid>/subagents/*.jsonl` | `Edit` / `Write`, verified | yes | yes (Stop / UserPromptSubmit hooks; verified against the runtime) | real logs |
+| Codex CLI | `~/.codex/sessions/…/rollout-*.jsonl` | creates verified; updates within the window | yes | no | its structured edit records (real-rollout check open, #34) |
+| OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl`, `openclaw-agent.sqlite` | `apply_patch` replayed with OpenClaw's rules; updates within the window | yes, both | no | types + a real 2026.9.3 transcript |
+| ATIF | `trajectory.json` | none (no edit construct) | yes | no | Harbor's RFC |
+| Cline SDK | `~/.cline/data/sessions/<id>/<id>.messages.json` | none (line endings depend on an OS the log omits) | yes | no | the messages contract v1 |
+| Cline 3.x / Roo Code | `<globalStorage>/tasks/<id>/` | none (`<final_file_content>` is normalized text) | yes | no | source at v3.89.2 / v3.20 + v3.54 |
+| LangGraph | `checkpoints.sqlite` | none | yes | no | its checkpoint schema |
+| Gemini CLI | `~/.gemini/tmp/<p>/chats/session-*.jsonl` | none | yes (last message held until settled) | yes (AfterAgent / BeforeAgent hooks; source-derived) | source |
+| Kimi Code | `~/.kimi/sessions/*/*/wire.jsonl` | none | yes | no | docs + source |
+| OpenCode | `~/.local/share/opencode/opencode.db` | none | yes (a streaming message held until complete) | no | its schema |
+| pi | `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `write` verified; `edit` within the window; complete reads seed `fork` | yes | yes (an extension; source-derived) | docs + source |
+| Hermes Agent | `~/.hermes/state.db` | `write_file` when Hermes's own byte count says untransformed; `patch` within the window | yes (totals held until the end) | no | source |
+
+Every database (LangGraph, OpenClaw, OpenCode, Hermes) is read with its WAL
+sidecar folded in, so a running writer's newest rows are seen. "Derived
+from source" means the adapter was built from the runtime's own recorder
+and checked against a fixture written the same way, not against a real log
+from that runtime; a real one that disagrees names its unmapped records in
+the import report.
+
 ## The format
 
 [SPEC.md](SPEC.md) is the most important artifact in this repo. Nine event
