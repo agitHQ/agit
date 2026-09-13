@@ -1,7 +1,17 @@
 import type { AgitEvent, SessionMeta } from "./format/events.js";
 
-export function renderSessionHtml(events: AgitEvent[], meta?: SessionMeta | null): string {
-  const data = JSON.stringify({ events, meta: meta ?? null })
+/**
+ * Other sessions to embed alongside the primary one, keyed by session id \u2014
+ * subagent sessions spawned from it (or the parent it was spawned from),
+ * discovered via `session.start.payload.parentSessionId` and a `tool.result`
+ * `structured.agentId` (SPEC \u00a79). The viewer lets you jump into one and back
+ * without a second export or a network fetch: everything is already in the
+ * page.
+ */
+export type RelatedSessions = Record<string, { events: AgitEvent[]; meta: SessionMeta | null }>;
+
+export function renderSessionHtml(events: AgitEvent[], meta?: SessionMeta | null, related?: RelatedSessions): string {
+  const data = JSON.stringify({ events, meta: meta ?? null, related: related ?? {} })
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")
     .replace(/&/g, "\\u0026")
@@ -35,6 +45,34 @@ h1 { margin: 0 0 6px; font-size: 18px; }
   font-size: 12px;
   white-space: pre-wrap;
 }
+#navbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+#navbar button {
+  font: inherit;
+  cursor: pointer;
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 3px 10px;
+}
+#navbar button:hover { background: #30363d; }
+#navbar .label { color: #8b949e; font-size: 12px; }
+.openSub {
+  font: inherit;
+  cursor: pointer;
+  background: #1f2933;
+  color: #7ee787;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-top: 8px;
+}
+.openSub:hover { background: #263a2c; }
 .layout {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
@@ -140,6 +178,10 @@ pre .hunk { color: #d2a8ff; }
 <header>
   <h1>agit · session</h1>
   <div id="meta" class="meta"></div>
+  <div id="navbar">
+    <span id="navLabel" class="label"></span>
+    <button id="parentBtn" style="display:none"></button>
+  </div>
 </header>
 
 <main class="layout">
@@ -162,13 +204,28 @@ pre .hunk { color: #d2a8ff; }
 var DATA = JSON.parse(
   document.getElementById("session-data")?.textContent ?? "{}"
 );
-var events = DATA.events || [];
-var meta = DATA.meta || null;
+
+var sessions = {};
+var rootId = DATA.events && DATA.events.length ? DATA.events[0].session : null;
+if (rootId) sessions[rootId] = { events: DATA.events || [], meta: DATA.meta || null };
+var relatedData = DATA.related || {};
+Object.keys(relatedData).forEach(function (id) {
+  sessions[id] = {
+    events: relatedData[id].events || [],
+    meta: relatedData[id].meta || null
+  };
+});
+
+var currentId = rootId;
+var events = rootId ? sessions[rootId].events : [];
+var meta = rootId ? sessions[rootId].meta : null;
 
 var timeline = document.getElementById("timeline");
 var detail = document.getElementById("detail");
 var metaBox = document.getElementById("meta");
 var fileList = document.getElementById("flist");
+var navLabel = document.getElementById("navLabel");
+var parentBtn = document.getElementById("parentBtn");
 
 function el(tag, cls, text) {
   var n = document.createElement(tag);
@@ -344,6 +401,19 @@ function select(seq) {
             oneLine(JSON.stringify(p.structured), 600)
         )
       );
+
+      var agentId = p.structured && p.structured.agentId;
+      if (typeof agentId === "string" && sessions[agentId]) {
+        var openBtn = el(
+          "button",
+          "openSub",
+          "→ open subagent " + agentId.slice(0, 8)
+        );
+        openBtn.addEventListener("click", function () {
+          loadSession(agentId);
+        });
+        detail.appendChild(openBtn);
+      }
     }
 
   } else if (e.type === "file.diff") {
@@ -488,13 +558,55 @@ function renderMeta() {
   metaBox.textContent = lines.join("\\n");
 }
 
-events.forEach(addEvent);
-renderFiles();
-renderMeta();
+function renderNav() {
+  navLabel.textContent = "session " + currentId;
 
-if (events.length > 0) {
-  select(events[0].seq);
+  var first = events[0];
+  var p = (first && first.payload) || {};
+  var parentId = typeof p.parentSessionId === "string" ? p.parentSessionId : null;
+
+  if (parentId && sessions[parentId]) {
+    parentBtn.style.display = "";
+    parentBtn.textContent = "↑ parent " + parentId.slice(0, 8);
+    parentBtn.onclick = function () {
+      loadSession(parentId);
+    };
+  } else {
+    parentBtn.style.display = "none";
+  }
 }
+
+/**
+ * Switch the whole view to another embedded session — a spawned subagent,
+ * or (via the parent button) up to the session that spawned this one. The
+ * parent link is data (session.start.payload.parentSessionId), so it is
+ * always correct regardless of how you navigated here — unlike a
+ * back-in-history stack, it still points the right way through a chain of
+ * several subagents (parent -> sub1 -> sub2: sub2's "parent" is sub1's own
+ * session, not the root).
+ */
+function loadSession(id) {
+  if (!sessions[id]) return;
+
+  currentId = id;
+  events = sessions[id].events;
+  meta = sessions[id].meta;
+
+  timeline.textContent = "";
+  events.forEach(addEvent);
+  renderFiles();
+  renderMeta();
+  renderNav();
+
+  if (events.length > 0) {
+    select(events[0].seq);
+  } else {
+    detail.textContent = "";
+    detail.appendChild(el("div", "muted", "No events."));
+  }
+}
+
+if (rootId) loadSession(rootId);
 </script>
 </body>
 </html>

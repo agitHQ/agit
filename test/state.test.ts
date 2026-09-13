@@ -93,6 +93,48 @@ describe("replay state folds", () => {
   });
 });
 
+describe("timeline lines for subagent linking", () => {
+  it("names the parent session on session.start when this session is a spawned subagent", () => {
+    const evs = buildChain("agent-1", [
+      {
+        ts: "2026-01-01T00:00:00.000Z",
+        type: "session.start",
+        payload: { runtime: "claude-code", parentSessionId: "parent-0001" },
+      },
+    ]);
+    expect(timelineLines(evs)[0]).toContain("parent=parent-0");
+  });
+
+  it("leaves session.start unchanged for a session with no parent", () => {
+    const evs = buildChain("s", [
+      { ts: "2026-01-01T00:00:00.000Z", type: "session.start", payload: { runtime: "claude-code" } },
+    ]);
+    expect(timelineLines(evs)[0]).not.toContain("parent=");
+  });
+
+  it("points a tool.result at the subagent it spawned, via structured.agentId", () => {
+    const evs = buildChain("s", [
+      {
+        ts: "2026-01-01T00:00:00.000Z",
+        type: "tool.result",
+        payload: { output: "done", isError: false, structured: { agentId: "agent-1" } },
+      },
+    ]);
+    expect(timelineLines(evs)[0]).toContain("→ agent=agent-1");
+  });
+
+  it("leaves an ordinary tool.result — no structured.agentId — unchanged", () => {
+    const evs = buildChain("s", [
+      {
+        ts: "2026-01-01T00:00:00.000Z",
+        type: "tool.result",
+        payload: { output: "done", isError: false, structured: { filePath: "a.ts" } },
+      },
+    ]);
+    expect(timelineLines(evs)[0]).not.toContain("→ agent=");
+  });
+});
+
 describe("clipLine", () => {
   it("keeps the indentation that excerpt destroys", () => {
     const diffLine = "+    if (tokens <= 0) return false;";

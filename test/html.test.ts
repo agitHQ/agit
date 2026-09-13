@@ -164,4 +164,22 @@ describe("renderSessionHtml", () => {
       expect(quotes % 2, `unbalanced quotes: ${line.trim().slice(0, 70)}`).toBe(0);
     }
   });
+
+  it("embeds related sessions (a spawned subagent, or the parent that spawned this one)", () => {
+    const parentEvents = [
+      event(0, "session.start", { runtime: "claude" }),
+      event(1, "message.user", { text: "hi" }),
+    ];
+    const subEvents = [
+      {
+        ...event(0, "session.start", { runtime: "claude", parentSessionId: "test-session" }),
+        session: "sub-1",
+      },
+    ];
+    const html = renderSessionHtml(parentEvents, null, {
+      "sub-1": { events: subEvents, meta: null },
+    });
+    expect(html).toContain('"sub-1"');
+    expect(html).toContain("parentSessionId");
+  });
 });

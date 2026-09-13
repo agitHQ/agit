@@ -27,7 +27,7 @@ import {
 } from "./format/events.js";
 import { blameFile, sessionTrailer, whyLine, type LineOrigin } from "./blame.js";
 import { writeFork } from "./fork.js";
-import { renderSessionHtml } from "./html.js";
+import { renderSessionHtml, type RelatedSessions } from "./html.js";
 import { diffSessions, renderDiff, treeOnDisk } from "./diff.js";
 import { discoverSessionLogs, parseSince } from "./discover.js";
 import { buildMatcher, grepEvents, GrepPatternError, renderHit, type GrepHit } from "./grep.js";
@@ -164,7 +164,8 @@ usage:
   agit export <id> --markdown          a Markdown audit report: provenance,
                                        usage, files, timeline (fenced text)
   agit export-html <id> [--out FILE]   write a self-contained, offline HTML session
-                       [--at N]        viewer; --at N exports the prefix up to event N
+              [--at N] [--force]       viewer; --at N exports the prefix up to event N;
+                                       --force overwrites an existing --out file
   agit fork <id> --at N [--out DIR]    branch at event N: reconstruct the file tree
                                        (hash-verified) and write a context seed
   agit diff <a> <b> | <fork-dir>       compare two sessions, or a fork against
@@ -224,7 +225,8 @@ options:
   --no-git         merge: use the built-in three-way merge, not git merge-file
   --detach         share --static: print the link and exit, holding nothing open
   --store <dir>    relay: where to persist shares (default: memory only)
-  --force          push: publish again even if this session was pushed before
+  --force          push: publish again even if this session was pushed before;
+                   export-html: overwrite an existing --out file
   --since <dur>    import --all / stats: window of 7d / 24h / 30m
   --by <group>     stats: day (default), model, runtime or project
   --price <file>   stats: a local rate table; without it no money is shown
@@ -1621,6 +1623,75 @@ function cmdLs(opts: Opts): number {
  * would need one; it does not exist yet, and this command does not guess
  * at where forks might be.
  */
+/** Distinct agentIds this session's Agent/Task tool calls launched (SPEC §13), in first-seen order. */
+function spawnedAgentIds(events: AgitEvent[]): string[] {
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type !== "tool.result") continue;
+    const structured = (e.payload as { structured?: Json }).structured;
+    if (structured === null || structured === undefined || typeof structured !== "object" || Array.isArray(structured)) continue;
+    const agentId = (structured as { [k: string]: Json }).agentId;
+    if (typeof agentId === "string") seen.add(agentId);
+  }
+  return [...seen];
+}
+
+/** Same gate as `refuseUnlessVerified` + `refuseUnredacted`, silent — for a session embedded alongside the one being exported, not the export's own subject. */
+function isSessionSafeToEmbed(opts: Opts, id: string): boolean {
+  const meta = readSessionMeta(opts.dir, id);
+  if (meta?.redaction?.enabled === false && !opts.allowUnredacted) return false;
+  if (!verifyChain(readSessionLines(opts.dir, id), meta ?? undefined).ok) return false;
+  return !signatureLines(meta ?? undefined, id).some((l) => l.startsWith("SIGNATURE DOES NOT MATCH"));
+}
+
+/**
+ * Every session reachable from `rootId` by following `parentSessionId` up
+ * and spawned agentIds down (SPEC §13) — the connected family of sessions
+ * `export-html` embeds so its viewer can navigate between them without a
+ * second export or a network fetch. Skips a session that is not imported,
+ * unverified, or unredacted without `--allow-unredacted`, and says so.
+ */
+function collectRelatedSessions(
+  opts: Opts,
+  rootId: string,
+  rootEvents: AgitEvent[],
+): { related: RelatedSessions; skipped: string[] } {
+  const known = new Set(listSessionIds(opts.dir));
+  const cache = new Map<string, AgitEvent[]>([[rootId, rootEvents]]);
+  const related: RelatedSessions = {};
+  const skipped: string[] = [];
+  const visited = new Set<string>([rootId]);
+  const queue: string[] = [rootId];
+
+  const neighborsOf = (id: string, events: AgitEvent[]): string[] => {
+    const start = (events[0]?.payload ?? {}) as { [k: string]: Json };
+    const parentId = typeof start.parentSessionId === "string" ? start.parentSessionId : null;
+    return [...(parentId ? [parentId] : []), ...spawnedAgentIds(events)];
+  };
+
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const events = cache.get(id)!;
+    for (const neighbor of neighborsOf(id, events)) {
+      if (visited.has(neighbor)) continue;
+      visited.add(neighbor);
+      if (!known.has(neighbor)) {
+        skipped.push(`${neighbor} — not yet imported (agit import --all)`);
+        continue;
+      }
+      if (!isSessionSafeToEmbed(opts, neighbor)) {
+        skipped.push(`${neighbor} — unverified or unredacted without --allow-unredacted`);
+        continue;
+      }
+      const neighborEvents = readSessionEvents(opts.dir, neighbor);
+      cache.set(neighbor, neighborEvents);
+      related[neighbor] = { events: neighborEvents, meta: readSessionMeta(opts.dir, neighbor) };
+      queue.push(neighbor);
+    }
+  }
+  return { related, skipped };
+}
+
 function cmdShow(opts: Opts): number {
   const id = requireId(opts);
   const events = readSessionEvents(opts.dir, id);
@@ -1680,6 +1751,8 @@ function cmdShow(opts: Opts): number {
           // chain, and a script filtering `ls --json` by tag wants them here too.
           tags: notes.tags,
           note: notes.note ?? null,
+          parentSessionId: typeof start.parentSessionId === "string" ? start.parentSessionId : null,
+          spawnedAgentIds: spawnedAgentIds(events),
         },
         null,
         2,
@@ -1692,6 +1765,12 @@ function cmdShow(opts: Opts): number {
   console.log(`  runtime     ${start.runtime} ${start.runtimeVersion ?? ""}`.trimEnd());
   if (typeof start.cwd === "string") console.log(`  cwd         ${start.cwd}`);
   if (typeof start.gitBranch === "string" && start.gitBranch) console.log(`  branch      ${start.gitBranch}`);
+  if (typeof start.parentSessionId === "string") {
+    const parentKnown = listSessionIds(opts.dir).includes(start.parentSessionId);
+    console.log(
+      `  parent      ${start.parentSessionId}  (subagent of that session — agit show ${start.parentSessionId}${parentKnown ? "" : ", not yet imported"})`,
+    );
+  }
   console.log(`  started     ${first.ts}`);
   console.log(`  duration    ${humanDuration(Date.parse(last.ts) - Date.parse(first.ts))}`);
   if (meta) console.log(`  imported    ${meta.importedAt}  (adapter ${adapterLabel(meta)})`);
@@ -1713,6 +1792,15 @@ function cmdShow(opts: Opts): number {
         .map(([t, n]) => `${t}×${n}`)
         .join(", ")}`,
     );
+  }
+
+  const spawned = spawnedAgentIds(events);
+  if (spawned.length > 0) {
+    const known = listSessionIds(opts.dir);
+    console.log(`  spawned     ${spawned.length} subagent${spawned.length === 1 ? "" : "s"}:`);
+    for (const agentId of spawned) {
+      console.log(`    ${agentId}  (agit show ${agentId}${known.includes(agentId) ? "" : ", not yet imported"})`);
+    }
   }
 
   if (u.apiMessages > 0) {
@@ -2785,13 +2873,18 @@ function cmdExportHtml(opts: Opts): number {
   const events = at === undefined ? all : all.filter((e) => e.seq <= at);
   const outPath = resolve(opts.out ?? `agit-${id.slice(0, 8)}${at === undefined ? "" : `-at${at}`}.html`);
 
-  if (existsSync(outPath)) {
-    console.error(`refusing to overwrite existing ${outPath} — pass a fresh --out`);
+  if (existsSync(outPath) && !opts.force) {
+    console.error(`refusing to overwrite existing ${outPath} — pass a fresh --out, or --force to overwrite`);
     return 1;
   }
 
+  // A prefix (--at) is not the whole story for a related session either —
+  // only a full export embeds the family of sessions it was spawned into
+  // or spawned itself.
+  const { related, skipped } = at === undefined ? collectRelatedSessions(opts, id, events) : { related: {}, skipped: [] };
+
   // meta.json describes the whole log; a prefix must not claim its head.
-  const html = renderSessionHtml(events, at === undefined ? meta : null);
+  const html = renderSessionHtml(events, at === undefined ? meta : null, related);
   writeFileSync(outPath, html, "utf8");
   const bytes = Buffer.byteLength(html, "utf8");
 
@@ -2800,6 +2893,11 @@ function cmdExportHtml(opts: Opts): number {
   console.log(
     `  ${events.length} events${at === undefined ? "" : ` (of ${all.length}, up to --at ${at})`}, ${(bytes / 1e6).toFixed(1)} MB`,
   );
+  const relatedCount = Object.keys(related).length;
+  if (relatedCount > 0) {
+    console.log(`  related     ${relatedCount} linked session${relatedCount === 1 ? "" : "s"} embedded (parent/subagents) — navigable in the viewer`);
+  }
+  for (const s of skipped) console.log(`  skipped     ${s}`);
   if (bytes > 10e6) console.log("  large page — the viewer renders every event; --at N exports a prefix");
   console.log("  self-contained HTML — no network or external resources");
 

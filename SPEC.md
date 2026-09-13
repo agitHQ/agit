@@ -105,6 +105,9 @@ MUST NOT require it.
 `runtimeVersion`, `cwd`, `gitBranch` are `null` when the source doesn't say.
 `ts` is the timestamp of the first native conversation record.
 
+A session that is a spawned subagent also carries `parentSessionId` and
+`agentId` (§13); both are absent otherwise.
+
 ### 5.2 `session.end` — last event, exactly once
 
 ```json
@@ -163,7 +166,8 @@ One event per tool invocation, in block order.
 
 `output` is the flattened text the model saw. `structured` is the runtime's
 structured result object when it has one (Claude Code's `toolUseResult`),
-carried verbatim after redaction; `null` otherwise.
+carried verbatim after redaction; `null` otherwise. When the tool call spawned
+a subagent, `structured.agentId` names that subagent's session (§13).
 
 ### 5.7 `file.diff`
 
@@ -359,3 +363,34 @@ fields, serialize canonically, check the Ed25519 signature against `key`.
 `keyFingerprint` is a convenience for humans comparing keys and is recomputed
 from `key` on every verification; a verifier must never trust the stored
 value, or a doctored one could make an unrelated key look familiar.
+
+## 13. Subagent linking (Claude Code adapter)
+
+Claude Code writes a spawned subagent's turns to their own native log,
+`<project>/<session-uuid>/subagents/agent-<id>.jsonl`, discovered alongside
+the top-level session logs (§1). Every record in that file carries
+`isSidechain: true` and an `agentId`, but keeps the *parent's* `sessionId` —
+which already belongs to the parent's own log. To avoid that collision, the
+adapter stores a subagent transcript under its `agentId` instead of the
+native `sessionId`, and links the two:
+
+- The subagent's `session.start` payload (§5.1) gains two fields:
+  `parentSessionId` (the parent's session id) and `agentId` (this session's
+  own id, i.e. its `session`). Both are absent for a session that is not a
+  subagent.
+- A parent's `tool.result` payload (§5.6) carries the spawned subagent's id
+  as `structured.agentId`, when the native `toolUseResult` for that tool
+  call recorded one (e.g. an `Agent`/`Task` tool call). Readers that want the
+  parent → child edge scan a session's `tool.result` events for it, rather
+  than a dedicated event type — no new event type is needed to say "this
+  tool call spawned that session".
+
+Neither field renames or replaces anything in §5.1 or §5.6; both stay
+optional payload fields, so a reader ignoring them still gets a valid
+session (§2: unknown/absent payload fields are never an error). Following
+either edge requires the linked session to actually be imported — an
+`agentId` or `parentSessionId` pointing at a session the store does not have
+is not an error, just an edge with nothing on the other end yet.
+
+This is Claude Code-specific, like §9: other adapters have no subagent
+concept yet and emit neither field.
