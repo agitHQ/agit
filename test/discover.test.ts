@@ -48,6 +48,7 @@ describe("discoverSessionLogs", () => {
       ["codex", true, 1],
       ["openclaw", true, 1],
       ["gemini-cli", false, 0],
+      ["opencode", false, 0],
     ]);
   });
 
@@ -80,7 +81,13 @@ describe("discoverSessionLogs", () => {
     const { logs, roots } = discoverSessionLogs(home, {});
     expect(logs).toEqual([]);
     expect(roots.every((r) => !r.exists && r.found === 0)).toBe(true);
-    expect(roots.map((r) => r.runtime)).toEqual(["claude-code", "codex", "openclaw", "gemini-cli"]);
+    expect(roots.map((r) => r.runtime)).toEqual([
+      "claude-code",
+      "codex",
+      "openclaw",
+      "gemini-cli",
+      "opencode",
+    ]);
   });
 
   it("orders oldest first, so import output is stable", () => {

@@ -322,7 +322,11 @@ describe("the relay", () => {
 describe("agit share --steer, end to end", () => {
   function spawnShare(args: string[], sigintAfterMs: number): ReturnType<typeof spawn> {
     const preload = join(mktemp(), "sigint.mjs");
-    writeFileSync(preload, `setTimeout(() => process.emit("SIGINT"), ${sigintAfterMs}).unref();\n`, "utf8");
+    writeFileSync(
+      preload,
+      `// Fire once the CLI is listening: under a loaded parallel run its startup can outlast the delay,\n// and an emit with no listener is silently lost, leaving the share open until the test times out.\nconst fire = () => (process.listenerCount("SIGINT") > 0 ? process.emit("SIGINT") : setTimeout(fire, 50).unref());\nsetTimeout(fire, ${sigintAfterMs}).unref();\n`,
+      "utf8",
+    );
     return spawn(process.execPath, ["--import", pathToFileURL(preload).href, CLI, "share", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -413,7 +417,7 @@ describe("agit share --steer, end to end", () => {
     expect((await agitAsync(["steer", link, "two", "--steer-key", key])).code).toBe(0);
     await new Promise((r) => cli.on("close", r));
     expect(out).toContain("2 steering message(s) were queued but never reached the agent");
-  }, 30_000);
+  }, 60_000);
 
   it("refuses runtimes without a documented hook, static shares, and a relay that ignores the flag", async () => {
     const dir = mktemp();

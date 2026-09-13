@@ -60,7 +60,11 @@ const simpleEvents = (): AgitEvent[] => {
  */
 function spawnShare(args: string[], sigintAfterMs: number): ReturnType<typeof spawn> {
   const preload = join(mktemp(), "sigint.mjs");
-  writeFileSync(preload, `setTimeout(() => process.emit("SIGINT"), ${sigintAfterMs}).unref();\n`, "utf8");
+  writeFileSync(
+    preload,
+    `// Fire once the CLI is listening: under a loaded parallel run its startup can outlast the delay,\n// and an emit with no listener is silently lost, leaving the share open until the test times out.\nconst fire = () => (process.listenerCount("SIGINT") > 0 ? process.emit("SIGINT") : setTimeout(fire, 50).unref());\nsetTimeout(fire, ${sigintAfterMs}).unref();\n`,
+    "utf8",
+  );
   return spawn(process.execPath, ["--import", pathToFileURL(preload).href, CLI, "share", ...args], {
     stdio: ["ignore", "pipe", "pipe"],
   });

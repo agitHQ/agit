@@ -32,6 +32,20 @@ Notable changes to agit. The event format itself is versioned separately
   report. Takes `export-html`'s gates: an unverified session is refused and
   an unredacted one needs `--allow-unredacted`. Contributed by
   @thegoodengineer (#120).
+- **OpenCode adapter.** `agit import opencode.db` reads the SQLite database
+  OpenCode keeps every session in (`~/.local/share/opencode/`, per its XDG
+  data directory), from the tables its drizzle schema and generated DDL
+  define and the v1 session schema its `data` JSON follows, in the order
+  its own reader uses. Messages, reasoning, tool calls with results, and
+  one `cost` per model step come through; `synthetic` and `ignored` text
+  parts, unfinished tool states, `patch`/`snapshot`/`step-start` markers and
+  every other part type are counted by name; the dollar cost stays out
+  (SPEC §5.9). No `file.diff`: OpenCode's edits live in git snapshots, not
+  in the database. `import --all` scans the data directory. Every session in
+  the file is imported unless `--thread <id>` names one. Started by
+  @thegoodengineer (#122); the adapter was rebuilt on the runtime's source
+  before merging, since the original read a line format OpenCode does not
+  write.
 
 ### Fixed
 
