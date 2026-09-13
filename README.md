@@ -514,8 +514,10 @@ Said plainly:
   way edit.ts does — BOM off, line ending noted, normalize, apply, restore —
   when it already holds the file (a write, a verified edit, an untruncated
   `read`, which returns the text unchanged, or `--base`), and counts the
-  edit otherwise. Shell edits stay invisible. `usage.cost` is dollars and is
-  counted, not stored. OpenClaw writes this same format, being built on pi;
+  edit otherwise. A complete read is also tagged on its result, so `agit
+  fork` can rebuild a file whose first recorded edit came after one — the
+  read has to hash to the edit's `beforeHash` to count. Shell edits stay
+  invisible. `usage.cost` is dollars and is counted, not stored. OpenClaw writes this same format, being built on pi;
   the two are told apart by session version (OpenClaw's is 4, pi's 3) and,
   for a version-3 file, by whose tools it calls, before either adapter
   claims it. Derived from the source and checked against a fixture built to

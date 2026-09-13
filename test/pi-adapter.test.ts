@@ -197,6 +197,15 @@ describe("the pi adapter", () => {
     ]);
     expect(results[1]!.structured).toMatchObject({ firstChangedLine: 3 });
     expect(results[1]!.native).toMatchObject({ toolName: "edit" });
+    // The read was complete, and says so, for fork to rebuild from.
+    expect(results[0]!.native).toEqual({
+      entryId: "c3d4e5f6",
+      parentId: "b2c3d4e5",
+      toolName: "read",
+      readOf: "/home/dev/hello/src/index.ts",
+      complete: true,
+    });
+    expect(results[3]!.native).toEqual({ entryId: "c9d0e1f2", parentId: "b8c9d0e1", toolName: "bash" });
 
     const costs = payloads(r.drafts, "cost");
     expect(costs).toHaveLength(7);
@@ -373,6 +382,13 @@ describe("the pi adapter", () => {
       ),
     ];
     const full = piAdapter.convert(mk({}));
+    expect(payloads(full.drafts, "tool.result")[0]!.native).toMatchObject({
+      readOf: "/home/dev/hello/f.txt",
+      complete: true,
+    });
+    expect(
+      payloads(piAdapter.convert(mk({ offset: 1 })).drafts, "tool.result")[0]!.native,
+    ).not.toHaveProperty("readOf");
     expect(payloads(full.drafts, "file.diff")[0]).toMatchObject({
       kind: "modify",
       beforeHash: sha(text),
@@ -492,6 +508,12 @@ describe("agit import on a pi session", () => {
     expect(fork.code, fork.out).toBe(0);
     expect(readFileSync(join(dir, "fork", "tree", "README.md"), "utf8")).toBe(
       "# hello\n\nGreets the world.\n",
+    );
+    // index.ts was only ever edited, never written — but it was read whole first,
+    // and that read hashes to the edit's beforeHash, so the tree has it too.
+    expect(fork.out).toContain("2 files written");
+    expect(readFileSync(join(dir, "fork", "tree", "src", "index.ts"), "utf8")).toBe(
+      'import { greet } from "./greet";\n\nconsole.log(greet("world"));\n',
     );
     expect(agit(["export", SID, "--markdown", "--dir", dir]).code).toBe(0);
 

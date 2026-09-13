@@ -5,6 +5,19 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## Unreleased
 
+### Added
+
+- **`agit fork` rebuilds a file whose first recorded edit followed a
+  complete read.** A file that was only ever edited, never written, had no
+  recorded content to start from unless the runtime attached the
+  pre-edit file to the edit (Claude Code does; pi does not). An adapter can
+  now tag a tool.result as a complete read of a path (`native.readOf`,
+  `native.complete`), and fork takes the latest such read before the edit
+  as the base — only when it hashes to the edit's `beforeHash`, so a stale
+  read is refused the way a wrong `originalFile` is. The pi adapter tags
+  its untruncated `read` results. fork's report names both sources when
+  neither is there.
+
 ### Fixed
 
 - **A live share of an OpenCode session no longer stops on the turn in

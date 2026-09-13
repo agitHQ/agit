@@ -206,5 +206,6 @@ describe("fork explains a redacted file honestly (#55)", () => {
     expect(r.out).toContain("ratelimit.ts");
     expect(r.out).toContain("content was redacted on import, so its recorded hash cannot be reproduced");
     expect(r.out).not.toContain("with no recorded originalFile");
+    expect(r.out).not.toContain("no recorded originalFile or complete read");
   });
 });

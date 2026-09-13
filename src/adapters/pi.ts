@@ -437,6 +437,21 @@ export const piAdapter: Adapter = {
           const isError = m.isError === true;
           const output = contentText(m.content, () => skip("content:image"));
           const details = asRec(m.details);
+          const call = toolUseId === null ? undefined : calls.get(toolUseId);
+          // A full read is the file's text exactly (see the header): the
+          // result is tagged so `agit fork` can rebuild a file whose first
+          // recorded edit came after such a read, hash-checked against the
+          // edit's beforeHash.
+          let readOf: string | null = null;
+          if (call !== undefined && !isError && call.name === "read") {
+            const path = str(call.args.path);
+            const abs = path === null ? null : resolveAgainst(cwd, path);
+            const partial = call.args.offset !== undefined || call.args.limit !== undefined;
+            const truncated = details !== undefined && details.truncation !== undefined;
+            const parts = Array.isArray(m.content) ? m.content : [];
+            const onlyText = parts.length === 1 && asRec(parts[0])?.type === "text";
+            if (abs !== null && !partial && !truncated && onlyText) readOf = abs;
+          }
           drafts.push({
             ts,
             type: "tool.result",
@@ -445,10 +460,9 @@ export const piAdapter: Adapter = {
               isError,
               output,
               structured: details ?? null,
-              native: { ...native, toolName },
+              native: { ...native, toolName, ...(readOf !== null ? { readOf, complete: true } : {}) },
             },
           });
-          const call = toolUseId === null ? undefined : calls.get(toolUseId);
           if (call === undefined) {
             if (toolName !== null && (toolName === "write" || toolName === "edit"))
               skip(`${toolName}:call not in log`);
@@ -516,15 +530,8 @@ export const piAdapter: Adapter = {
                 }
               }
             }
-          } else if (!isError && call.name === "read") {
-            // A full read is the file's text exactly (see the header).
-            const path = str(call.args.path);
-            const abs = path === null ? null : resolveAgainst(cwd, path);
-            const partial = call.args.offset !== undefined || call.args.limit !== undefined;
-            const truncated = details !== undefined && details.truncation !== undefined;
-            const parts = Array.isArray(m.content) ? m.content : [];
-            const onlyText = parts.length === 1 && asRec(parts[0])?.type === "text";
-            if (abs !== null && !partial && !truncated && onlyText) known.set(abs, output);
+          } else if (readOf !== null) {
+            known.set(readOf, output);
           }
         } else {
           skip(`message-role:${role}`);
