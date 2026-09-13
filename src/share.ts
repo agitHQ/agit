@@ -343,6 +343,14 @@ export interface InboxMessage {
 export interface InboxHandlers {
   onMessage?: (msg: InboxMessage) => void;
   onInfo?: (info: { live: boolean; viewers: number; events: number }) => void;
+  /**
+   * The relay has accepted this connection as the writer inbox: from here on
+   * a message it forwards reaches `onMessage`. The relay keeps no inbox
+   * history — a message forwarded before this point went nowhere — so a
+   * sharer must not hand out the link until this has fired. Fires again on
+   * each reconnect.
+   */
+  onOpen?: () => void;
 }
 
 /**
@@ -359,6 +367,7 @@ export function openInbox(relayUrl: string, share: ShareInfo, handlers: InboxHan
           signal: ctl.signal,
         });
         if (!res.ok || !res.body) throw new Error(`inbox: ${res.status}`);
+        handlers.onOpen?.();
         await readSse(
           res.body,
           (event, data) => {

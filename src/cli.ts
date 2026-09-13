@@ -3547,6 +3547,23 @@ async function cmdShare(opts: Opts): Promise<number> {
       ...(steerKey !== null ? { steerKey } : {}),
     });
   }
+  // The inbox is opened before the link is printed, and the link waits for
+  // it: the relay keeps no inbox history, so a viewer message forwarded
+  // before this process is connected goes nowhere. A link handed out
+  // earlier invited exactly that — a steer sent in the first second was
+  // dropped without a trace.
+  let follower: SessionFollower | null = null;
+  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower?.sessionId ?? null) : null;
+  let inboxOpened: () => void = () => {};
+  const connected = new Promise<void>((resolveConnected) => {
+    inboxOpened = resolveConnected;
+  });
+  const inbox = openShareInbox(opts.relay, share, steer, steerKey, () => inboxOpened());
+  if (!(await inboxConnected(connected))) {
+    console.error(
+      "  (the writer inbox has not connected yet; a message sent before it does is not delivered)",
+    );
+  }
   const expiry = new Date(Date.now() + share.ttlMs).toLocaleString();
   console.log(`\n  ${share.viewUrl}\n`);
   console.log(`  sharing the redacted event log — anyone with the link can read it until ${expiry}.`);
@@ -3561,9 +3578,6 @@ async function cmdShare(opts: Opts): Promise<number> {
       : "  Ctrl+C ends the share.\n",
   );
 
-  let follower: SessionFollower | null = null;
-  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower?.sessionId ?? null) : null;
-  const inbox = openShareInbox(opts.relay, share, steer, steerKey);
   let keepOpen = false;
   try {
     if (staticEvents) {
@@ -3711,17 +3725,27 @@ async function cmdShareResume(opts: Opts): Promise<number> {
     return 1;
   }
 
+  // The follower has polled, so the session id is known and the queue binds
+  // at once. Not reset: messages queued before the crash are still owed to
+  // the agent, and the hook's cursor still says which ones it has had. As
+  // on a fresh share, the inbox connects before the link is printed again.
+  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower.sessionId) : null;
+  let inboxOpened: () => void = () => {};
+  const connected = new Promise<void>((resolveConnected) => {
+    inboxOpened = resolveConnected;
+  });
+  const inbox = openShareInbox(relay, share, steer, steerKey, () => inboxOpened());
+  if (!(await inboxConnected(connected))) {
+    console.error(
+      "  (the writer inbox has not connected yet; a message sent before it does is not delivered)",
+    );
+  }
   console.log(`\n  ${share.viewUrl}\n`);
   console.log(
     `  resumed: relay holds ${head.events} events; pushing ${all.length - head.events} more, then tailing ${state.nativePath}`,
   );
   if (steerKey !== null) printSteerBanner(steerKey, followerAdapterName(state.nativePath));
   console.log("  Ctrl+C ends the share.\n");
-  // The follower has polled, so the session id is known and the queue binds
-  // at once. Not reset: messages queued before the crash are still owed to
-  // the agent, and the hook's cursor still says which ones it has had.
-  const steer = steerKey !== null ? new SteerQueue(opts.dir, () => follower.sessionId) : null;
-  const inbox = openShareInbox(relay, share, steer, steerKey);
   // Only end the share once this process has successfully attached as its
   // writer. If the catch-up push fails (e.g. 409 because the original CLI is
   // in fact still alive and pushing), ending the share here would kill it
@@ -3775,11 +3799,24 @@ function followerFor(
   return new SessionFollower(nativePath, adapter, redaction, select);
 }
 
+/** The inbox's first connection, or false after a bounded wait — the relay answered createShare, so this is seconds, not a hang. */
+async function inboxConnected(connected: Promise<void>, timeoutMs = 10_000): Promise<boolean> {
+  let timer: NodeJS.Timeout | null = null;
+  const timeout = new Promise<false>((r) => {
+    timer = setTimeout(() => r(false), timeoutMs);
+    timer.unref();
+  });
+  const ok = await Promise.race([connected.then(() => true as const), timeout]);
+  if (timer !== null) clearTimeout(timer);
+  return ok;
+}
+
 function openShareInbox(
   relayUrl: string,
   share: ShareInfo,
   steer: SteerQueue | null = null,
   steerKey: string | null = null,
+  onOpen?: () => void,
 ): AbortController {
   let lastViewers = -1;
   const onMessage = (raw: InboxMessage): void => {
@@ -3804,6 +3841,7 @@ function openShareInbox(
   };
   return openInbox(relayUrl, share, {
     onMessage,
+    onOpen,
     onInfo: (i) => {
       if (i.viewers !== lastViewers) {
         lastViewers = i.viewers;

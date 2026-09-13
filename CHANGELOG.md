@@ -3,6 +3,20 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Fixed
+
+- **A steer message sent right after the share link appeared could be
+  dropped.** The relay keeps no inbox history — a viewer message is
+  forwarded only to a connected writer inbox — and `agit share` printed the
+  link and steer key before it had connected its inbox, so a message sent
+  in that first moment went nowhere, silently. The inbox now connects first
+  and the link waits for it (bounded; a relay that answered `createShare`
+  connects in milliseconds), on a fresh share and on `--resume`. The steer
+  tests that used to sleep for a fixed time now wait for the condition they
+  meant, with a timeout that names it.
+
 ## 0.16.0 — 2026-09-13
 
 ### Fixed

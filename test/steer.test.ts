@@ -38,6 +38,15 @@ const CODEX = join(ROOT, "fixtures", "codex", "simple.jsonl");
 
 const mktemp = (): string => mkdtempSync(join(tmpdir(), "agit-steer-"));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const NL_ = "\n";
+/** Poll until `cond` holds, failing with `what` after `ms` — never a fixed wait for something asynchronous. */
+async function waitFor(cond: () => boolean, what: string, ms = 15_000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
+    await sleep(50);
+  }
+}
 const SID = "11111111-2222-4333-8444-555555555555";
 
 function agit(args: string[], stdin?: string): { code: number; stdout: string; stderr: string } {
@@ -326,9 +335,16 @@ describe("the relay", () => {
     share: { shareId: string; writerToken: string },
   ): Promise<InboxMessage[]> {
     const got: InboxMessage[] = [];
-    const ctl = openInbox(base, { ...share, ttlMs: 0, viewUrl: "" }, { onMessage: (m) => got.push(m) });
-    open.push({ close: async () => ctl.abort() });
-    await sleep(200);
+    // Resolved by onOpen: the relay has this connection in its inbox set, so
+    // a message posted from here on is forwarded to it.
+    await new Promise<void>((connected) => {
+      const ctl = openInbox(
+        base,
+        { ...share, ttlMs: 0, viewUrl: "" },
+        { onMessage: (m) => got.push(m), onOpen: connected },
+      );
+      open.push({ close: async () => ctl.abort() });
+    });
     return got;
   }
 
@@ -362,7 +378,7 @@ describe("the relay", () => {
       });
     expect((await post({ name: "alice", text: "steer me", key: "sekrit" })).status).toBe(200);
     expect((await post({ name: "bob", text: "just chatting" })).status).toBe(200);
-    await sleep(300);
+    await waitFor(() => inbox.length >= 2, "both messages in the inbox");
 
     expect(inbox.map((m) => [m.name, m.steer, m.key])).toEqual([
       ["alice", true, "sekrit"],
@@ -392,7 +408,7 @@ describe("the relay", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "alice", text: "hi", key: "sekrit" }),
     });
-    await sleep(300);
+    await waitFor(() => inbox.length >= 1, "the message in the inbox");
     expect(inbox.length).toBe(1);
     expect(inbox[0]!.key).toBeUndefined();
     expect(inbox[0]!.steer).toBeUndefined();
@@ -400,16 +416,36 @@ describe("the relay", () => {
 });
 
 describe("agit share --steer, end to end", () => {
-  function spawnShare(args: string[], sigintAfterMs: number): ReturnType<typeof spawn> {
-    const preload = join(mktemp(), "sigint.mjs");
+  /**
+   * Spawn `agit share` with a preload that raises SIGINT in-process once a
+   * stop file appears — the test ends the share when its assertions are
+   * done, never on a clock. A timed SIGINT used to end the share under
+   * load before the message had arrived, and `close()` then removed the
+   * inbox the assertions were about to read.
+   */
+  function spawnShare(args: string[]): { cli: ReturnType<typeof spawn>; stop: () => void } {
+    const scratch = mktemp();
+    const preload = join(scratch, "sigint.mjs");
+    const stopFile = join(scratch, "stop");
     writeFileSync(
       preload,
-      `// Fire once the CLI is listening: under a loaded parallel run its startup can outlast the delay,\n// and an emit with no listener is silently lost, leaving the share open until the test times out.\nconst fire = () => (process.listenerCount("SIGINT") > 0 ? process.emit("SIGINT") : setTimeout(fire, 50).unref());\nsetTimeout(fire, ${sigintAfterMs}).unref();\n`,
+      [
+        'import { existsSync } from "node:fs";',
+        `const stop = ${JSON.stringify(stopFile)};`,
+        "// An emit with no listener is silently lost: keep trying until the CLI is listening.",
+        "const tick = () => {",
+        '  if (existsSync(stop) && process.listenerCount("SIGINT") > 0) process.emit("SIGINT");',
+        "  else setTimeout(tick, 50).unref();",
+        "};",
+        "setTimeout(tick, 50).unref();",
+        "",
+      ].join(NL_),
       "utf8",
     );
-    return spawn(process.execPath, ["--import", pathToFileURL(preload).href, CLI, "share", ...args], {
+    const cli = spawn(process.execPath, ["--import", pathToFileURL(preload).href, CLI, "share", ...args], {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    return { cli, stop: () => writeFileSync(stopFile, "", "utf8") };
   }
 
   it("queues a message with the right key for the hook, shows a wrong one as terminal-only, and cleans up", async () => {
@@ -422,18 +458,17 @@ describe("agit share --steer, end to end", () => {
     writeFileSync(native, lines.join("\n") + "\n", "utf8");
     const { base } = await relay();
 
-    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 7000);
+    const { cli, stop } = spawnShare([native, "--steer", "--relay", base, "--dir", dir]);
     let out = "";
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
     // Wait for the banner: it carries the key and the link.
-    for (let i = 0; i < 40 && !/steer key: /.test(out); i++) await sleep(100);
+    await waitFor(() => /steer key: /.test(out), "the steer banner");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)?.[1];
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)?.[0];
     expect(key, out + err).toBeTruthy();
     expect(link, out + err).toBeTruthy();
-    await sleep(1500); // the first poll has happened; the queue is bound to the session
 
     // Two viewers: one with the key (the terminal path, via `agit steer`),
     // one guessing (the page path, via plain HTTP).
@@ -452,7 +487,7 @@ describe("agit share --steer, end to end", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: "mallory", text: "rm -rf everything", key: "guess" }),
     });
-    await sleep(800);
+    await waitFor(() => existsSync(steerInboxPath(dir, sessionId)), "the steer inbox file");
 
     // Only the keyed message is queued; the hook sees exactly that.
     const inbox = steerInboxPath(dir, sessionId);
@@ -470,6 +505,8 @@ describe("agit share --steer, end to end", () => {
     expect(hook.stdout).toContain("look at the failing test first");
     expect(hook.stdout).not.toContain("rm -rf");
 
+    await waitFor(() => out.includes("rm -rf everything"), "the rejected message in the terminal");
+    stop();
     const code: number = await new Promise((r) => cli.on("close", (c) => r(c ?? -1)));
     expect(code, out + err).toBe(0);
     expect(out).toContain("⇢ agent (queued for its next turn): look at the failing test first");
@@ -486,15 +523,24 @@ describe("agit share --steer, end to end", () => {
     const native = join(dir, "native.jsonl");
     writeFileSync(native, lines.join("\n") + "\n", "utf8");
     const { base } = await relay();
-    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 4000);
+    const { cli, stop } = spawnShare([native, "--steer", "--relay", base, "--dir", dir]);
     let out = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
-    for (let i = 0; i < 40 && !/steer key: /.test(out); i++) await sleep(100);
+    await waitFor(() => /steer key: /.test(out), "the steer banner");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
-    await sleep(1500);
     expect((await agitAsync(["steer", link, "one", "--steer-key", key])).code).toBe(0);
     expect((await agitAsync(["steer", link, "two", "--steer-key", key])).code).toBe(0);
+    const sessionId = claudeCodeAdapter.convert(lines).sessionId;
+    await waitFor(
+      () =>
+        existsSync(steerInboxPath(dir, sessionId)) &&
+        readFileSync(steerInboxPath(dir, sessionId), "utf8")
+          .split(NL_)
+          .filter((l) => l.trim() !== "").length >= 2,
+      "both messages queued",
+    );
+    stop();
     await new Promise((r) => cli.on("close", r));
     expect(out).toContain("2 steering message(s) were queued but never reached the agent");
   }, 60_000);
@@ -510,20 +556,19 @@ describe("agit share --steer, end to end", () => {
     const native = join(dir, "session.jsonl");
     writeFileSync(native, readFileSync(pi));
     const { base } = await relay();
-    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 6000);
+    const { cli, stop } = spawnShare([native, "--steer", "--relay", base, "--dir", dir]);
     let out = "";
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
-    for (let i = 0; i < 60 && !/steer key: /.test(out); i++) await sleep(100);
+    await waitFor(() => /steer key: /.test(out), "the steer banner");
     expect(out, out + err).toContain("pi's agent_end / before_agent_start extension events");
     expect(out).toContain("agit hook --config pi");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
-    await sleep(1500);
     expect((await agitAsync(["steer", link, "read the README first", "--steer-key", key])).code).toBe(0);
-    await sleep(800);
     const sid = "8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e";
+    await waitFor(() => existsSync(steerInboxPath(dir, sid)), "the steer inbox file");
     expect(existsSync(steerInboxPath(dir, sid)), out + err).toBe(true);
     const hook = await agitAsync(
       ["hook", "--dir", dir],
@@ -531,6 +576,7 @@ describe("agit share --steer, end to end", () => {
     );
     expect(JSON.parse(hook.stdout)).toMatchObject({ message: { customType: "agit-steer" } });
     expect(hook.stdout).toContain("read the README first");
+    stop();
     await new Promise((r) => cli.on("close", r));
   }, 60_000);
 
@@ -540,21 +586,20 @@ describe("agit share --steer, end to end", () => {
     const native = join(dir, "session-x.jsonl");
     writeFileSync(native, readFileSync(gemini));
     const { base } = await relay();
-    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 6000);
+    const { cli, stop } = spawnShare([native, "--steer", "--relay", base, "--dir", dir]);
     let out = "";
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
-    for (let i = 0; i < 60 && !/steer key: /.test(out); i++) await sleep(100);
+    await waitFor(() => /steer key: /.test(out), "the steer banner");
     expect(out, out + err).toContain("Gemini CLI AfterAgent / BeforeAgent hooks");
     expect(out).toContain("agit hook --config gemini-cli");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
-    await sleep(1500);
     expect((await agitAsync(["steer", link, "use the other tool", "--steer-key", key])).code).toBe(0);
-    await sleep(800);
     // Queued under the Gemini session id, which is what its hooks will present as session_id.
     const sid = "0c3d7a1e-5b2f-4c8a-9d6e-1f2a3b4c5d6e";
+    await waitFor(() => existsSync(steerInboxPath(dir, sid)), "the steer inbox file");
     expect(existsSync(steerInboxPath(dir, sid)), out + err).toBe(true);
     const hook = await agitAsync(
       ["hook", "--dir", dir],
@@ -562,6 +607,7 @@ describe("agit share --steer, end to end", () => {
     );
     expect(JSON.parse(hook.stdout)).toMatchObject({ decision: "block" });
     expect(hook.stdout).toContain("use the other tool");
+    stop();
     await new Promise((r) => cli.on("close", r));
   }, 60_000);
 
@@ -604,7 +650,11 @@ describe("agit share --steer, end to end", () => {
     expect(q.undelivered()).toBe(1);
     expect(existsSync(steerInboxPath(dir, SID))).toBe(true); // the stale file, untouched so far
     known = SID;
-    await sleep(600);
+    // The queue retries on a timer once the id is known; wait for the write, not the clock.
+    await waitFor(
+      () => readFileSync(steerInboxPath(dir, SID), "utf8").includes('"alice"'),
+      "the buffered message to land",
+    );
     expect(drainSteer(dir, SID).delivered.map((m) => m.name)).toEqual(["alice"]);
     expect(q.close()).toBe(0);
     expect(existsSync(steerInboxPath(dir, SID))).toBe(false);
