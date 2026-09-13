@@ -8,10 +8,16 @@ import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
+import { clineClassicAdapter } from "./adapters/cline-classic.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
+import { geminiCliAdapter } from "./adapters/gemini-cli.js";
+import { hermesAdapter } from "./adapters/hermes.js";
+import { kimiCodeAdapter } from "./adapters/kimi-code.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
+import { piAdapter } from "./adapters/pi.js";
+import { opencodeAdapter } from "./adapters/opencode.js";
 import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
 import { verifyChain } from "./format/verify.js";
@@ -47,7 +53,7 @@ import {
 import { toAtif, toMarkdown, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
-import { walSidecarWarning } from "./sqlite.js";
+import { readSqliteWithWal, SqliteError } from "./sqlite.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -67,6 +73,7 @@ import {
   runSteerHook,
   STEERABLE_RUNTIMES,
   steerHookConfig,
+  steerHookDescription,
   steerKeyMatches,
   SteerQueue,
 } from "./steer.js";
@@ -110,7 +117,13 @@ const ADAPTERS: Adapter[] = [
   openclawAdapter,
   atifAdapter,
   clineSdkAdapter,
+  clineClassicAdapter,
   langgraphAdapter,
+  geminiCliAdapter,
+  opencodeAdapter,
+  kimiCodeAdapter,
+  piAdapter,
+  hermesAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
@@ -126,8 +139,12 @@ usage:
                                        have written and import what is new
   agit import <db.sqlite> [--thread ID]
                                        import every session in a LangGraph
-                                       checkpoint database or an OpenClaw
-                                       agent database; --thread picks one
+                                       checkpoint database, an OpenClaw agent
+                                       database, OpenCode's opencode.db or
+                                       Hermes Agent's state.db; --thread picks one
+  agit import <task dir>               a Cline 3.x or Roo Code task directory:
+                                       its transcript, dated from the timeline
+                                       beside it where the transcript is not
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
          [--project P] [--sort KEY]    started (default), events, files or id
@@ -183,13 +200,16 @@ usage:
                                        keeps the buffer; only the tail is pushed)
   agit share <native.jsonl> --steer    also let viewers who hold the steer key
                                        queue messages for the agent; delivered
-                                       at its next turn boundary (Claude Code)
+                                       at its next turn boundary (Claude Code,
+                                       Gemini CLI)
   agit steer <link> "<text>" --steer-key K
                                        send a steering message from a terminal
                                        instead of the share page (--name N)
-  agit hook                            Claude Code hook (Stop, UserPromptSubmit):
-                                       hands queued steering messages to the
-                                       agent; --config prints the settings.json
+  agit hook                            the hook Claude Code (Stop, UserPromptSubmit)
+                                       or Gemini CLI (AfterAgent, BeforeAgent)
+                                       runs: hands queued steering messages to
+                                       the agent; --config [runtime] prints the
+                                       settings.json fragment
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
   agit relay --store <dir>             persist shares, so a restart keeps them
@@ -709,7 +729,7 @@ function importNativeLog(
     return { status: "unchanged", id: hit.id };
   }
 
-  const convertOpts = { ...(base ? { base } : {}), ...(select !== undefined ? { select } : {}) };
+  const convertOpts = { path, ...(base ? { base } : {}), ...(select !== undefined ? { select } : {}) };
   let adapter: Adapter | undefined;
   let converted;
   if (input.kind === "bytes") {
@@ -1019,25 +1039,37 @@ function importPath(opts: Opts, target: string): number {
     console.error(`no such file: ${path}`);
     return 1;
   }
-  // `agit pr` writes a directory; accept it as directly as a file.
+  // `agit pr` writes a directory; accept it as directly as a file. So is a
+  // Cline task directory, whose transcript is the file the adapter reads
+  // (the timeline beside it is found from that path).
   if (statSync(path).isDirectory()) {
-    const inner = join(path, "events.jsonl");
-    if (!existsSync(inner)) {
-      console.error(`${path} is a directory with no events.jsonl in it`);
+    const bundle = join(path, "events.jsonl");
+    const clineTask = join(path, "api_conversation_history.json");
+    if (existsSync(bundle)) path = bundle;
+    else if (existsSync(clineTask)) path = clineTask;
+    else {
+      console.error(
+        `${path} is a directory with no events.jsonl (an agit bundle) and no api_conversation_history.json (a Cline task) in it`,
+      );
       return 1;
     }
-    path = inner;
   }
   // A runtime whose log is not text (a LangGraph checkpoint database, an
   // OpenClaw agent database) is recognized from its bytes, before anything
   // tries to read it as UTF-8. Such a file may hold several sessions; every
   // one is imported unless --thread names one.
-  const bytes = readFileSync(path);
+  const buf = readFileSync(path);
+  let bytes: Uint8Array = buf;
   const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
   if (binary !== undefined) {
-    const stale = walSidecarWarning(path);
-    if (stale !== null) {
-      console.error(stale);
+    // A database still open in WAL mode keeps its newest pages in a
+    // sidecar; fold them in the way SQLite would, or say why that failed.
+    try {
+      const withWal = readSqliteWithWal(path);
+      bytes = withWal.bytes;
+      if (withWal.note !== null) console.log(`  ${withWal.note}`);
+    } catch (err) {
+      console.error(err instanceof SqliteError ? err.message : String(err));
       return 1;
     }
     const redactCfg = redactionConfigFor(opts);
@@ -1072,7 +1104,7 @@ function importPath(opts: Opts, target: string): number {
     return printTallySummary(opts, tally);
   }
 
-  const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
+  const raw = buf.toString("utf8").replace(/^\uFEFF/, "");
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
 
   // Adoption gets the unfiltered text: dropping blank lines first would both
@@ -1160,13 +1192,15 @@ function cmdImportDiscovered(opts: Opts): number {
     const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
     if (binary !== undefined) {
       // A database holds sessions, not a session: one line each, as the
-      // path import prints them. A stale one (unapplied WAL frames) is a
-      // failure to name, not a file to read as if it were current.
-      const stale = walSidecarWarning(log.path);
+      // path import prints them. Its WAL sidecar is folded in; one agit
+      // cannot read is a failure to name, not a file to read as if current.
       let selections: (string | undefined)[];
+      let dbBytes: Uint8Array;
       try {
-        if (stale !== null) throw new Error(stale);
-        selections = sessionsToImport(binary, bytes, undefined);
+        const withWal = readSqliteWithWal(log.path);
+        dbBytes = withWal.bytes;
+        if (withWal.note !== null) console.log(`  ${withWal.note}`);
+        selections = sessionsToImport(binary, dbBytes, undefined);
       } catch (err) {
         tally.failed++;
         console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1177,7 +1211,7 @@ function cmdImportDiscovered(opts: Opts): number {
           const outcome = importNativeLog(
             opts,
             log.path,
-            { kind: "bytes", bytes },
+            { kind: "bytes", bytes: dbBytes },
             known,
             redactCfg,
             undefined,
@@ -3184,13 +3218,27 @@ function writeRemote(dir: string, id: string, rec: RemoteRecord): void {
  */
 async function cmdHook(opts: Opts): Promise<number> {
   if (opts.config) {
-    console.log(steerHookConfig());
-    console.error(
-      "\n(put that in .claude/settings.json — project or user — and Claude Code runs `agit hook`",
-    );
-    console.error(
-      " at every Stop and UserPromptSubmit; it prints nothing unless a live share has queued a message)",
-    );
+    const runtime = opts.args[0] ?? "claude-code";
+    if (!STEERABLE_RUNTIMES.has(runtime)) {
+      console.error(`agit hook --config takes one of: ${[...STEERABLE_RUNTIMES].join(", ")}`);
+      return 2;
+    }
+    console.log(steerHookConfig(runtime));
+    if (runtime === "gemini-cli") {
+      console.error(
+        "\n(put that in .gemini/settings.json — project or ~/.gemini — and Gemini CLI runs `agit hook`",
+      );
+      console.error(
+        " at every AfterAgent and BeforeAgent; it prints nothing unless a live share has queued a message)",
+      );
+    } else {
+      console.error(
+        "\n(put that in .claude/settings.json — project or user — and Claude Code runs `agit hook`",
+      );
+      console.error(
+        " at every Stop and UserPromptSubmit; it prints nothing unless a live share has queued a message)",
+      );
+    }
     return 0;
   }
   let input: string;
@@ -3326,6 +3374,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   // turn-boundary hook (src/steer.ts). Refused up front, before a share
   // exists, so a refusal never leaves an orphan link on the relay.
   let steerKey: string | null = null;
+  let steerRuntime = "claude-code";
   if (opts.steer) {
     if (nativePath === null) {
       console.error("--steer needs a live session: a static share has no agent to steer.");
@@ -3339,10 +3388,12 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!STEERABLE_RUNTIMES.has(adapter.name)) {
       console.error(
         `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
-          " Only Claude Code (Stop / UserPromptSubmit hooks) is wired; share without --steer to keep messages terminal-only.",
+          " Only Claude Code (Stop / UserPromptSubmit) and Gemini CLI (AfterAgent / BeforeAgent) are wired;" +
+          " share without --steer to keep messages terminal-only.",
       );
       return 2;
     }
+    steerRuntime = adapter.name;
     steerKey = newSteerKey();
   }
 
@@ -3367,7 +3418,7 @@ async function cmdShare(opts: Opts): Promise<number> {
   if (steerKey === null) {
     console.log("  viewer messages appear below; they are NOT injected into the running agent.");
   } else {
-    printSteerBanner(steerKey);
+    printSteerBanner(steerKey, steerRuntime);
   }
   console.log(
     nativePath !== null
@@ -3426,12 +3477,21 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
 }
 
-function printSteerBanner(steerKey: string): void {
+function printSteerBanner(steerKey: string, runtime: string): void {
   console.log(`  steer key: ${steerKey}`);
   console.log("  a viewer who enters that key sends messages to the agent, not just to this terminal;");
-  console.log("  they are handed over at the agent's next turn boundary (Claude Code Stop /");
-  console.log("  UserPromptSubmit hooks) and every one is shown here first. One-time setup per");
-  console.log("  project: agit hook --config");
+  console.log(`  they are handed over at the agent's next turn boundary (${steerHookDescription(runtime)})`);
+  console.log("  and every one is shown here first. One-time setup per project:");
+  console.log(`  agit hook --config${runtime === "claude-code" ? "" : ` ${runtime}`}`);
+}
+
+/** Which adapter reads a native log, for the resume banner; "claude-code" when none does. */
+function followerAdapterName(nativePath: string): string {
+  try {
+    return pickAdapterFor(nativePath)?.name ?? "claude-code";
+  } catch {
+    return "claude-code";
+  }
 }
 
 /** End of share: drop the queue, but say what never reached the agent. */
@@ -3520,7 +3580,7 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   console.log(
     `  resumed: relay holds ${head.events} events; pushing ${all.length - head.events} more, then tailing ${state.nativePath}`,
   );
-  if (steerKey !== null) printSteerBanner(steerKey);
+  if (steerKey !== null) printSteerBanner(steerKey, followerAdapterName(state.nativePath));
   console.log("  Ctrl+C ends the share.\n");
   // The follower has polled, so the session id is known and the queue binds
   // at once. Not reset: messages queued before the crash are still owed to

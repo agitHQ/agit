@@ -47,6 +47,17 @@ describe("discoverSessionLogs", () => {
       ["claude-code", true, 1],
       ["codex", true, 1],
       ["openclaw", true, 1],
+      ["gemini-cli", false, 0],
+      ["opencode", false, 0],
+      ["kimi-code", false, 0],
+      ["pi", false, 0],
+      ["hermes", false, 0],
+      ["cline-sdk", false, 0],
+      ["cline-classic", false, 0],
+      ["cline-classic", false, 0],
+      ["cline-classic", false, 0],
+      ["roo-code", false, 0],
+      ["roo-code", false, 0],
     ]);
   });
 
@@ -97,7 +108,22 @@ describe("discoverSessionLogs", () => {
     const { logs, roots } = discoverSessionLogs(home, {});
     expect(logs).toEqual([]);
     expect(roots.every((r) => !r.exists && r.found === 0)).toBe(true);
-    expect(roots.map((r) => r.runtime)).toEqual(["claude-code", "codex", "openclaw"]);
+    expect(roots.map((r) => r.runtime)).toEqual([
+      "claude-code",
+      "codex",
+      "openclaw",
+      "gemini-cli",
+      "opencode",
+      "kimi-code",
+      "pi",
+      "hermes",
+      "cline-sdk",
+      "cline-classic",
+      "cline-classic",
+      "cline-classic",
+      "roo-code",
+      "roo-code",
+    ]);
   });
 
   it("orders oldest first, so import output is stable", () => {

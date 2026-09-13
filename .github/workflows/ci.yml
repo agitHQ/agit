@@ -75,3 +75,27 @@ jobs:
           node dist/cli.js verify thread-agit-fixture-0001 --dir /tmp/agit-ci
           diff /tmp/agit-ci/.agit/sessions/thread-agit-fixture-0001/events.jsonl \
                fixtures/langgraph/simple.golden.jsonl
+      - name: import the Cline task directory and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/cline-classic/1736589300000 --dir /tmp/agit-ci
+          node dist/cli.js verify 1736589300000 --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/1736589300000/events.jsonl \
+               fixtures/cline-classic/1736589300000.golden.jsonl
+      - name: import the Roo Code task directory and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/roo-code/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b --dir /tmp/agit-ci
+          node dist/cli.js verify 0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b/events.jsonl \
+               fixtures/roo-code/0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b.golden.jsonl
+      - name: import the pi session and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/pi/2026-05-28T20-26-40-000Z_8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e.jsonl --dir /tmp/agit-ci
+          node dist/cli.js verify 8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e/events.jsonl \
+               fixtures/pi/8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e.golden.jsonl
+      - name: import the Hermes database and compare against its golden log
+        run: |
+          node dist/cli.js import fixtures/hermes/state.db --thread a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60 --dir /tmp/agit-ci
+          node dist/cli.js verify a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60 --dir /tmp/agit-ci
+          diff /tmp/agit-ci/.agit/sessions/a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60/events.jsonl \
+               fixtures/hermes/a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60.golden.jsonl

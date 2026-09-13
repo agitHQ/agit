@@ -47,6 +47,7 @@
 import { createHash } from "node:crypto";
 import { looksLikeSqlite, rowsOf, SqliteFile, type SqliteValue } from "../sqlite.js";
 import { applyUpdate, parseApplyPatch, type PatchHunk } from "./openclaw-patch.js";
+import { classifySessionLog } from "./pi.js";
 import type { DraftEvent, Json } from "../format/events.js";
 import { seedKnownFromBase } from "../base.js";
 import { NO_NEWLINE_MARKER } from "../patch.js";
@@ -348,17 +349,10 @@ export const openclawAdapter: Adapter = {
   version: ADAPTER_VERSION,
 
   detect(lines: string[]): boolean {
-    for (const line of lines.slice(0, 25)) {
-      try {
-        const record = asRecord(JSON.parse(line));
-        if (record?.type === "session" && typeof record.id === "string") {
-          return true;
-        }
-      } catch {
-        // Ignore malformed/unrelated leading records.
-      }
-    }
-    return false;
+    // pi writes this same format (OpenClaw is built on pi-mono); pi.ts tells
+    // the two apart by session version and tool names, and each adapter
+    // claims only its own.
+    return classifySessionLog(lines) === "openclaw";
   },
 
   convert(lines: string[], opts?: ConvertOptions): ConvertResult {

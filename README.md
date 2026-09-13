@@ -45,15 +45,31 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`),
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`),
   **OpenClaw** (its JSONL transcripts, or the agent database that holds
-  them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
-  trajectories, and **LangGraph** checkpoint databases
-  (`agit import checkpoints.sqlite`) — the same event log, the same verbs,
-  whichever agent produced the session. A database holds sessions rather
+  them: `agit import openclaw-agent.sqlite`), **Cline** — both the SDK
+  messages file new sessions land in and the 3.x task directories an
+  installed history still sits in (`agit import <globalStorage>/tasks/<id>`)
+  — **Roo Code**'s task directories, which are the same layout in its own
+  dialect, **pi** sessions (`~/.pi/agent/sessions/--<cwd>--/*.jsonl`),
+  **Hermes Agent**'s session database (`agit import ~/.hermes/state.db`),
+  **ATIF** trajectories, **LangGraph** checkpoint databases
+  (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
+  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
+  logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
+  **OpenCode**'s session database
+  (`agit import ~/.local/share/opencode/opencode.db`) — the same event log,
+  the same verbs, whichever agent produced the session. A database holds sessions rather
   than a session: every one in it is imported, one line each, and
   `--thread <id>` names just one. `agit import --all` finds every session
   those runtimes have written on this machine (`~/.claude/projects`,
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
-  database beside them) and imports what is new; `--latest`
+  database beside them, `~/.gemini/tmp/*/chats`,
+  `~/.kimi/sessions/*/*/wire.jsonl`, `~/.pi/agent/sessions/*/*.jsonl`,
+  `~/.hermes/state.db`,
+  `~/.local/share/opencode/opencode*.db`, `~/.cline/data/sessions` and
+  `~/.cline/data/tasks`, and VS Code's
+  `User/globalStorage/{saoudrizwan.claude-dev,rooveterinaryinc.roo-cline}/tasks`)
+  and imports what is new;
+  `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
   sessions are found the same way as today's.
@@ -198,9 +214,15 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   terminal first, attributed, and a message with a wrong key is shown too —
   labelled, and delivered to no one. The key never reaches other viewers;
   the relay forwards it to the sharer alone, who is the only party that can
-  check it. Only Claude Code is wired, because only Claude Code documents a
-  turn-boundary hook; `--steer` on a Codex or OpenClaw session is refused
-  with that reason rather than promising a channel that does not exist.
+  check it. Two runtimes are wired, because two document a turn-boundary
+  hook: Claude Code (above, verified against the runtime) and **Gemini
+  CLI**, whose `AfterAgent` hook takes a blocking decision whose `reason`
+  is sent to the agent as the next prompt with the history kept, and whose
+  `BeforeAgent` hook takes `additionalContext` for the idle case —
+  `agit hook --config gemini-cli` prints that fragment (derived from Gemini
+  CLI's source; not yet exercised against a running Gemini CLI). `--steer`
+  on a Codex or OpenClaw session is refused with that reason rather than
+  promising a channel that does not exist.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -315,12 +337,19 @@ fall out of that chain.
 
 Said plainly:
 
-- **Six adapters, with different limits.** Claude Code is the reference;
+- **Twelve adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
-  matching rules. ATIF is a standard rather than a runtime, Cline's SDK
-  format is a published contract, and LangGraph's checkpoint database is
-  read from the runtime's own serialization; none of the three carries file
+  matching rules. pi's `write` writes its argument verbatim and its `edit`
+  records the patch it applied, so both verify — a write against the bytes
+  it wrote, an edit against content agit already holds. Hermes's `write_file`
+  verifies when its own post-write byte count says nothing was transformed,
+  and its `patch` against content agit holds. ATIF is a standard rather than a runtime, Cline's SDK
+  format is a published contract and its 3.x task directory is read from
+  the source of the last release that wrote it, LangGraph's and OpenCode's
+  databases are read from each runtime's own schema, Gemini CLI's recording
+  is folded the way its own loader folds it, and Kimi Code's wire log is
+  folded the way its own replay folds it; none of the seven carries file
   content agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
@@ -349,15 +378,16 @@ Said plainly:
   absent from the tree entirely, and a file deleted by a shell command
   still appears at its last logged content — only a structured deletion
   (`file.delete`) removes it.
-- **No message injection mid-run, and steering is Claude Code only.**
+- **No message injection mid-run, and steering is wired per runtime.**
   Sharing is watch-only unless the sharer passes `--steer`, and even then a
   message is never fed into a running turn: it waits for the runtime's own
-  turn boundary (Claude Code's `Stop` / `UserPromptSubmit` hooks) and is
-  delivered through the documented `additionalContext` channel, which the
-  agent weighs like any other context — a teammate's request, not a command
-  from the keyboard. Codex, OpenClaw, Cline and ATIF sessions have no
-  documented equivalent, so `--steer` refuses them; a runtime that gains one
-  gets wired the same way, per adapter, opt-in.
+  turn boundary — Claude Code's `Stop` / `UserPromptSubmit` hooks, Gemini
+  CLI's `AfterAgent` / `BeforeAgent` — and is delivered through the channel
+  each documents, which the agent weighs like any other context — a
+  teammate's request, not a command from the keyboard. Codex, OpenClaw,
+  Cline, Kimi Code, OpenCode, LangGraph and ATIF sessions have no documented
+  equivalent, so `--steer` refuses them; a runtime that gains one gets wired
+  the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
   HTTP on loopback, and binding beyond loopback without TLS is refused unless
@@ -394,8 +424,134 @@ Said plainly:
   Windows, which is a hash agit did not compute over bytes it holds, so none
   is emitted. Edit results carry only a diff the runtime truncates at 200
   lines. Every `editor` and `apply_patch` call is counted in the import report
-  as an edit agit cannot verify. The older VS Code globalStorage layout is
-  undocumented and unversioned and is deliberately not read.
+  as an edit agit cannot verify.
+- **A Cline 3.x task directory imports, and its `<final_file_content>` is
+  not the file.** `agit import <globalStorage>/tasks/<taskId>` (or the
+  `api_conversation_history.json` inside it) reads the layout every Cline
+  release up to 3.89 wrote — frozen now that 4.0 moved on — the way that
+  release's own source reads it: XML tool calls split by Cline's own parser
+  and paired with the framed results that follow them, native `tool_use`
+  calls by id, and, for tasks older than the transcript's own `ts` and
+  `metrics` stamps, dates and token counts taken from the `ui_messages.json`
+  beside it by the index Cline writes on every timeline entry (or by request
+  order where even that predates the file). Cline's own injected
+  `<environment_details>` is counted, not filed as the person's words. The
+  research on #63 expected this to be the layout where edits verify, since a
+  write's result carries the whole file in `<final_file_content>`; reading
+  `DiffViewProvider.saveChanges` shows it carries a normalized copy — line
+  endings rewritten to the model's, trailing whitespace trimmed, one newline
+  appended — so a hash over it is not a hash over the bytes on disk, and none
+  is emitted. **Roo Code's task directories are read by the same adapter,
+  in Roo's dialect**, from Roo's own source (archived May 2026): the same
+  two files, but a UUID task id, Roo's tool and parameter names, an XML-era
+  result written as two blocks (the `[name for '…'] Result:` frame, then the
+  content), native results with no framing, `toolError` as JSON by the end,
+  condensed-context summaries and truncation markers in the transcript, and
+  no `conversationHistoryIndex` ever — so older Roo tasks pair with the
+  timeline by request order, and usage is paired only when the request and
+  turn counts agree. Which dialect a task is in is decided from the
+  directory name (milliseconds are Cline's, a UUID is Roo's) or the
+  transcript's own tells, recorded in `session.start`, and reported as
+  runtime `cline` or `roo-code`. Derived from the sources and checked
+  against fixtures built to them, one per tool-call shape per dialect; a
+  real task that disagrees names its unmapped blocks in the import report.
+- **A Gemini CLI import is the recording as Gemini CLI itself would load
+  it.** `agit import session-*.jsonl` reads what `ChatRecordingService`
+  writes: a metadata line, then messages appended again each time their
+  tokens or tool calls land, `$set` updates and `$rewindTo` marks. The
+  adapter folds those by id exactly as the CLI's loader does, so a rewound
+  turn is gone and a message's final form is what is recorded; the fold's
+  losses (rewound messages, cancelled or unfinished tool calls, `info` /
+  `warning` / `error` lines) are counted by name. A live share holds the
+  last message back until a newer one settles it, since the last message is
+  the one the writer re-pushes; a rewind during a live share stops it as
+  the rewrite of streamed history it is. No `file.diff`: an edit is a tool
+  call whose result is prose, and no content is recorded beside it. The
+  legacy single-document `.json` form is read too. Derived from the source
+  and checked against a fixture built to it; a real recording that
+  disagrees names its unmapped records in the import report.
+- **A Kimi Code import reads the wire, not the context.** Kimi keeps a
+  session's model context in `context.jsonl` (no timestamps) and its event
+  stream in `wire.jsonl` (each record stamped); `agit import wire.jsonl`
+  reads the latter, folding it the way Kimi's own replay does — streamed
+  text and thinking pieces merge into one assistant message per step, a
+  tool call's argument parts fold into it, the step's `token_usage` becomes
+  its `cost`, and a `/clear` turn drops what came before. The session id
+  is the directory the file sits in, as Kimi's docs say; the wire names no
+  model and no working directory, so both are null rather than guessed.
+  Interrupted and retried steps, notifications, approvals and every other
+  wire message agit has no event for are counted by name, as is a diff
+  display block — a viewer's excerpt of an edit, not the file — so there
+  is no `file.diff`. Derived from the source and checked against a fixture
+  built to it; a real wire log that disagrees names its unmapped messages
+  in the import report.
+- **A pi import verifies writes outright and edits within a window.**
+  `agit import ~/.pi/agent/sessions/<project>/<session>.jsonl` reads the
+  format `session-format.md` documents: a header, then a tree of entries
+  (`/tree` branches in place) linearized in file order with the tree kept
+  under `native`. pi's `write` tool writes its `content` argument verbatim
+  (`fsWriteFile(path, content, "utf-8")`), so a successful write is a
+  `file.diff` hashed over exactly the bytes that reached the disk — recorded
+  as a create when agit holds no prior content, since pi does not say
+  whether the file existed, and counted as such. pi's `edit` records the
+  unified patch it applied over the LF-normalized file; agit replays it the
+  way edit.ts does — BOM off, line ending noted, normalize, apply, restore —
+  when it already holds the file (a write, a verified edit, an untruncated
+  `read`, which returns the text unchanged, or `--base`), and counts the
+  edit otherwise. Shell edits stay invisible. `usage.cost` is dollars and is
+  counted, not stored. OpenClaw writes this same format, being built on pi;
+  the two are told apart by session version (OpenClaw's is 4, pi's 3) and,
+  for a version-3 file, by whose tools it calls, before either adapter
+  claims it. Derived from the source and checked against a fixture built to
+  it; a real session that disagrees names its unmapped entries in the
+  import report.
+- **A Hermes import reads `state.db`, and verifies what Hermes itself
+  verified.** `agit import ~/.hermes/state.db` reads the `sessions`,
+  `messages` and `session_model_usage` tables from Hermes's own DDL, one
+  session per import (`--thread <id>` picks one; every session with
+  messages otherwise). Messages are in the OpenAI shape — tool calls as a
+  JSON list on the assistant row, results as `tool` rows whose content is
+  the tool's JSON, carried as `structured`. Hermes's `write_file` preserves
+  a target's CRLF and BOM, then checks the disk's sha256 and reports
+  `verified` and `bytes_written`; when the count equals the argument's UTF-8
+  length nothing was transformed and the event's hash is over bytes Hermes
+  confirmed — a create with a null `beforeHash` when agit held nothing
+  before, since Hermes does not say whether the file existed. Its `patch`
+  (replace mode) answers with a difflib diff of the BOM-stripped file, which
+  agit applies to content it holds. A V4A patch and a `read_file` (returned
+  with line gutters, long lines clamped) are not replayed. Hermes keeps no
+  per-message usage: each model's session totals become one aggregate
+  `cost` at the session's end, flagged as such. Rows retired by compression
+  or a rewind are kept and flagged. `state.db` runs in WAL mode and Hermes
+  keeps the WAL open, so the newest rows sit in `state.db-wal`; the import
+  folds that sidecar in (below), so a running Hermes reads as it stands.
+  Derived from the
+  source and checked against a fixture written with the same DDL; a real
+  database that disagrees names its unmapped rows in the import report.
+- **A database still being written imports as it stands.** SQLite in WAL
+  mode keeps committed pages in `<file>-wal` until a checkpoint, and every
+  database agit reads (LangGraph, OpenClaw, OpenCode, Hermes) runs that way,
+  so a reader that ignored the sidecar saw whatever was last checkpointed —
+  agit used to refuse such a file. It now folds the sidecar's committed
+  frames over the main file the way SQLite's own reader does: header
+  checked, salts and the checksum chain verified frame by frame, the log
+  ended at the first frame that breaks it, uncommitted frames left out, the
+  latest committed page winning. The import report says how many frames in
+  how many commits were folded in. A sidecar that is not a WAL at all is
+  still refused, naming the checkpoint command.
+- **An OpenCode import has no file history either.** `agit import
+  opencode.db` reads the `session`, `message` and `part` tables OpenCode
+  writes (its drizzle schema and generated DDL, its v1 session schema for
+  the JSON in `data`), in the order its own `MessageV2.page` reads them.
+  Messages, reasoning, tool calls with their results, and one `cost` per
+  model step (from `step-finish` parts, or from the message when there are
+  none) all come through. OpenCode's file changes live in git snapshots of
+  the worktree, not in the database, so a `patch` part names files and
+  carries no content: nothing is hashed, nothing is invented, and
+  `blame`/`fork`/`merge`/`diff` have nothing to work with. Every part type
+  agit has no event for is counted by name. Derived from the schema and
+  checked against a fixture built to it; a real `opencode.db` that disagrees
+  names its unmapped parts in the import report.
 - **A LangGraph import is the thread's current history, and no more.**
   `agit import <checkpoints.sqlite>` reads what `langgraph-checkpoint-sqlite`
   wrote — the SQLite file itself, with a zero-dependency reader for the file

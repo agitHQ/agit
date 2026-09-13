@@ -15,12 +15,59 @@
  *                 session's transcript rows and is where newer OpenClaw
  *                 versions keep them; the incognito database beside it is
  *                 process-held and deliberately not read.
+ *  - OpenCode     $XDG_DATA_HOME (default ~/.local/share)/opencode/opencode.db,
+ *                 plus opencode-<channel>.db for a non-release channel —
+ *                 packages/core/src/global.ts (xdg-basedir) and
+ *                 packages/core/src/database/database.ts `path()`. Every
+ *                 session lives in that one file.
  *                 Skipped on purpose, per src/config/sessions/artifacts.ts:
  *                 compaction checkpoints (`<id>.checkpoint.<uuid>.jsonl`, which
  *                 carry the same session id and would overwrite the real one),
  *                 trajectory artifacts (`*.trajectory.jsonl`), and archives
  *                 (`*.jsonl.deleted…` / `.reset…` / `.bak…`, which do not end
  *                 in `.jsonl` and so never match).
+ *  - Gemini CLI   ~/.gemini/tmp/<project>/chats/session-*.jsonl, a subagent's
+ *                 under chats/<parent session id>/<id>.jsonl, and the legacy
+ *                 single-document session-*.json — ChatRecordingService in
+ *                 packages/core/src/services/chatRecordingService.ts and
+ *                 Storage.getProjectTempDir() in packages/core/src/config/
+ *                 storage.ts (the global runtime dir is ~/.gemini).
+ *  - Kimi Code    $KIMI_SHARE_DIR (default ~/.kimi)/sessions/<md5 of the work
+ *                 dir>/<session id>/wire.jsonl, and a subagent's under
+ *                 <session id>/subagents/<agent id>/wire.jsonl —
+ *                 docs/en/configuration/data-locations.md and
+ *                 src/kimi_cli/session.py. context.jsonl beside it is the
+ *                 model context, without timestamps, and is not a log.
+ *  - Cline        the SDK sessions at $CLINE_DIR (default ~/.cline)/data/
+ *                 sessions/<id>/<id>.messages.json (sdk/packages/core/docs/
+ *                 messages-contract-v1.md), and the 3.x task directories,
+ *                 <globalStorage>/tasks/<taskId>/api_conversation_history.json
+ *                 (apps/vscode/src/core/storage/disk.ts), where
+ *                 <globalStorage> is $CLINE_DIR/data for the 3.x CLI
+ *                 (standalone/vscode-context.ts) and, for the VS Code
+ *                 extension, the editor's User/globalStorage/
+ *                 saoudrizwan.claude-dev under its user-data directory:
+ *                 %APPDATA%/Code on Windows, ~/Library/Application Support/
+ *                 Code on macOS, $XDG_CONFIG_HOME (default ~/.config)/Code on
+ *                 Linux, per VS Code's own settings docs; Insiders is
+ *                 "Code - Insiders" beside it. Other editors that host the
+ *                 extension are imported by path.
+ *  - pi           $PI_CODING_AGENT_DIR (default ~/.pi/agent)/sessions/
+ *                 --<cwd>--/<timestamp>_<session id>.jsonl —
+ *                 packages/coding-agent/docs/session-format.md and
+ *                 src/config.ts getAgentDir() in badlogic/pi-mono.
+ *  - Hermes       $HERMES_HOME (default ~/.hermes; %LOCALAPPDATA%/hermes on
+ *                 Windows)/state.db — hermes_constants.py get_hermes_home()
+ *                 and hermes_state.py DEFAULT_DB_PATH in
+ *                 NousResearch/hermes-agent. Every session lives in that one
+ *                 file, which runs in WAL mode; its sidecar is folded in
+ *                 on import, so a running Hermes reads as it stands.
+ *  - Roo Code     the same task directories under the editor's
+ *                 User/globalStorage/rooveterinaryinc.roo-cline
+ *                 (src/utils/storage.ts in RooCodeInc/Roo-Code; the
+ *                 `customStoragePath` setting can move them, in which case
+ *                 they are imported by path). Read by the cline-classic
+ *                 adapter, which tells the two dialects apart.
  *
  * Discovery is a directory listing, nothing more: no daemon, no hooks, no
  * state of its own. Retroactive import stays the default — a log written
@@ -134,6 +181,141 @@ function scanOpenClaw(agentsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** Gemini CLI: tmp/<project>/chats/<recording>, one level of subagent directories below. */
+function scanGeminiCli(tmpRoot: string, out: DiscoveredLog[]): void {
+  const recording = (name: string): boolean => name.endsWith(".jsonl") || name.endsWith(".json");
+  for (const project of listDir(tmpRoot)) {
+    const chats = join(tmpRoot, project, "chats");
+    if (!isDir(chats)) continue;
+    for (const name of listDir(chats)) {
+      const p = join(chats, name);
+      if (isDir(p)) {
+        for (const inner of listDir(p)) {
+          const q = join(p, inner);
+          if (recording(inner) && isFile(q)) record("gemini-cli", q, out);
+        }
+      } else if (recording(name) && isFile(p)) {
+        record("gemini-cli", p, out);
+      }
+    }
+  }
+}
+
+/** OpenCode: every opencode*.db in its XDG data directory. */
+function scanOpenCode(dataDir: string, out: DiscoveredLog[]): void {
+  for (const name of listDir(dataDir)) {
+    if (!/^opencode(-[A-Za-z0-9._-]+)?\.db$/.test(name)) continue;
+    const p = join(dataDir, name);
+    if (isFile(p)) record("opencode", p, out);
+  }
+}
+
+/** xdg-basedir's rule, which OpenCode uses: $XDG_DATA_HOME when set and non-empty, else ~/.local/share. */
+function xdgDataDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.XDG_DATA_HOME?.trim();
+  return override ? resolve(override) : join(home, ".local", "share");
+}
+
+/** Kimi Code: sessions/<work dir hash>/<session id>/wire.jsonl, and each subagent's below it. */
+function scanKimiCode(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const workDir of listDir(sessionsRoot)) {
+    const byHash = join(sessionsRoot, workDir);
+    if (!isDir(byHash)) continue;
+    for (const session of listDir(byHash)) {
+      const dir = join(byHash, session);
+      const wire = join(dir, "wire.jsonl");
+      if (isFile(wire)) record("kimi-code", wire, out);
+      const subagents = join(dir, "subagents");
+      if (!isDir(subagents)) continue;
+      for (const agent of listDir(subagents)) {
+        const sub = join(subagents, agent, "wire.jsonl");
+        if (isFile(sub)) record("kimi-code", sub, out);
+      }
+    }
+  }
+}
+
+/** pi sessions: sessions/--<cwd>--/<timestamp>_<id>.jsonl. */
+function scanPi(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const project of listDir(sessionsRoot)) {
+    const dir = join(sessionsRoot, project);
+    if (!isDir(dir)) continue;
+    for (const name of listDir(dir)) {
+      if (name.endsWith(".jsonl") && isFile(join(dir, name))) record("pi", join(dir, name), out);
+    }
+  }
+}
+
+/** The agent dir pi itself would use: the env override, else ~/.pi/agent. */
+function piAgentDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.PI_CODING_AGENT_DIR?.trim();
+  return override ? resolve(override) : join(home, ".pi", "agent");
+}
+
+/** Hermes Agent: the one state.db in its home. */
+function scanHermes(home: string, out: DiscoveredLog[]): void {
+  const db = join(home, "state.db");
+  if (isFile(db)) record("hermes", db, out);
+}
+
+/** The home Hermes itself would use: the env override, else the platform default. */
+function hermesHome(home: string, env: NodeJS.ProcessEnv, platform: string): string {
+  const override = env.HERMES_HOME?.trim();
+  if (override) return resolve(override);
+  if (platform === "win32") {
+    const local = env.LOCALAPPDATA?.trim();
+    return join(local || join(home, "AppData", "Local"), "hermes");
+  }
+  return join(home, ".hermes");
+}
+
+/** Cline SDK sessions: data/sessions/<id>/<id>.messages.json. */
+function scanClineSdk(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const id of listDir(sessionsRoot)) {
+    const dir = join(sessionsRoot, id);
+    if (!isDir(dir)) continue;
+    for (const name of listDir(dir)) {
+      if (name.endsWith(".messages.json") && isFile(join(dir, name)))
+        record("cline-sdk", join(dir, name), out);
+    }
+  }
+}
+
+/** Cline 3.x (and Roo Code) task directories: tasks/<taskId>/api_conversation_history.json. */
+function scanClineClassic(tasksRoot: string, out: DiscoveredLog[], runtime = "cline-classic"): void {
+  for (const taskId of listDir(tasksRoot)) {
+    const transcript = join(tasksRoot, taskId, "api_conversation_history.json");
+    if (isFile(transcript)) record(runtime, transcript, out);
+  }
+}
+
+/** The dir Cline's own CLI would use: the env override, else ~/.cline. */
+function clineDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.CLINE_DIR?.trim();
+  return override ? resolve(override) : join(home, ".cline");
+}
+
+/**
+ * VS Code's user-data directory per platform (settings docs, "User settings
+ * file locations"), for the editors named; `%APPDATA%` and `$XDG_CONFIG_HOME`
+ * are honoured the way VS Code honours them.
+ */
+function vscodeUserDataDirs(home: string, env: NodeJS.ProcessEnv, platform: string): string[] {
+  const base =
+    platform === "win32"
+      ? env.APPDATA?.trim() || join(home, "AppData", "Roaming")
+      : platform === "darwin"
+        ? join(home, "Library", "Application Support")
+        : env.XDG_CONFIG_HOME?.trim() || join(home, ".config");
+  return ["Code", "Code - Insiders"].map((editor) => join(base, editor));
+}
+
+/** The share dir Kimi Code itself would use: the env override, else ~/.kimi. */
+function kimiShareDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.KIMI_SHARE_DIR?.trim();
+  return override ? resolve(override) : join(home, ".kimi");
+}
+
 /** The state dir OpenClaw itself would use: the env override, else ~/.openclaw. */
 function openClawStateDir(home: string, env: NodeJS.ProcessEnv): string {
   const override = env.OPENCLAW_STATE_DIR?.trim();
@@ -151,11 +333,33 @@ export interface Discovery {
   roots: ScanRoot[];
 }
 
-export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = process.env): Discovery {
+export function discoverSessionLogs(
+  home: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+): Discovery {
+  const cline = clineDir(home, env);
   const targets: { runtime: string; dir: string; scan: (dir: string, out: DiscoveredLog[]) => void }[] = [
     { runtime: "claude-code", dir: join(home, ".claude", "projects"), scan: scanClaudeCode },
     { runtime: "codex", dir: join(home, ".codex", "sessions"), scan: (d, o) => scanCodex(d, o) },
     { runtime: "openclaw", dir: join(openClawStateDir(home, env), "agents"), scan: scanOpenClaw },
+    { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
+    { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
+    { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
+    { runtime: "pi", dir: join(piAgentDir(home, env), "sessions"), scan: scanPi },
+    { runtime: "hermes", dir: hermesHome(home, env, platform), scan: scanHermes },
+    { runtime: "cline-sdk", dir: join(cline, "data", "sessions"), scan: scanClineSdk },
+    { runtime: "cline-classic", dir: join(cline, "data", "tasks"), scan: scanClineClassic },
+    ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
+      runtime: "cline-classic",
+      dir: join(userData, "User", "globalStorage", "saoudrizwan.claude-dev", "tasks"),
+      scan: scanClineClassic,
+    })),
+    ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
+      runtime: "roo-code",
+      dir: join(userData, "User", "globalStorage", "rooveterinaryinc.roo-cline", "tasks"),
+      scan: (dir: string, out: DiscoveredLog[]) => scanClineClassic(dir, out, "roo-code"),
+    })),
   ];
   const logs: DiscoveredLog[] = [];
   const roots: ScanRoot[] = [];

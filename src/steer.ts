@@ -9,10 +9,10 @@
  * terminal on the human's behalf, and the human sees every queued message in
  * the share terminal as it arrives, attributed.
  *
- * Only Claude Code is wired, because only Claude Code documents a path
- * (code.claude.com/docs/en/hooks, "Stop decision control" and
- * "UserPromptSubmit decision control"):
+ * A runtime is wired only where it documents a path. Two do:
  *
+ * Claude Code (code.claude.com/docs/en/hooks, "Stop decision control" and
+ * "UserPromptSubmit decision control"):
  *   - Stop: `hookSpecificOutput.additionalContext` is "non-error feedback for
  *     Claude. The conversation continues so Claude can act on it", shown in
  *     the transcript as hook feedback. Claude Code's own loop guards apply —
@@ -20,10 +20,32 @@
  *   - UserPromptSubmit: the same field rides alongside the human's next
  *     prompt, which covers the case where the agent was idle when the
  *     message arrived.
+ *   Verified against the runtime (claude 2.1.263, -p mode).
+ *
+ * Gemini CLI (docs/hooks/reference.md, "Agent hooks", in
+ * google-gemini/gemini-cli; the mechanics in packages/core/src/core/
+ * client.ts and hooks/types.ts):
+ *   - AfterAgent: a `decision` of `"block"` with a `reason` — the reason "is
+ *     sent to the agent as a new prompt". In client.ts a blocking decision
+ *     yields `AgentExecutionBlocked` and calls `sendMessageStream` with the
+ *     reason as the next request; the history is kept (only
+ *     `clearContext`, which this never sets, would reset it), and the
+ *     continuation runs with `stop_hook_active` true and a bounded turn
+ *     count. So the transcript shows a hook block whose reason is the
+ *     teammate's message, and the agent answers it with everything it had.
+ *   - BeforeAgent: `hookSpecificOutput.additionalContext` is "appended to
+ *     the prompt for this turn only" — the idle case. Gemini escapes `<`
+ *     and `>` in it (`getAdditionalContext`), so a message reads as text.
+ *   Both hooks share the base input (`session_id`, `hook_event_name`), and
+ *   `session_id` is `Config.getSessionId()`, the same value the recorder
+ *   writes as the recording's `sessionId` — the id the adapter reports.
+ *   Derived from the source above; not yet exercised against a running
+ *   Gemini CLI.
  *
  * Hook output strings are capped at 10,000 characters by Claude Code; a
  * drain that would exceed the budget delivers what fits and leaves the rest
- * queued for the next boundary, and says so.
+ * queued for the next boundary, and says so. Gemini CLI publishes no cap;
+ * the same budget applies.
  *
  * Files, under the store: `.agit/steer/<runtime session id>.jsonl` holds one
  * message per line, appended by the sharer; `<id>.cursor` holds how many of
@@ -46,7 +68,14 @@ export interface SteerMessage {
 }
 
 /** Runtimes with a documented turn-boundary hook. Adapter names, not display names. */
-export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code"]);
+export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "gemini-cli"]);
+
+/** What to tell the sharer about the hooks their runtime fires. */
+export function steerHookDescription(runtime: string): string {
+  return runtime === "gemini-cli"
+    ? "Gemini CLI AfterAgent / BeforeAgent hooks"
+    : "Claude Code Stop / UserPromptSubmit hooks";
+}
 
 /** Claude Code caps hook output strings at 10,000 characters; leave headroom for the framing. */
 export const STEER_CONTEXT_BUDGET = 9_000;
@@ -197,10 +226,18 @@ export function formatSteerContext(d: Drained): string {
   return `${head}\n\n${body}${tail}`;
 }
 
-export type SteerHookEvent = "Stop" | "UserPromptSubmit";
+export type SteerHookEvent = "Stop" | "UserPromptSubmit" | "AfterAgent" | "BeforeAgent";
 
-/** The documented `hookSpecificOutput` shape, keyed to the event that fired. */
+const STEER_EVENTS: ReadonlySet<string> = new Set(["Stop", "UserPromptSubmit", "AfterAgent", "BeforeAgent"]);
+
+/**
+ * The documented output shape for the event that fired. Claude Code's two
+ * events and Gemini's BeforeAgent take `hookSpecificOutput.additionalContext`;
+ * Gemini's AfterAgent takes a blocking `decision` whose `reason` becomes the
+ * next prompt (there is no context field on that event).
+ */
 export function steerHookOutput(event: SteerHookEvent, context: string): string {
+  if (event === "AfterAgent") return JSON.stringify({ decision: "block", reason: context });
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
 }
 
@@ -212,10 +249,12 @@ export interface HookRun {
 }
 
 /**
- * One hook invocation. `input` is the JSON Claude Code wrote to stdin. Only
- * the main agent's Stop and UserPromptSubmit are served; a subagent's hook
- * (which carries `agent_id`) and every other event drain nothing, because
- * the message was addressed to the session, not to a helper inside it.
+ * One hook invocation. `input` is the JSON the runtime wrote to stdin. Only
+ * the main agent's turn-boundary events are served — Claude Code's Stop and
+ * UserPromptSubmit, Gemini CLI's AfterAgent and BeforeAgent; a subagent's
+ * hook (Claude Code marks one with `agent_id`) and every other event drain
+ * nothing, because the message was addressed to the session, not to a
+ * helper inside it.
  */
 export function runSteerHook(base: string, input: string): HookRun {
   let parsed: unknown;
@@ -227,7 +266,7 @@ export function runSteerHook(base: string, input: string): HookRun {
   if (parsed === null || typeof parsed !== "object") return { stdout: "", exit: 0 };
   const rec = parsed as Record<string, unknown>;
   const event = rec.hook_event_name;
-  if (event !== "Stop" && event !== "UserPromptSubmit") return { stdout: "", exit: 0 };
+  if (typeof event !== "string" || !STEER_EVENTS.has(event)) return { stdout: "", exit: 0 };
   if (typeof rec.agent_id === "string") return { stdout: "", exit: 0 };
   const sessionId = rec.session_id;
   if (typeof sessionId !== "string") return { stdout: "", exit: 0 };
@@ -239,11 +278,22 @@ export function runSteerHook(base: string, input: string): HookRun {
   if (!existsSync(steerInboxPath(base, sessionId))) return { stdout: "", exit: 0 };
   const drained = drainSteer(base, sessionId);
   if (drained.delivered.length === 0) return { stdout: "", exit: 0 };
-  return { stdout: steerHookOutput(event, formatSteerContext(drained)), exit: 0 };
+  return { stdout: steerHookOutput(event as SteerHookEvent, formatSteerContext(drained)), exit: 0 };
 }
 
-/** The settings.json fragment that wires both events to `agit hook`. */
-export function steerHookConfig(): string {
+/**
+ * The settings.json fragment that wires a runtime's two events to
+ * `agit hook`: Claude Code's `timeout` is seconds, Gemini CLI's milliseconds
+ * (docs/hooks/reference.md, "Hook configuration"), and Gemini takes a
+ * `name` for its logs.
+ */
+export function steerHookConfig(runtime = "claude-code"): string {
+  if (runtime === "gemini-cli") {
+    const handler = {
+      hooks: [{ type: "command", command: "agit hook", name: "agit-steer", timeout: 10_000 }],
+    };
+    return JSON.stringify({ hooks: { AfterAgent: [handler], BeforeAgent: [handler] } }, null, 2);
+  }
   const handler = { hooks: [{ type: "command", command: "agit hook", timeout: 10 }] };
   return JSON.stringify({ hooks: { Stop: [handler], UserPromptSubmit: [handler] } }, null, 2);
 }

@@ -3,10 +3,152 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
-## Unreleased
+## 0.13.0 — 2026-09-13
 
 ### Added
 
+- **A database still being written imports as it stands.** SQLite in WAL
+  mode keeps committed pages in `<file>-wal` until a checkpoint; agit used
+  to refuse such a file. `applyWal` now folds the sidecar's committed frames
+  over the main file the way SQLite reads them — header, salts and the
+  checksum chain verified, the log ended at the first frame that breaks it,
+  uncommitted frames left out, the latest committed page winning, the
+  commit's page count setting the result's length — for every database
+  adapter, in `agit import <db>` and `import --all`. The report says how
+  many frames in how many commits were folded in; a sidecar that is not a
+  WAL is still refused, naming the checkpoint command. Fixture: a Hermes
+  pair copied while the writer held the WAL open, with a session that lives
+  only in the sidecar.
+- **Hermes Agent sessions import from `state.db` (`hermes`, #64).** The
+  `sessions`, `messages` and `session_model_usage` tables, read from
+  Hermes's own DDL with the in-tree SQLite reader: messages in the OpenAI
+  shape (tool calls as a JSON list on the assistant row, results as `tool`
+  rows carrying the tool's JSON as `structured`, `reasoning` as thinking),
+  retired rows kept and flagged, one session per import with `--thread`
+  picking among several. `write_file` becomes a `file.diff` when Hermes's
+  own post-write check says the bytes landed untransformed (`verified` and
+  a `bytes_written` equal to the argument's length); `patch` in replace
+  mode applies Hermes's difflib diff to content agit holds; V4A patches and
+  line-numbered reads are counted, not replayed. No per-message usage
+  exists, so each model's session totals become one aggregate `cost`,
+  flagged. `import --all` scans `$HERMES_HOME/state.db` (default
+  `~/.hermes`, `%LOCALAPPDATA%\hermes` on Windows).
+
+## 0.12.0 — 2026-09-13
+
+### Added
+
+- **pi sessions import, and their file edits verify (`pi`, #64).** The
+  coding agent in badlogic/pi-mono documents its session file
+  (`packages/coding-agent/docs/session-format.md`): a header, then a tree
+  of entries with `id` / `parentId`, linearized here in file order with the
+  tree kept under `native`. Messages map to the usual events; `usage`
+  tokens to `cost` (dollars counted, not stored); pi's `write` writes its
+  argument verbatim, so a successful write is a `file.diff` over the bytes
+  it wrote (a create with a null `beforeHash` when agit held nothing before,
+  counted as `write:prior content unknown`); pi's `edit` records the patch
+  it applied over LF-normalized text, replayed the way edit.ts applies it
+  when agit holds the file — from a write, a verified edit, an untruncated
+  `read`, or `--base` — and counted otherwise. Compaction and branch
+  summaries carrying `usage` become `cost`; every other entry type is
+  counted by name. `import --all` scans `$PI_CODING_AGENT_DIR` (default
+  `~/.pi/agent`)`/sessions/*/*.jsonl`. **OpenClaw writes this same format**
+  (it is built on pi-mono), so the OpenClaw adapter no longer claims every
+  file with a `{"type":"session"}` header: `classifySessionLog` splits them
+  by session version (OpenClaw 4, pi 3) and, for a version-3 file, by whose
+  tools it calls.
+
+- **Roo Code task directories import, as a dialect of `cline-classic`
+  (#63).** Roo forked Cline's layout and kept the two files, so the same
+  adapter reads both, deciding the dialect from the directory name (Cline's
+  millisecond id, Roo's UUID) or the transcript's own tells, and reporting
+  runtime `roo-code`. From Roo's source (v3.20.0 for the XML era, v3.54.0
+  for the last release): Roo's tool and parameter names for the parser; an
+  XML-era result as two blocks — the `[name for '…'] Result:` frame alone,
+  then the content — joined into one; native `tool_result` content with no
+  framing; `toolError` recognized as prose (3.20) or JSON `status: "error"`
+  (3.54), a denial being neither; `isSummary` / `condenseParent` /
+  `truncationParent` carried on the events they mark, reasoning items and
+  truncation markers counted; a generic `reasoning` block kept as thinking.
+  Roo never wrote `conversationHistoryIndex`, so tasks without `ts` pair
+  with the timeline by request order, and usage is paired only when the
+  request and turn counts agree (a retried request says `api_req_started`
+  again without a message to answer it) — otherwise counted, never guessed.
+  `import --all` scans VS Code's `globalStorage/rooveterinaryinc.roo-cline/
+  tasks` beside Cline's. `session.start` now records the dialect and its
+  evidence for Cline tasks too (adapter 0.2.0; the committed golden moved
+  with it).
+
+## 0.11.0 — 2026-09-13
+
+### Added
+
+- **Cline 3.x task directories import (`cline-classic`, #63).** The
+  `<globalStorage>/tasks/<taskId>/` layout every release up to 3.89 wrote,
+  read from that release's source: `api_conversation_history.json` for the
+  transcript, with XML tool calls split by a port of Cline's own
+  `parseAssistantMessageV2` and paired with the `[name for '…'] Result:`
+  text that follows, native `tool_use` / `tool_result` by id, `thinking`
+  kept, `metrics` and `modelInfo` read where the message carries them; and
+  `ui_messages.json` beside it for the tasks that predate those stamps —
+  each transcript message dated by the first timeline entry Cline wrote
+  after it (`conversationHistoryIndex`), or by request order for a timeline
+  older than that field, and its request's `api_req_started` token counts
+  used where the message has no `metrics`. `<environment_details>` blocks
+  are counted, not filed as user text. `agit import <task directory>`
+  works directly, and `import --all` scans `~/.cline/data/tasks`,
+  `~/.cline/data/sessions` (the SDK files, not scanned before) and VS
+  Code's `globalStorage/saoudrizwan.claude-dev/tasks` on each platform
+  (`CLINE_DIR`, `APPDATA`, `XDG_CONFIG_HOME` honoured). No `file.diff`:
+  `<final_file_content>` is the normalized text `DiffViewProvider.saveChanges`
+  returns, not the saved bytes, so nothing is hashed from it — the finding
+  that closes the "classic verifies" hope on #63.
+
+- **`--steer` works for Gemini CLI sessions.** Gemini CLI documents a
+  turn-boundary hook (docs/hooks/reference.md): an `AfterAgent` hook's
+  blocking `decision` sends its `reason` to the agent as the next prompt —
+  in `client.ts` the history is kept and the continuation runs under
+  `stop_hook_active` — and `BeforeAgent`'s `additionalContext` rides with
+  the next prompt when the agent was idle. `agit hook` now answers both
+  (its `session_id` is the recording's `sessionId`, so a live share of a
+  Gemini recording queues under the id the hooks present), and `agit hook
+  --config gemini-cli` prints the `settings.json` fragment (milliseconds,
+  a `name`, per Gemini's schema). Derived from the source; not yet
+  exercised against a running Gemini CLI, unlike Claude Code's path.
+
+## 0.10.0 — 2026-09-13
+
+### Added
+
+- **Kimi Code adapter.** `agit import wire.jsonl` reads the wire log Kimi
+  Code CLI keeps under `~/.kimi/sessions/<work dir>/<session>/` — the
+  timestamped event stream its own replay rebuilds a session from — and
+  folds it the same way: streamed text and thinking pieces into one
+  assistant message per step, a tool call's argument parts into the call,
+  results by call id, the step's `token_usage` into its `cost`, and a
+  `/clear` turn dropping everything before it. The session id is the
+  directory name, per Kimi's docs; `import --all` scans the sessions tree
+  (`KIMI_SHARE_DIR` honoured). Interrupted and retried steps, notifications
+  and every other wire message are counted by name; a diff display block
+  is an excerpt, not the file, so there is no `file.diff`. Started by
+  @thegoodengineer (#119); the adapter was rebuilt on the runtime's source
+  before merging, since the original read a chat-turn shape Kimi does not
+  write.
+- **Gemini CLI adapter.** `agit import session-*.jsonl` reads the
+  recordings `ChatRecordingService` writes under
+  `~/.gemini/tmp/<project>/chats/` — a metadata line, messages re-appended
+  as their tokens and tool calls land, `$set` and `$rewindTo` records —
+  and folds them by id the way Gemini CLI's own loader does. Messages,
+  thoughts, tool calls with their `success`/`error` results, and one `cost`
+  per model message (with cached tokens as cache reads) come through;
+  rewound messages, cancelled and in-flight tool calls, and `info` /
+  `warning` / `error` lines are counted by name. A live share holds the
+  last message back until a newer one settles it, and stops on a rewind.
+  The legacy single-document form is read too, and `import --all` scans
+  the chats directories. No `file.diff`: Gemini CLI records no file content.
+  Started by @thegoodengineer (#117); the adapter was rebuilt on the
+  runtime's source before merging, since the original read a per-line
+  `role`/`parts` shape the recorder does not write.
 - **`agit export --markdown`: a Markdown audit report** for a PR body or a
   review ticket — provenance (head hash, chain verified, each signature's
   verdict), usage totals as `stats` counts them with all four token counts,
@@ -17,6 +159,20 @@ Notable changes to agit. The event format itself is versioned separately
   report. Takes `export-html`'s gates: an unverified session is refused and
   an unredacted one needs `--allow-unredacted`. Contributed by
   @thegoodengineer (#120).
+- **OpenCode adapter.** `agit import opencode.db` reads the SQLite database
+  OpenCode keeps every session in (`~/.local/share/opencode/`, per its XDG
+  data directory), from the tables its drizzle schema and generated DDL
+  define and the v1 session schema its `data` JSON follows, in the order
+  its own reader uses. Messages, reasoning, tool calls with results, and
+  one `cost` per model step come through; `synthetic` and `ignored` text
+  parts, unfinished tool states, `patch`/`snapshot`/`step-start` markers and
+  every other part type are counted by name; the dollar cost stays out
+  (SPEC §5.9). No `file.diff`: OpenCode's edits live in git snapshots, not
+  in the database. `import --all` scans the data directory. Every session in
+  the file is imported unless `--thread <id>` names one. Started by
+  @thegoodengineer (#122); the adapter was rebuilt on the runtime's source
+  before merging, since the original read a line format OpenCode does not
+  write.
 
 ### Fixed
 
