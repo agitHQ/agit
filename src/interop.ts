@@ -35,6 +35,7 @@
 
 import { createHash } from "node:crypto";
 import type { AgitEvent, Json, SessionMeta } from "./format/events.js";
+import { fileStateAt } from "./state.js";
 import { verifySignature } from "./sign.js";
 
 // --- shared -----------------------------------------------------------------
@@ -713,112 +714,167 @@ export function toAtif(events: AgitEvent[], meta: SessionMeta | null): Record<st
   };
 }
 
+// --- Markdown ------------------------------------------------------------
+
 /**
- * Render a session trajectory as a structured Markdown audit report.
- * Formats metadata, usage totals, touched files, and the step timeline.
+ * Inline code that stays inline whatever the text holds: a run of backticks
+ * one longer than any inside, and a space on each side when the text starts
+ * or ends with one (CommonMark strips exactly one). A tool name or path
+ * with a backtick in it used to close the span and turn the rest into
+ * Markdown structure.
+ */
+function inlineCode(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  const ticks = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+}
+
+/** A fenced block whose fence is longer than any backtick run inside it. */
+function fenced(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
+  const ticks = "`".repeat(Math.max(3, longest + 1));
+  return `${ticks}\n${text}\n${ticks}`;
+}
+
+/** A GFM table cell: a pipe would end it, a newline would end the row. */
+function cell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+/**
+ * A session as a Markdown audit report — the view that drops into a PR
+ * body or a review ticket. A fold over the stored events, like the other
+ * exporters, and refused for an unverified session by the same gate.
+ *
+ * Everything a log contributes is untrusted text: message bodies and tool
+ * output go into fenced blocks, names and paths into inline code, both
+ * built so the text cannot close them; a table cell escapes its pipes. An
+ * "audit" that let a user message turn itself into a heading, or a file
+ * the agent read aloud plant a tracking image, would be worse than none.
+ *
+ * Token totals come from the cost events' `usage` (SPEC §5.9), all four
+ * counts, the same fold `agit stats` runs. The file list is the structured
+ * edits the log holds and says so (SPEC §5.7). The report states what the
+ * store established about the log — chain verified, signatures and their
+ * verdicts — rather than leaving a reader to assume it.
  */
 export function toMarkdown(events: AgitEvent[], meta: SessionMeta | null): string {
-  const sessionId = meta?.sessionId ?? events[0]?.session ?? "unknown";
-  const runtime = firstOf(events, "session.start", "runtime") ?? meta?.adapter.name ?? "unknown";
+  const sessionId = events[0]?.session ?? meta?.sessionId ?? "unknown";
+  const runtime = firstOf(events, "session.start", "runtime") ?? "unknown";
   const runtimeVersion = firstOf(events, "session.start", "runtimeVersion");
-  const headHash = meta?.headHash ?? events[events.length - 1]?.hash ?? "unknown";
+  const cwd = firstOf(events, "session.start", "cwd");
+  const first = events[0];
+  const last = events[events.length - 1];
 
-  const lines: string[] = [];
-  lines.push(`# Session Audit: ${sessionId}\n`);
-  lines.push(`- **Runtime**: ${runtime}${runtimeVersion ? ` (${runtimeVersion})` : ""}`);
-  lines.push(`- **Events**: ${events.length}`);
-  lines.push(`- **Head Hash**: \`${headHash}\``);
-  if (meta?.importedAt) {
-    lines.push(`- **Imported At**: ${meta.importedAt}`);
+  const out: string[] = [];
+  out.push(`# Session audit: ${inlineCode(sessionId)}`, "");
+  out.push(`- **Runtime**: ${inlineCode(runtime)}${runtimeVersion ? ` ${inlineCode(runtimeVersion)}` : ""}`);
+  if (cwd !== null) out.push(`- **Working directory**: ${inlineCode(cwd)}`);
+  if (first && last) out.push(`- **Span**: ${first.ts} to ${last.ts}`);
+  out.push(`- **Events**: ${events.length}`);
+  if (last) out.push(`- **Head hash**: ${inlineCode(last.hash)}`);
+  // `agit export` refuses a session whose chain does not verify, so a
+  // report that exists is a report over a verified chain.
+  out.push(`- **Chain**: verified, ${events.length} event${events.length === 1 ? "" : "s"} hash-linked`);
+  const sigs = signatureVerdicts(meta);
+  if (sigs.length === 0) {
+    out.push("- **Signatures**: none (unsigned)");
+  } else {
+    for (const s of sigs) {
+      out.push(
+        `- **Signature**: ${s.ok ? "verifies" : "DOES NOT MATCH"} — key ${inlineCode(s.keyFingerprint ?? "(unreadable)")}` +
+          (s.at !== null ? ` at ${s.at}` : ""),
+      );
+    }
   }
-  lines.push("");
+  if (meta?.importedAt) out.push(`- **Imported**: ${meta.importedAt}`);
+  out.push("");
 
-  let inputTokens = 0;
-  let outputTokens = 0;
+  // Usage: the same fold as `agit stats`, over the four counts SPEC §5.9 names.
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
   const models = new Set<string>();
+  let calls = 0;
   for (const e of events) {
-    if (e.type === "cost") {
-      const p = payload(e);
-      const u = usageOf(e);
-      inputTokens += u.inputTokens ?? u.input_tokens ?? 0;
-      outputTokens += u.outputTokens ?? u.output_tokens ?? 0;
-      if (typeof p.model === "string") models.add(p.model);
-    }
+    if (e.type !== "cost") continue;
+    calls++;
+    const u = usageOf(e);
+    usage.inputTokens += u.inputTokens ?? 0;
+    usage.outputTokens += u.outputTokens ?? 0;
+    usage.cacheReadInputTokens += u.cacheReadInputTokens ?? 0;
+    usage.cacheCreationInputTokens += u.cacheCreationInputTokens ?? 0;
+    const model = str(payload(e).model);
+    if (model !== null) models.add(model);
+  }
+  if (calls > 0) {
+    const n = (v: number): string => v.toLocaleString("en-US");
+    out.push("## Usage", "");
+    out.push(
+      `- **Models**: ${models.size > 0 ? [...models].sort().map(inlineCode).join(", ") : "(not recorded)"}`,
+    );
+    out.push(`- **API messages**: ${calls}`);
+    out.push(`- **Input tokens**: ${n(usage.inputTokens)}`);
+    out.push(`- **Output tokens**: ${n(usage.outputTokens)}`);
+    out.push(`- **Cache read tokens**: ${n(usage.cacheReadInputTokens)}`);
+    out.push(`- **Cache creation tokens**: ${n(usage.cacheCreationInputTokens)}`);
+    out.push("");
   }
 
-  if (inputTokens > 0 || outputTokens > 0 || models.size > 0) {
-    lines.push("## Usage & Models\n");
-    if (models.size > 0) {
-      lines.push(`- **Models**: ${[...models].sort().join(", ")}`);
-    }
-    lines.push(`- **Input Tokens**: ${inputTokens.toLocaleString("en-US")}`);
-    lines.push(`- **Output Tokens**: ${outputTokens.toLocaleString("en-US")}`);
-    lines.push(`- **Total Tokens**: ${(inputTokens + outputTokens).toLocaleString("en-US")}\n`);
-  }
-
-  const files: { path: string; kind: string }[] = [];
-  for (const e of events) {
-    if (e.type === "file.diff") {
-      const p = payload(e);
-      const path = str(p.path);
-      const kind = str(p.kind) ?? "edit";
-      if (path && !files.some((f) => f.path === path)) {
-        files.push({ path, kind });
-      }
-    } else if (e.type === "file.delete") {
-      const p = payload(e);
-      const path = str(p.path);
-      if (path && !files.some((f) => f.path === path)) {
-        files.push({ path, kind: "delete" });
-      }
-    }
-  }
-
+  // Files: the same fold `show` and `ls` use — created or modified over the
+  // session, deleted if a structured deletion ended it, with the edit count.
+  const files = [...fileStateAt(events).values()].sort((a, b) => a.path.localeCompare(b.path));
   if (files.length > 0) {
-    lines.push("## Files Touched\n");
-    lines.push("| Action | Path |");
-    lines.push("|---|---|");
+    out.push("## Files touched", "");
+    out.push("| Action | Path | Edits |", "|---|---|---|");
     for (const f of files) {
-      lines.push(`| \`${f.kind}\` | \`${f.path}\` |`);
+      const action = f.deletedAtSeq !== undefined ? "delete" : f.kind;
+      out.push(`| ${cell(inlineCode(action))} | ${cell(inlineCode(f.path))} | ${f.edits} |`);
     }
-    lines.push("");
-    lines.push(
-      "> Structured edits only. Files changed by shell commands leave no record (SPEC §5.7), " +
-        "so this is a floor on what the session touched, not the complete set.\n",
+    out.push("");
+    out.push(
+      "> Structured edits only (SPEC §5.7): a file changed through a shell command leaves no record, " +
+        "so this is a lower bound on what the session touched, not the complete set.",
+      "",
     );
   }
 
-  function fence(text: string): string {
-    const match = text.match(/`+/g);
-    const maxTicks = match ? Math.max(...match.map((m) => m.length)) : 0;
-    const ticks = "`".repeat(Math.max(3, maxTicks + 1));
-    return `${ticks}\n${text}\n${ticks}`;
-  }
-
-  lines.push("## Trajectory Timeline\n");
+  // Timeline: messages fenced, tool calls named, results by outcome. A
+  // heading after a run of list items gets the blank line Markdown wants.
+  out.push("## Timeline", "");
+  const heading = (h: string): void => {
+    if (out[out.length - 1] !== "") out.push("");
+    out.push(h, "");
+  };
   for (const e of events) {
     const p = payload(e);
-    if (e.type === "message.user") {
-      const text = str(p.text) ?? "";
-      lines.push(`### User (seq ${e.seq})\n`);
-      lines.push(fence(text) + "\n");
-    } else if (e.type === "message.assistant") {
-      const { text, thinking } = assistantText(e);
-      lines.push(`### Assistant (seq ${e.seq})\n`);
-      if (thinking) {
-        lines.push(`Thinking:\n\n${fence(thinking)}\n`);
+    switch (e.type) {
+      case "message.user":
+        heading(`### ${e.seq} · user · ${e.ts}`);
+        out.push(fenced(str(p.text) ?? ""), "");
+        break;
+      case "message.assistant": {
+        const { text, thinking } = assistantText(e);
+        const model = str(p.model);
+        heading(`### ${e.seq} · assistant · ${e.ts}${model !== null ? ` · ${inlineCode(model)}` : ""}`);
+        if (thinking !== "") out.push("Thinking:", "", fenced(thinking), "");
+        if (text !== "") out.push(fenced(text), "");
+        break;
       }
-      if (text) {
-        lines.push(fence(text) + "\n");
-      }
-    } else if (e.type === "tool.call") {
-      const name = str(p.name) ?? "tool";
-      lines.push(`- **Tool Call** \`${name}\` (seq ${e.seq})`);
-    } else if (e.type === "tool.result") {
-      const isErr = p.isError === true;
-      lines.push(`  - Result: ${isErr ? "❌ Error" : "✓ OK"}`);
+      case "tool.call":
+        out.push(`- **${e.seq} tool call** ${inlineCode(str(p.name) ?? "unknown")}`);
+        break;
+      case "tool.result":
+        out.push(`- **${e.seq} tool result** ${p.isError === true ? "error" : "ok"}`);
+        break;
+      case "file.diff":
+        out.push(`- **${e.seq} file ${str(p.kind) ?? "modify"}** ${inlineCode(str(p.path) ?? "?")}`);
+        break;
+      case "file.delete":
+        out.push(`- **${e.seq} file delete** ${inlineCode(str(p.path) ?? "?")}`);
+        break;
+      default:
+        break;
     }
   }
-
-  return lines.join("\n") + "\n";
+  return out.join("\n") + "\n";
 }

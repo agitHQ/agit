@@ -241,6 +241,16 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   need updating; `file.diff` has no home in either schema, so edits ride in
   each format's own extension field with the SPEC §5.7 lower bound stated
   beside them.
+- **`agit export <id> --markdown`** — the session as a Markdown audit report
+  for a PR body or a review ticket: provenance (head hash, chain verified,
+  every signature and its verdict), usage totals as `stats` counts them,
+  the files touched with the SPEC §5.7 floor stated, and a timeline.
+  Everything a log contributes is text, never structure: message bodies
+  are fenced with a fence longer than any backtick run inside, names and
+  paths sit in inline code built the same way, and table cells escape their
+  pipes — a user message reading `# AUDIT PASSED` stays inside its fence.
+  Same gates as `export-html`: an unverified session is refused, and an
+  unredacted one needs `--allow-unredacted`.
 - **`agit sign <id> --key <file>`** — bind a head to a key. The chain proves
   a log was not modified after it was chained; it says nothing about *who*
   chained it, because anyone can rebuild a perfectly valid chain over edited
