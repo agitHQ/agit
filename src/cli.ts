@@ -12,6 +12,7 @@ import { clineClassicAdapter } from "./adapters/cline-classic.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
 import { geminiCliAdapter } from "./adapters/gemini-cli.js";
+import { hermesAdapter } from "./adapters/hermes.js";
 import { kimiCodeAdapter } from "./adapters/kimi-code.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
@@ -122,6 +123,7 @@ const ADAPTERS: Adapter[] = [
   opencodeAdapter,
   kimiCodeAdapter,
   piAdapter,
+  hermesAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
@@ -138,8 +140,8 @@ usage:
   agit import <db.sqlite> [--thread ID]
                                        import every session in a LangGraph
                                        checkpoint database, an OpenClaw agent
-                                       database or OpenCode's opencode.db;
-                                       --thread picks one
+                                       database, OpenCode's opencode.db or
+                                       Hermes Agent's state.db; --thread picks one
   agit import <task dir>               a Cline 3.x or Roo Code task directory:
                                        its transcript, dated from the timeline
                                        beside it where the transcript is not

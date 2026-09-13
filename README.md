@@ -50,6 +50,7 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   installed history still sits in (`agit import <globalStorage>/tasks/<id>`)
   — **Roo Code**'s task directories, which are the same layout in its own
   dialect, **pi** sessions (`~/.pi/agent/sessions/--<cwd>--/*.jsonl`),
+  **Hermes Agent**'s session database (`agit import ~/.hermes/state.db`),
   **ATIF** trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
   (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
@@ -63,6 +64,7 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
   database beside them, `~/.gemini/tmp/*/chats`,
   `~/.kimi/sessions/*/*/wire.jsonl`, `~/.pi/agent/sessions/*/*.jsonl`,
+  `~/.hermes/state.db`,
   `~/.local/share/opencode/opencode*.db`, `~/.cline/data/sessions` and
   `~/.cline/data/tasks`, and VS Code's
   `User/globalStorage/{saoudrizwan.claude-dev,rooveterinaryinc.roo-cline}/tasks`)
@@ -335,12 +337,14 @@ fall out of that chain.
 
 Said plainly:
 
-- **Eleven adapters, with different limits.** Claude Code is the reference;
+- **Twelve adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. pi's `write` writes its argument verbatim and its `edit`
   records the patch it applied, so both verify — a write against the bytes
-  it wrote, an edit against content agit already holds. ATIF is a standard rather than a runtime, Cline's SDK
+  it wrote, an edit against content agit already holds. Hermes's `write_file`
+  verifies when its own post-write byte count says nothing was transformed,
+  and its `patch` against content agit holds. ATIF is a standard rather than a runtime, Cline's SDK
   format is a published contract and its 3.x task directory is read from
   the source of the last release that wrote it, LangGraph's and OpenCode's
   databases are read from each runtime's own schema, Gemini CLI's recording
@@ -501,6 +505,28 @@ Said plainly:
   claims it. Derived from the source and checked against a fixture built to
   it; a real session that disagrees names its unmapped entries in the
   import report.
+- **A Hermes import reads `state.db`, and verifies what Hermes itself
+  verified.** `agit import ~/.hermes/state.db` reads the `sessions`,
+  `messages` and `session_model_usage` tables from Hermes's own DDL, one
+  session per import (`--thread <id>` picks one; every session with
+  messages otherwise). Messages are in the OpenAI shape — tool calls as a
+  JSON list on the assistant row, results as `tool` rows whose content is
+  the tool's JSON, carried as `structured`. Hermes's `write_file` preserves
+  a target's CRLF and BOM, then checks the disk's sha256 and reports
+  `verified` and `bytes_written`; when the count equals the argument's UTF-8
+  length nothing was transformed and the event's hash is over bytes Hermes
+  confirmed — a create with a null `beforeHash` when agit held nothing
+  before, since Hermes does not say whether the file existed. Its `patch`
+  (replace mode) answers with a difflib diff of the BOM-stripped file, which
+  agit applies to content it holds. A V4A patch and a `read_file` (returned
+  with line gutters, long lines clamped) are not replayed. Hermes keeps no
+  per-message usage: each model's session totals become one aggregate
+  `cost` at the session's end, flagged as such. Rows retired by compression
+  or a rewind are kept and flagged. `state.db` runs in WAL mode and Hermes
+  keeps the WAL open, so an import while Hermes is running is refused until
+  the database is checkpointed; the message says how. Derived from the
+  source and checked against a fixture written with the same DDL; a real
+  database that disagrees names its unmapped rows in the import report.
 - **An OpenCode import has no file history either.** `agit import
   opencode.db` reads the `session`, `message` and `part` tables OpenCode
   writes (its drizzle schema and generated DDL, its v1 session schema for
