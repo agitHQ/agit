@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const FIX = (runtime: string, file: string): string => join(ROOT, "fixtures", runtime, file);
+const NL_ = "\n";
 
 /** Run the built CLI with HOME pointed at a directory we control. */
 function agit(args: string[], home: string): { code: number; out: string } {
@@ -159,6 +160,83 @@ describe("agit import --all", () => {
     const again = agit(["import", claude, "--dir", store], home);
     expect(again.code).toBe(0);
     expect(again.out).toContain("unchanged demo-ratelimit-0001");
+  });
+
+  it("counts a log that holds no conversation as empty, not as a failure", () => {
+    // Claude Code writes a session file at startup and sometimes nothing
+    // conversational ever lands in it — only `mode` records with the id.
+    const { home, store } = populatedHome();
+    const empty = join(home, ".claude", "projects", "C--app", "empty.jsonl");
+    writeFileSync(
+      empty,
+      [
+        '{"type":"mode","mode":"default","sessionId":"empty-0001"}',
+        '{"type":"mode","mode":"plan","sessionId":"empty-0001"}',
+      ].join(NL_) + NL_,
+      "utf8",
+    );
+    const r = agit(["import", "--all", "--dir", store], home);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`  empty      ${empty}: no conversation records found`);
+    expect(r.out).toContain("0 failed, 1 empty");
+    // On its own the same file is still an error: there is nothing to import.
+    const one = agit(["import", empty, "--dir", store], home);
+    expect(one.code).toBe(1);
+    expect(one.out).toContain("no conversation records found");
+  });
+
+  it("does not let a second file with the same session id shrink or replace the stored history", () => {
+    const { home, claude, store } = populatedHome();
+    expect(agit(["import", "--all", "--dir", store], home).code).toBe(0);
+    const lines = readFileSync(claude, "utf8")
+      .split(NL_)
+      .filter((l) => l.trim() !== "");
+    const stored = readFileSync(
+      join(store, ".agit", "sessions", "demo-ratelimit-0001", "events.jsonl"),
+      "utf8",
+    );
+
+    // A resume from another directory: Claude Code writes the session to a
+    // new file under that project, here a copy of an earlier state.
+    const earlier = join(home, ".claude", "projects", "C--elsewhere", "resumed.jsonl");
+    mkdirSync(dirname(earlier), { recursive: true });
+    writeFileSync(earlier, lines.slice(0, Math.floor(lines.length / 2)).join(NL_) + NL_, "utf8");
+    const prefix = agit(["import", "--all", "--dir", store], home);
+    expect(prefix.code, prefix.out).toBe(0);
+    expect(prefix.out).toMatch(
+      /superseded demo-ratelimit-0001 +claude-code +\d+ events +.*resumed\.jsonl +\(store keeps 31 from /,
+    );
+    expect(
+      readFileSync(join(store, ".agit", "sessions", "demo-ratelimit-0001", "events.jsonl"), "utf8"),
+    ).toBe(stored);
+    const single = agit(["import", earlier, "--dir", store], home);
+    expect(single.code).toBe(0);
+    expect(single.out).toContain("superseded demo-ratelimit-0001");
+    expect(single.out).toContain("nothing changed");
+
+    // The same id over a different history: a conflict, named and left alone.
+    const forked = join(home, ".claude", "projects", "C--elsewhere", "forked.jsonl");
+    const changed = lines.map((l, i) =>
+      i === 3 ? l.replace(/"timestamp":"([^"]+)"/, '"timestamp":"2031-01-01T00:00:00.000Z"') : l,
+    );
+    expect(changed[3]).not.toBe(lines[3]);
+    writeFileSync(forked, changed.join(NL_) + NL_, "utf8");
+    const diverged = agit(["import", "--all", "--dir", store], home);
+    expect(diverged.code, diverged.out).toBe(0);
+    expect(diverged.out).toContain("diverged   demo-ratelimit-0001");
+    expect(diverged.out).toContain("not overwritten");
+    expect(diverged.out).toContain("1 diverged");
+    expect(
+      readFileSync(join(store, ".agit", "sessions", "demo-ratelimit-0001", "events.jsonl"), "utf8"),
+    ).toBe(stored);
+    const singleDiverged = agit(["import", forked, "--dir", store], home);
+    expect(singleDiverged.code).toBe(1);
+    expect(singleDiverged.out).toContain("diverged demo-ratelimit-0001");
+    expect(singleDiverged.out).toContain("agit rm demo-ratelimit-0001");
+
+    // Growth of the original file is still an update.
+    writeFileSync(claude, lines.join(NL_) + NL_ + lines[lines.length - 1] + NL_, "utf8");
+    expect(agit(["import", "--all", "--dir", store], home).out).toMatch(/updated +demo-ratelimit-0001/);
   });
 
   it("names a missing file instead of printing a raw ENOENT", () => {

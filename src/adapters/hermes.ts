@@ -74,7 +74,7 @@ import { seedKnownFromBase } from "../base.js";
 import type { DraftEvent, Json } from "../format/events.js";
 import { applyUnifiedDiff, NO_NEWLINE_MARKER } from "../patch.js";
 import { looksLikeSqlite, rowsOf, SqliteError, SqliteFile, type SqliteValue } from "../sqlite.js";
-import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
+import { EmptySourceError, type Adapter, type ConvertOptions, type ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "hermes";
 const ADAPTER_VERSION = "0.1.0";
@@ -416,7 +416,7 @@ export const hermesAdapter: Adapter = {
       throw err;
     }
     const ids = hermesAdapter.sessionsIn!(bytes);
-    if (ids.length === 0) throw new Error("this Hermes state.db holds no session with messages");
+    if (ids.length === 0) throw new EmptySourceError("this Hermes state.db holds no session with messages");
     let nativeId: string;
     if (opts?.select !== undefined) {
       if (!t.sessions.has(opts.select))

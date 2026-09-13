@@ -7,6 +7,24 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Fixed
 
+- **A second file with a stored session's id can no longer shrink or
+  replace its history.** Claude Code writes a session resumed from another
+  directory to a new file under that project, with the same session id —
+  found on a real machine as a copy of an *earlier* state, which
+  `import --all` met second and "updated" the stored 1411 events down to
+  1277. The store's copy is now replaced only by a chain that extends it:
+  a file that is a prefix of what is stored is reported as *superseded* and
+  leaves it alone; one that shares the id but not the history is reported
+  as *diverged*, left alone, and named with both paths (`agit rm <id>`
+  first to replace it deliberately). Growth of the same log is still an
+  update, and switching redaction on or off still rewrites.
+- **A log that holds no conversation counts as empty, not as a failure.**
+  Claude Code sometimes writes a session file that only ever gets `mode`
+  records; `import --all` used to report it as failed and exit 1. Adapters
+  now raise `EmptySourceError` for a source with nothing to import, and
+  `--all` counts it as empty and moves on; importing such a file on its own
+  is still an error.
+
 - **A WAL sidecar for a database with another page size is refused.**
   `applyWal` trusted the sidecar's own page size; a mismatched pair would
   have landed its frames at the wrong offsets. The two must agree (main

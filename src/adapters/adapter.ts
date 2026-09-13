@@ -1,6 +1,14 @@
 import type { BaseTree } from "../base.js";
 import type { DraftEvent } from "../format/events.js";
 
+/**
+ * A source that holds no session to import — a log with no conversation
+ * record, a database with no session that has messages. Not a malformed
+ * file and not agit's failure: `import --all` counts it as empty and moves
+ * on, where any other error is a failure to name.
+ */
+export class EmptySourceError extends Error {}
+
 /** What an adapter produces from one native session log. Payloads are not yet redacted or chained — the import pipeline does both. */
 export interface ConvertResult {
   sessionId: string;

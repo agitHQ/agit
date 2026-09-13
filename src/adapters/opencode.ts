@@ -63,7 +63,7 @@
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
 import { looksLikeSqlite, rowsOf, SqliteError, SqliteFile, type SqliteValue } from "../sqlite.js";
-import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
+import { EmptySourceError, type Adapter, type ConvertOptions, type ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "opencode";
 const ADAPTER_VERSION = "0.2.0";
@@ -258,7 +258,7 @@ export const opencodeAdapter: Adapter = {
       throw err;
     }
     const ids = opencodeAdapter.sessionsIn!(bytes);
-    if (ids.length === 0) throw new Error("this opencode.db holds no session with messages");
+    if (ids.length === 0) throw new EmptySourceError("this opencode.db holds no session with messages");
     let sessionId: string;
     if (opts?.select !== undefined) {
       if (!ids.includes(opts.select)) {
