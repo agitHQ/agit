@@ -60,8 +60,9 @@
  *     round-trip to bytes. Both are counted where they would have mattered.
  *
  * `state.db` runs in WAL mode and Hermes keeps the WAL open while it runs,
- * so an import while Hermes is up is refused by agit's sidecar check until
- * the database is checkpointed; the message says how.
+ * so the newest rows sit in `state.db-wal`; the import folds that sidecar's
+ * committed frames in the way SQLite reads them (`applyWal` in sqlite.ts),
+ * so a running Hermes imports as it stands.
  *
  * Derived from the source above and validated against a fixture written
  * with the same DDL, not against a real state.db; a real one that disagrees
