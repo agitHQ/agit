@@ -205,9 +205,15 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   terminal first, attributed, and a message with a wrong key is shown too —
   labelled, and delivered to no one. The key never reaches other viewers;
   the relay forwards it to the sharer alone, who is the only party that can
-  check it. Only Claude Code is wired, because only Claude Code documents a
-  turn-boundary hook; `--steer` on a Codex or OpenClaw session is refused
-  with that reason rather than promising a channel that does not exist.
+  check it. Two runtimes are wired, because two document a turn-boundary
+  hook: Claude Code (above, verified against the runtime) and **Gemini
+  CLI**, whose `AfterAgent` hook takes a blocking decision whose `reason`
+  is sent to the agent as the next prompt with the history kept, and whose
+  `BeforeAgent` hook takes `additionalContext` for the idle case —
+  `agit hook --config gemini-cli` prints that fragment (derived from Gemini
+  CLI's source; not yet exercised against a running Gemini CLI). `--steer`
+  on a Codex or OpenClaw session is refused with that reason rather than
+  promising a channel that does not exist.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -358,15 +364,16 @@ Said plainly:
   absent from the tree entirely, and a file deleted by a shell command
   still appears at its last logged content — only a structured deletion
   (`file.delete`) removes it.
-- **No message injection mid-run, and steering is Claude Code only.**
+- **No message injection mid-run, and steering is wired per runtime.**
   Sharing is watch-only unless the sharer passes `--steer`, and even then a
   message is never fed into a running turn: it waits for the runtime's own
-  turn boundary (Claude Code's `Stop` / `UserPromptSubmit` hooks) and is
-  delivered through the documented `additionalContext` channel, which the
-  agent weighs like any other context — a teammate's request, not a command
-  from the keyboard. Codex, OpenClaw, Cline and ATIF sessions have no
-  documented equivalent, so `--steer` refuses them; a runtime that gains one
-  gets wired the same way, per adapter, opt-in.
+  turn boundary — Claude Code's `Stop` / `UserPromptSubmit` hooks, Gemini
+  CLI's `AfterAgent` / `BeforeAgent` — and is delivered through the channel
+  each documents, which the agent weighs like any other context — a
+  teammate's request, not a command from the keyboard. Codex, OpenClaw,
+  Cline, Kimi Code, OpenCode, LangGraph and ATIF sessions have no documented
+  equivalent, so `--steer` refuses them; a runtime that gains one gets wired
+  the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
   HTTP on loopback, and binding beyond loopback without TLS is refused unless
