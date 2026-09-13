@@ -3,6 +3,22 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **A database is shared live, not just imported.** `agit share <db>
+  [--thread <id>]` follows a session inside a LangGraph, OpenClaw, OpenCode
+  or Hermes database the way it follows a log: the follower reads the file
+  as SQLite reads it (WAL sidecar folded in, so a running writer's rows are
+  seen as they land), polls the main file and the sidecar together, streams
+  the prefix-stable events, and ends byte-identical to an import.
+  `--thread` names the session when the file holds several, and `share
+  --resume` remembers it. Hermes holds its per-model totals back until the
+  session ends, since they grow with every request. A runtime that rewrites
+  earlier rows in place stops the share as a rewrite, as for a log.
+  `share --static` on a database publishes one conversion, as for a log.
+
 ## 0.13.0 — 2026-09-13
 
 ### Added

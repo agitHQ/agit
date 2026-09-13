@@ -3215,25 +3215,35 @@ async function cmdShare(opts: Opts): Promise<number> {
   // imported session — which is still live-capable when its source file exists.
   let nativePath: string | null = null;
   let staticEvents: AgitEvent[] | null = null;
+  // A database holds sessions, not a session: the one to follow is named by
+  // --thread, or is the only one there is (the same rule as import).
+  let shareSelect: string | undefined;
   if (existsSync(resolve(target)) && !listSessionIds(opts.dir).includes(target)) {
-    // A database is imported, not tailed: there is no line-oriented log to
-    // follow, and the adapter that reads it takes bytes.
-    if (
-      statSync(resolve(target)).isFile() &&
-      ADAPTERS.some((a) => a.detectBytes?.(readFileSync(resolve(target))))
-    ) {
-      console.error(
-        `${target} is a database, not a log: import it first (agit import ${target} [--thread ID]),`,
-      );
-      console.error("then share the session id.");
-      return 2;
-    }
     nativePath = resolve(target);
+    if (statSync(nativePath).isFile()) {
+      const binary = ADAPTERS.find((a) => a.detectBytes?.(readFileSync(nativePath!)));
+      if (binary !== undefined) {
+        try {
+          const { bytes } = readSqliteWithWal(nativePath);
+          const selections = sessionsToImport(binary, bytes, opts.thread);
+          if (selections.length > 1) {
+            throw new Error(
+              `this database holds ${selections.length} sessions; pass --thread <id> to share one: ${selections.join(", ")}`,
+            );
+          }
+          shareSelect = selections[0];
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          return 2;
+        }
+      }
+    }
   } else {
     const id = resolveSessionId(opts.dir, target);
     const meta = readSessionMeta(opts.dir, id);
     if (!opts.static && meta && existsSync(meta.source.path)) {
       nativePath = meta.source.path;
+      shareSelect = meta.source.select;
     } else {
       // This is the path that publishes the stored chain itself, so it is
       // the one that must never publish a chain that does not verify — or
@@ -3245,15 +3255,20 @@ async function cmdShare(opts: Opts): Promise<number> {
   }
   if (opts.static && nativePath !== null && staticEvents === null) {
     // --static on a path: one full (non-live) conversion, pushed once.
-    const lines = readNativeLog(nativePath)
-      .split("\n")
-      .filter((l) => l.trim() !== "");
-    const adapter = ADAPTERS.find((a) => a.detect(lines));
+    const adapter = pickAdapterFor(nativePath);
     if (!adapter) {
       console.error("no adapter recognizes this file");
       return 1;
     }
-    const converted = adapter.convert(lines);
+    const converted =
+      adapter.convertBytes !== undefined
+        ? adapter.convertBytes(readSqliteWithWal(nativePath).bytes, { path: nativePath, select: shareSelect })
+        : adapter.convert(
+            readNativeLog(nativePath)
+              .split("\n")
+              .filter((l) => l.trim() !== ""),
+            { path: nativePath },
+          );
     const counts: RedactionCounts = {};
     for (const d of converted.drafts) d.payload = redactDeep(d.payload, counts, shareCfg);
     staticEvents = buildChain(converted.sessionId, converted.drafts);
@@ -3310,6 +3325,7 @@ async function cmdShare(opts: Opts): Promise<number> {
       viewUrl: share.viewUrl,
       relay: opts.relay,
       nativePath,
+      ...(shareSelect !== undefined ? { select: shareSelect } : {}),
       createdAt: new Date().toISOString(),
       ...(steerKey !== null ? { steerKey } : {}),
     });
@@ -3346,7 +3362,7 @@ async function cmdShare(opts: Opts): Promise<number> {
       await waitForSigint();
       return 0;
     }
-    follower = followerFor(nativePath!, shareCfg);
+    follower = followerFor(nativePath!, shareCfg, shareSelect);
     if (!follower) return 1;
     const initial = follower.poll();
     // The session id is known now: bind the steer inbox to it, which also
@@ -3462,7 +3478,7 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   // and the head hash would stop matching the relay's.
   const resumeCfg = redactionConfigFor(opts);
   if (resumeCfg === null) return 2;
-  const follower = followerFor(state.nativePath, resumeCfg);
+  const follower = followerFor(state.nativePath, resumeCfg, state.select);
   if (!follower) return 1;
   const all = follower.poll();
   if (all.length < head.events) {
@@ -3529,13 +3545,17 @@ async function cmdShareResume(opts: Opts): Promise<number> {
   }
 }
 
-function followerFor(nativePath: string, redaction: RedactionConfig): SessionFollower | null {
+function followerFor(
+  nativePath: string,
+  redaction: RedactionConfig,
+  select?: string,
+): SessionFollower | null {
   const adapter = pickAdapterFor(nativePath);
   if (!adapter) {
     console.error("no adapter recognizes this file");
     return null;
   }
-  return new SessionFollower(nativePath, adapter, redaction);
+  return new SessionFollower(nativePath, adapter, redaction, select);
 }
 
 function openShareInbox(
@@ -3676,8 +3696,14 @@ async function liveLoop(
   return 0;
 }
 
+/** The adapter for a native file: a database is recognized from its bytes first, a log from its lines. */
 function pickAdapterFor(path: string): Adapter | undefined {
-  const lines = readNativeLog(path)
+  const bytes = readFileSync(path);
+  const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
+  if (binary !== undefined) return binary;
+  const lines = bytes
+    .toString("utf8")
+    .replace(/^\uFEFF/, "")
     .split("\n")
     .filter((l) => l.trim() !== "");
   return ADAPTERS.find((a) => a.detect(lines));

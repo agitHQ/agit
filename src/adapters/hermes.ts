@@ -622,13 +622,18 @@ export const hermesAdapter: Adapter = {
     if (inherited > 0) skip("message-timestamp-inherited", inherited);
 
     // Session totals per model, as one aggregate cost each (see the header).
-    const usageRows = t.usage.get(nativeId) ?? [];
+    // Held back while the session runs: they grow with every request, and a
+    // live share must only ever extend what it streamed.
+    const usageRows = opts?.live && session.endedAt === null ? [] : (t.usage.get(nativeId) ?? []);
     const totals: UsageRow[] =
-      usageRows.length > 0
-        ? usageRows
-        : session.usage.input + session.usage.output + session.usage.cacheRead + session.usage.cacheWrite > 0
-          ? [{ model: session.model ?? "", ...session.usage, hasCost: session.hasCost }]
-          : [];
+      opts?.live && session.endedAt === null
+        ? []
+        : usageRows.length > 0
+          ? usageRows
+          : session.usage.input + session.usage.output + session.usage.cacheRead + session.usage.cacheWrite >
+              0
+            ? [{ model: session.model ?? "", ...session.usage, hasCost: session.hasCost }]
+            : [];
     const endTs = session.endedAt ?? ts;
     for (const u of totals) {
       if (u.hasCost) skip("cost-usd-not-stored (SPEC §5.9)");

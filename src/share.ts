@@ -13,8 +13,9 @@
  * stream is byte-identical to `agit import` of the same file.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Adapter } from "./adapters/adapter.js";
+import { readSqliteWithWal } from "./sqlite.js";
 import { canonicalJson } from "./format/canonical.js";
 import { buildChain, sha256Hex } from "./format/hash.js";
 import type { AgitEvent, DraftEvent } from "./format/events.js";
@@ -67,7 +68,23 @@ export class SessionFollower {
     private readonly path: string,
     private readonly adapter: Adapter,
     private readonly redaction: RedactionConfig = builtinConfig(),
+    /** A database holds sessions, not a session: which one to follow (ConvertOptions.select). */
+    private readonly select?: string,
   ) {}
+
+  /**
+   * One stat for a log; for a database, the main file and its WAL sidecar
+   * together, since a running writer appends to the sidecar and leaves the
+   * main file untouched until a checkpoint.
+   */
+  private statAll(): { size: number; mtimeMs: number } {
+    const st = statSync(this.path);
+    if (this.adapter.convertBytes === undefined) return { size: st.size, mtimeMs: st.mtimeMs };
+    const wal = `${this.path}-wal`;
+    if (!existsSync(wal)) return { size: st.size, mtimeMs: st.mtimeMs };
+    const ws = statSync(wal);
+    return { size: st.size + ws.size, mtimeMs: Math.max(st.mtimeMs, ws.mtimeMs) };
+  }
 
   /** Convert the file as it stands and return newly chained (redacted) events. */
   poll(): AgitEvent[] {
@@ -96,7 +113,7 @@ export class SessionFollower {
     // read and checked.
     let seen: { size: number; mtimeMs: number } | null = null;
     if (live) {
-      const st = statSync(this.path);
+      const st = this.statAll();
       // ...but only once the file's mtime has had time to settle. Filesystems
       // report mtime at a coarse resolution — two seconds on FAT, and in
       // practice enough on Windows that CI caught this — so two writes inside
@@ -130,14 +147,24 @@ export class SessionFollower {
     // record as unparseable, and a live share of the file is no longer the
     // chain an import of it produces. An editor re-save of the source before
     // `agit share <id>` is enough to get there.
-    const lines = readFileSync(this.path, "utf8")
-      .replace(/^\uFEFF/, "")
-      .split("\n")
-      .filter((l) => l.trim() !== "");
+    // The read is outside the try below: a read that fails (EBUSY, a stale
+    // handle) must surface, not count as "nothing convertible yet".
+    // A database is read as SQLite reads it, committed WAL frames folded in.
+    const bytes = this.adapter.convertBytes !== undefined ? readSqliteWithWal(this.path).bytes : null;
+    const lines =
+      bytes === null
+        ? readFileSync(this.path, "utf8")
+            .replace(/^\uFEFF/, "")
+            .split("\n")
+            .filter((l) => l.trim() !== "")
+        : [];
     let drafts: DraftEvent[];
     let sessionId: string;
     try {
-      const res = this.adapter.convert(lines, { live, path: this.path });
+      const res =
+        bytes !== null
+          ? this.adapter.convertBytes!(bytes, { live, path: this.path, select: this.select })
+          : this.adapter.convert(lines, { live, path: this.path });
       drafts = res.drafts;
       sessionId = res.sessionId;
     } catch {
