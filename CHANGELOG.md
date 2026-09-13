@@ -7,6 +7,18 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **`--steer` works for pi sessions.** pi's extension API
+  (`packages/coding-agent/docs/extensions.md`) documents both halves of the
+  channel: a `before_agent_start` handler may return `{ message }` to
+  inject a custom message into the session, and an `agent_end` handler may
+  queue one with `pi.sendMessage(message, { deliverAs: "followUp",
+  triggerTurn: true })`. `agit hook` answers those two events with that
+  message, and `agit hook --config pi` prints a small extension —
+  `~/.pi/agent/extensions/agit-steer.ts`, loaded uncompiled — that runs
+  `agit hook` in the session's cwd with `ctx.sessionManager.getSessionId()`
+  (the header id, which is what the adapter reports) and hands the answer
+  to pi. Derived from the docs; not yet exercised against a running pi.
+
 - **A database is shared live, not just imported.** `agit share <db>
   [--thread <id>]` follows a session inside a LangGraph, OpenClaw, OpenCode
   or Hermes database the way it follows a log: the follower reads the file
