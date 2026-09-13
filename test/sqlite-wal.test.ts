@@ -143,6 +143,11 @@ describe("applyWal", () => {
     const main = read(MAIN);
     expect(applyWal(main, new Uint8Array(32))).toMatchObject({ frames: 0, committed: 0 });
     expect(() => applyWal(main, new Uint8Array(32 + 4096 + 24))).toThrow(SqliteError);
+    // A sidecar for a database with another page size would land its frames
+    // at the wrong offsets: refused before any frame is read.
+    expect(() =>
+      applyWal(main, buildWal(1024, [{ pageNo: 1, commit: 1, page: new Uint8Array(1024) }])),
+    ).toThrow(/page size 1024 does not match the database's 4096/);
     // A header is only checked once it has frames behind it.
     const one = [{ pageNo: 1, commit: 1, page: new Uint8Array(4096) }];
     const wal = buildWal(4096, one);
