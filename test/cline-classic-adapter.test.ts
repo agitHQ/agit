@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { clineClassicAdapter, parseAssistantXml } from "../src/adapters/cline-classic.js";
+import { clineClassicAdapter, dialectOf, parseAssistantXml } from "../src/adapters/cline-classic.js";
 import { discoverSessionLogs } from "../src/discover.js";
 import type { Json } from "../src/format/events.js";
 import { buildChain, toJsonl } from "../src/format/hash.js";
@@ -23,6 +23,10 @@ const XML_ID = "1736589300000";
 const NATIVE_ID = "1789136000000";
 const XML_TASK = join(ROOT, "fixtures", "cline-classic", XML_ID);
 const NATIVE_TASK = join(ROOT, "fixtures", "cline-classic", NATIVE_ID);
+const ROO_XML_ID = "0190a1b2-c3d4-7e5f-8a6b-9c0d1e2f3a4b";
+const ROO_NATIVE_ID = "0192f0e1-d2c3-7b4a-9586-7768594a3b2c";
+const ROO_XML_TASK = join(ROOT, "fixtures", "roo-code", ROO_XML_ID);
+const ROO_NATIVE_TASK = join(ROOT, "fixtures", "roo-code", ROO_NATIVE_ID);
 const transcript = (task: string): string => join(task, "api_conversation_history.json");
 
 const mktemp = (): string => mkdtempSync(join(tmpdir(), "agit-cline-classic-"));
@@ -59,6 +63,7 @@ function taskDir(id: string, api: unknown[], ui?: unknown[]): string {
 }
 
 const text = (t: string): Json => ({ type: "text", text: t });
+const NL = "\n";
 
 describe("parseAssistantXml, Cline's parseAssistantMessageV2", () => {
   it("splits text from tool calls and trims values, leaving unknown tags as text", () => {
@@ -429,6 +434,173 @@ describe("the Cline task-directory adapter", () => {
   });
 });
 
+describe("the Roo Code dialect of the same layout", () => {
+  it("tells the dialects apart by the directory name, then by the transcript's own tells", () => {
+    const cline = JSON.parse(readFileSync(transcript(XML_TASK), "utf8")) as Record<string, Json>[];
+    const rooXml = JSON.parse(readFileSync(transcript(ROO_XML_TASK), "utf8")) as Record<string, Json>[];
+    const rooNative = JSON.parse(readFileSync(transcript(ROO_NATIVE_TASK), "utf8")) as Record<string, Json>[];
+    expect(dialectOf(cline, "1736589300000")).toEqual({ dialect: "cline", evidence: "task-id:milliseconds" });
+    expect(dialectOf(cline, ROO_XML_ID)).toEqual({ dialect: "roo", evidence: "task-id:uuid" });
+    expect(dialectOf(rooNative, null)).toEqual({ dialect: "roo", evidence: "opener:user_message" });
+    expect(dialectOf(rooXml, null)).toEqual({ dialect: "roo", evidence: "result:framed-alone" });
+    expect(dialectOf(cline, null)).toEqual({ dialect: "cline", evidence: "assumed" });
+    const native = JSON.parse(readFileSync(transcript(NATIVE_TASK), "utf8")) as Record<string, Json>[];
+    expect(dialectOf(native, null)).toEqual({ dialect: "cline", evidence: "message:metrics" });
+    const rooTag = [
+      { role: "user", content: [text("<task>" + NL + "t" + NL + "</task>")] },
+      {
+        role: "assistant",
+        content: [text("<switch_mode>" + NL + "<mode_slug>ask</mode_slug>" + NL + "</switch_mode>")],
+      },
+    ] as Record<string, Json>[];
+    expect(dialectOf(rooTag, null)).toEqual({ dialect: "roo", evidence: "tool:roo-only" });
+    // Roo's own tags parse only in Roo's dialect.
+    expect(parseAssistantXml("<switch_mode><mode_slug>ask</mode_slug></switch_mode>", "roo")).toEqual([
+      { type: "tool", name: "switch_mode", params: { mode_slug: "ask" }, partial: false },
+    ]);
+    expect(parseAssistantXml("<switch_mode><mode_slug>ask</mode_slug></switch_mode>")).toEqual([
+      { type: "text", text: "<switch_mode><mode_slug>ask</mode_slug></switch_mode>" },
+    ]);
+  });
+
+  it("reads an XML-era Roo task: two-block results joined, request-order dating and usage, Roo's tools", () => {
+    const r = clineClassicAdapter.convert(linesOf(transcript(ROO_XML_TASK)), {
+      path: transcript(ROO_XML_TASK),
+    });
+    expect(r.sessionId).toBe(ROO_XML_ID);
+    expect(payloads(r.drafts, "session.start")[0]).toMatchObject({
+      runtime: "roo-code",
+      native: { dialect: "roo", dialectEvidence: "task-id:uuid" },
+    });
+    expect(r.drafts.map((d) => d.type)).toEqual([
+      "session.start",
+      "message.user",
+      "message.assistant",
+      "tool.call",
+      "cost",
+      "tool.result",
+      "tool.call",
+      "cost",
+      "tool.result",
+      "tool.call",
+      "cost",
+      "tool.result",
+      "message.assistant",
+      "tool.call",
+      "cost",
+      "tool.result",
+      "tool.call",
+      "cost",
+      "session.end",
+    ]);
+    const calls = payloads(r.drafts, "tool.call");
+    expect(calls.map((c) => [c.name, c.toolUseId])).toEqual([
+      ["read_file", "xml:1:0"],
+      ["apply_diff", "xml:3:0"],
+      ["execute_command", "xml:5:0"],
+      ["switch_mode", "xml:7:0"],
+      ["attempt_completion", "xml:9:0"],
+    ]);
+    expect(calls[3]!.input).toEqual({ mode_slug: "ask", reason: "done editing" });
+    const results = payloads(r.drafts, "tool.result");
+    expect(results.map((x) => [x.toolUseId, x.isError])).toEqual([
+      ["xml:1:0", false],
+      ["xml:3:0", false],
+      ["xml:5:0", true],
+      ["xml:7:0", false],
+    ]);
+    // The framing block and the content block, joined the way Cline writes one.
+    expect(results[3]!.output).toBe(
+      "[switch_mode to 'ask' because: done editing] Result:" +
+        NL +
+        "Successfully switched from Code mode to Ask mode because: done editing.",
+    );
+    expect(results[0]!.output.startsWith("[read_file for 'src/index.ts'] Result:" + NL + "<file>")).toBe(
+      true,
+    );
+    expect(r.skipped["tool-result-unpaired"]).toBeUndefined();
+    // No ts and no conversationHistoryIndex: request order dates and prices every turn.
+    expect(r.drafts[1]!.ts).toBe("2025-02-03T16:20:00.300Z");
+    expect(r.drafts[2]!.ts).toBe("2025-02-03T16:20:02.300Z");
+    expect(r.skipped["message-timestamp-by-request-order"]).toBe(10);
+    expect(payloads(r.drafts, "cost").map((c) => (c.usage as Record<string, number>).inputTokens)).toEqual([
+      900, 1100, 1300, 1400, 1500,
+    ]);
+    expect(r.skipped["cost-unpaired-requests"]).toBeUndefined();
+    expect(r.skipped["file-edit-unverifiable"]).toBe(1);
+    expect(payloads(r.drafts, "file.diff")).toEqual([]);
+  });
+
+  it("reads a native-era Roo task: JSON errors, condense entries, and a retried request left unpaired", () => {
+    const r = clineClassicAdapter.convert(linesOf(transcript(ROO_NATIVE_TASK)), {
+      path: transcript(ROO_NATIVE_TASK),
+    });
+    expect(r.sessionId).toBe(ROO_NATIVE_ID);
+    expect(r.drafts.map((d) => d.type)).toEqual([
+      "session.start",
+      "message.user",
+      "tool.call",
+      "tool.result",
+      "message.assistant",
+      "tool.call",
+      "tool.result",
+      "message.assistant",
+      "tool.call",
+      "session.end",
+    ]);
+    expect(payloads(r.drafts, "message.user")[0]!.text).toBe(
+      "<user_message>" + NL + "Rename greet to hello" + NL + "</user_message>",
+    );
+    const results = payloads(r.drafts, "tool.result");
+    expect(results[0]).toMatchObject({ toolUseId: "call_readgreet", isError: false });
+    expect(results[1]).toMatchObject({ toolUseId: "call_edit", isError: true });
+    expect(results[0]!.native).toMatchObject({ tool: null, xml: false }); // no framing in Roo's native era
+    // The condensed summary is kept and flagged; the message it hides too.
+    const summary = payloads(r.drafts, "message.assistant")[0]!;
+    expect(summary.native).toMatchObject({ isSummary: true });
+    expect(payloads(r.drafts, "tool.call")[0]!.native).toMatchObject({ index: 1 });
+    expect(r.skipped["reasoning-item"]).toBe(1);
+    expect(r.skipped["truncation-marker"]).toBe(1);
+    // Four api_req_started (one a retry) against three answering turns: no usage is guessed.
+    expect(payloads(r.drafts, "cost")).toEqual([]);
+    expect(r.skipped["cost-unpaired-requests"]).toBe(4);
+    expect(r.drafts[0]!.ts).toBe("2026-05-11T11:46:40.000Z");
+    expect(r.skipped["message-timestamp-from-ui-messages"]).toBeUndefined();
+    // A denial is a JSON status too, and is not an error.
+    const denied = clineClassicAdapter.convert([
+      JSON.stringify([
+        { role: "user", ts: 1, content: [text("<user_message>" + NL + "t" + NL + "</user_message>")] },
+        {
+          role: "assistant",
+          ts: 2,
+          content: [{ type: "tool_use", id: "t1", name: "execute_command", input: { command: "rm" } }],
+        },
+        {
+          role: "user",
+          ts: 3,
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: JSON.stringify({ status: "denied", message: "The user denied this operation." }),
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          ts: 4,
+          content: [{ type: "reasoning", text: "They said no.", summary: [] }, text("Understood.")],
+        },
+      ]),
+    ]);
+    expect(payloads(denied.drafts, "tool.result")[0]).toMatchObject({ isError: false });
+    expect(payloads(denied.drafts, "message.assistant")[0]!.blocks).toEqual([
+      { type: "thinking", text: "They said no." },
+      { type: "text", text: "Understood." },
+    ]);
+  });
+});
+
 describe("agit import on a Cline task directory", () => {
   it("imports the directory itself or its transcript, verifies, and reads back", () => {
     const dir = mktemp();
@@ -484,14 +656,40 @@ describe("agit import on a Cline task directory", () => {
     mkdirSync(code, { recursive: true });
     writeFileSync(join(code, "api_conversation_history.json"), readFileSync(transcript(NATIVE_TASK)));
 
+    const roo = join(
+      home,
+      ".config",
+      "Code",
+      "User",
+      "globalStorage",
+      "rooveterinaryinc.roo-cline",
+      "tasks",
+      ROO_NATIVE_ID,
+    );
+    mkdirSync(roo, { recursive: true });
+    writeFileSync(join(roo, "api_conversation_history.json"), readFileSync(transcript(ROO_NATIVE_TASK)));
+
     const linux = discoverSessionLogs(home, {}, "linux");
     expect(linux.logs.map((l) => [l.runtime, l.path]).sort()).toEqual(
       [
         ["cline-classic", join(cliTasks, XML_ID, "api_conversation_history.json")],
         ["cline-classic", join(code, "api_conversation_history.json")],
         ["cline-sdk", join(sdk, "s-1.messages.json")],
+        ["roo-code", join(roo, "api_conversation_history.json")],
       ].sort(),
     );
+    expect(linux.roots.filter((r) => r.runtime === "roo-code").map((r) => r.dir)).toEqual([
+      join(home, ".config", "Code", "User", "globalStorage", "rooveterinaryinc.roo-cline", "tasks"),
+      join(
+        home,
+        ".config",
+        "Code - Insiders",
+        "User",
+        "globalStorage",
+        "rooveterinaryinc.roo-cline",
+        "tasks",
+      ),
+    ]);
     expect(linux.roots.filter((r) => r.runtime === "cline-classic").map((r) => r.dir)).toEqual([
       cliTasks,
       join(home, ".config", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "tasks"),

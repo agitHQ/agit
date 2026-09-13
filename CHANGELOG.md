@@ -3,6 +3,31 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Roo Code task directories import, as a dialect of `cline-classic`
+  (#63).** Roo forked Cline's layout and kept the two files, so the same
+  adapter reads both, deciding the dialect from the directory name (Cline's
+  millisecond id, Roo's UUID) or the transcript's own tells, and reporting
+  runtime `roo-code`. From Roo's source (v3.20.0 for the XML era, v3.54.0
+  for the last release): Roo's tool and parameter names for the parser; an
+  XML-era result as two blocks — the `[name for '…'] Result:` frame alone,
+  then the content — joined into one; native `tool_result` content with no
+  framing; `toolError` recognized as prose (3.20) or JSON `status: "error"`
+  (3.54), a denial being neither; `isSummary` / `condenseParent` /
+  `truncationParent` carried on the events they mark, reasoning items and
+  truncation markers counted; a generic `reasoning` block kept as thinking.
+  Roo never wrote `conversationHistoryIndex`, so tasks without `ts` pair
+  with the timeline by request order, and usage is paired only when the
+  request and turn counts agree (a retried request says `api_req_started`
+  again without a message to answer it) — otherwise counted, never guessed.
+  `import --all` scans VS Code's `globalStorage/rooveterinaryinc.roo-cline/
+  tasks` beside Cline's. `session.start` now records the dialect and its
+  evidence for Cline tasks too (adapter 0.2.0; the committed golden moved
+  with it).
+
 ## 0.11.0 — 2026-09-13
 
 ### Added

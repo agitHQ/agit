@@ -83,11 +83,53 @@
  * and `new_rule` calls are recorded as the calls they are and counted as
  * edits agit cannot verify.
  *
- * Derived from the source above and validated against fixtures built to
- * it — including one in each tool-call shape — not against a real task
+ * **Roo Code is the same layout with its own dialect**, and this adapter
+ * reads both. Roo (RooVeterinaryInc.roo-cline, archived May 2026, last
+ * release v3.54.0) forked Cline and kept the task directory: the same two
+ * file names under `<globalStorage>/tasks/<taskId>/`
+ * (`src/shared/globalFileNames.ts`, `src/utils/storage.ts` — a
+ * `customStoragePath` setting can move the whole tree, in which case the
+ * task is imported by path). What differs, each read from Roo's source at
+ * v3.54.0 and, for the XML era, v3.20.0:
+ *   - `src/core/task/Task.ts`: the task id is a UUID (`uuidv7()`), not a
+ *     millisecond count; the first message is `<task>` up to 3.x and
+ *     `<user_message>` by 3.54; every transcript message is stamped `ts`
+ *     since 3.x (3.0.0 stamped none), so the timeline is only needed for
+ *     the oldest tasks; no UI message ever carries
+ *     `conversationHistoryIndex`, so those pair by request order.
+ *     `api_req_started` is said before the request's user message is
+ *     appended, as in Cline, but a retried request says it again without
+ *     re-appending the message, so usage is paired by order only when the
+ *     counts agree, and the mismatch is counted otherwise.
+ *   - `packages/types/src/tool.ts` and `src/shared/tools.ts`: Roo's own tool
+ *     and parameter names (`apply_diff`, `insert_content`, `switch_mode`,
+ *     `codebase_search`, …); the parser (`parseAssistantMessageV2.ts` at
+ *     v3.20.0) is Cline's, line for line, over those names. By 3.54 only
+ *     native tool calls remain.
+ *   - `src/core/assistant-message/presentAssistantMessage.ts`: an XML-era
+ *     result is *two* text blocks — `"${description} Result:"` alone, then
+ *     the content — where Cline writes one; a native-era `tool_result`
+ *     carries the content with no framing at all.
+ *   - `src/core/prompts/responses.ts`: `toolError` is the same prose as
+ *     Cline's at v3.20.0 and a JSON object with `"status": "error"` by
+ *     v3.54.0; both mark `isError`. `toolDenied` is not an error.
+ *   - `src/core/task-persistence/apiMessages.ts`: transcript messages may
+ *     carry `isSummary` (a condensed-context summary, kept and flagged),
+ *     `condenseParent` / `truncationParent` (hidden from the API, still what
+ *     happened, kept), `isTruncationMarker` and `type: "reasoning"` items
+ *     (not messages: counted).
+ * Which dialect a transcript is in is decided before anything is read: the
+ * task directory's name when there is a path (digits are Cline's
+ * `Date.now()`, a UUID is Roo's), else the transcript's own tells — a
+ * `<user_message>` opener, a bare `[…] Result:` block, a Roo-only tool tag,
+ * Roo's condense fields, or Cline's `modelInfo` / `metrics` — and, failing
+ * every one, Cline, counted as an assumption. The decision is recorded in
+ * `session.start`, and the runtime is reported as `cline` or `roo-code`.
+ *
+ * Derived from the sources above and validated against fixtures built to
+ * them — one per tool-call shape per dialect — not against a real task
  * directory. A real task that disagrees names its unmapped blocks in the
- * import report. Roo Code forked this layout and is not claimed here: its
- * tool names and result strings are its own.
+ * import report.
  *
  * A running task is shared from the same file, which Cline rewrites in place
  * on every message; under `ConvertOptions.live` the synthesized
@@ -101,7 +143,7 @@ import type { DraftEvent, Json } from "../format/events.js";
 import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "cline-classic";
-const ADAPTER_VERSION = "0.1.0";
+const ADAPTER_VERSION = "0.2.0";
 
 /** `ClineDefaultTool` in shared/tools.ts at v3.89.2: the only names the XML parser recognizes. */
 export const XML_TOOL_NAMES: readonly string[] = [
@@ -183,14 +225,133 @@ const XML_PARAM_NAMES: readonly string[] = [
   "end_line",
 ];
 
-/** Tools whose call edits a file; see the header for why none becomes a file.diff. */
-const FILE_EDITING_TOOLS = new Set(["write_to_file", "replace_in_file", "apply_patch", "new_rule"]);
+export type Dialect = "cline" | "roo";
 
-/** responses.ts `toolError`: the one prefix that marks a result as an error. */
+/**
+ * Roo's `toolNames` at v3.20.0 (the XML era) and v3.54.0 together: a tag
+ * is recognized if any Roo release parsed it.
+ */
+export const ROO_XML_TOOL_NAMES: readonly string[] = [
+  "execute_command",
+  "read_file",
+  "read_command_output",
+  "write_to_file",
+  "apply_diff",
+  "edit",
+  "insert_content",
+  "search_and_replace",
+  "search_replace",
+  "edit_file",
+  "apply_patch",
+  "search_files",
+  "list_files",
+  "list_code_definition_names",
+  "browser_action",
+  "use_mcp_tool",
+  "access_mcp_resource",
+  "ask_followup_question",
+  "attempt_completion",
+  "switch_mode",
+  "new_task",
+  "fetch_instructions",
+  "codebase_search",
+  "update_todo_list",
+  "run_slash_command",
+  "skill",
+  "generate_image",
+  "custom_tool",
+];
+
+/** Roo's `toolParamNames` at v3.20.0 and v3.54.0 together (`src/shared/tools.ts`). */
+const ROO_XML_PARAM_NAMES: readonly string[] = [
+  "command",
+  "path",
+  "content",
+  "line_count",
+  "regex",
+  "file_pattern",
+  "recursive",
+  "action",
+  "url",
+  "coordinate",
+  "text",
+  "server_name",
+  "tool_name",
+  "arguments",
+  "uri",
+  "question",
+  "result",
+  "diff",
+  "mode_slug",
+  "reason",
+  "line",
+  "mode",
+  "message",
+  "cwd",
+  "follow_up",
+  "task",
+  "size",
+  "search",
+  "replace",
+  "use_regex",
+  "ignore_case",
+  "args",
+  "start_line",
+  "end_line",
+  "query",
+  "skill",
+  "todos",
+  "prompt",
+  "image",
+  "operations",
+  "patch",
+  "file_path",
+  "old_string",
+  "new_string",
+  "replace_all",
+  "expected_replacements",
+  "timeout",
+  "artifact_id",
+  "offset",
+  "limit",
+  "indentation",
+  "anchor_line",
+  "max_levels",
+  "include_siblings",
+  "include_header",
+  "max_lines",
+  "files",
+  "line_ranges",
+];
+
+/** Tools Roo has and Cline never had: one in a transcript's text is Roo's tell. */
+const ROO_ONLY_TOOLS: readonly string[] = ROO_XML_TOOL_NAMES.filter((t) => !XML_TOOL_NAMES.includes(t));
+
+/** Tools whose call edits a file, in either dialect; see the header for why none becomes a file.diff. */
+const FILE_EDITING_TOOLS = new Set([
+  "write_to_file",
+  "replace_in_file",
+  "apply_patch",
+  "new_rule",
+  "apply_diff",
+  "insert_content",
+  "search_and_replace",
+  "search_replace",
+  "edit",
+  "edit_file",
+  "generate_image",
+]);
+
+/** responses.ts `toolError` (Cline, and Roo at v3.20.0): the one prefix that marks a result as an error. */
 const TOOL_ERROR_PREFIX = "The tool execution failed with the following error:";
 
 /** ToolResultUtils: `"${description} Result:\n${text}"`, description `[name for '…']` or `[name]`. */
 const RESULT_PREFIX = /^\[([a-z_]+)(?: [^\n]*?)?\] Result:\n/;
+
+/** Roo's presentAssistantMessage at v3.20.0: the description and " Result:" as a block of their own. */
+const RESULT_FRAME_ONLY = /^\[([a-z_]+)(?: [^\n]*)?\] Result:$/;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type Rec = { [k: string]: Json };
 
@@ -245,7 +406,9 @@ function endsAt(s: string, tag: string, i: number): boolean {
  * tag inside the file does not truncate it. Every tag ends in `>`, so only
  * those positions are examined — the one shortcut, and it changes nothing.
  */
-export function parseAssistantXml(s: string): (XmlText | XmlTool)[] {
+export function parseAssistantXml(s: string, dialect: Dialect = "cline"): (XmlText | XmlTool)[] {
+  const toolNames = dialect === "roo" ? ROO_XML_TOOL_NAMES : XML_TOOL_NAMES;
+  const paramNames = dialect === "roo" ? ROO_XML_PARAM_NAMES : XML_PARAM_NAMES;
   const out: (XmlText | XmlTool)[] = [];
   let textStart = 0;
   let tool: XmlTool | undefined;
@@ -263,7 +426,7 @@ export function parseAssistantXml(s: string): (XmlText | XmlTool)[] {
     }
     if (tool !== undefined) {
       let started = false;
-      for (const p of XML_PARAM_NAMES) {
+      for (const p of paramNames) {
         if (endsAt(s, `<${p}>`, i)) {
           param = p;
           paramStart = i + 1;
@@ -287,7 +450,7 @@ export function parseAssistantXml(s: string): (XmlText | XmlTool)[] {
       textStart = i + 1;
       continue;
     }
-    for (const name of XML_TOOL_NAMES) {
+    for (const name of toolNames) {
       const tag = `<${name}>`;
       if (!endsAt(s, tag, i)) continue;
       const text = s.slice(textStart, i - tag.length + 1).trim();
@@ -339,11 +502,59 @@ function isClassicTranscript(doc: unknown): doc is Rec[] {
   for (const m of doc) {
     const r = asRec(m);
     if (r === undefined) return false;
+    // Roo's standalone reasoning items have no role or content of their own.
+    if (r.type === "reasoning") continue;
     if (typeof r.role !== "string") return false;
     if (typeof r.content !== "string" && !Array.isArray(r.content)) return false;
   }
   const first = doc[0] as Rec;
-  return first.role === "user" && (openingText(first)?.startsWith("<task>") ?? false);
+  const opener = openingText(first);
+  return (
+    first.role === "user" &&
+    opener !== null &&
+    (opener.startsWith("<task>") || opener.startsWith("<user_message>"))
+  );
+}
+
+/**
+ * Which dialect wrote this task (see the header): the directory's name when
+ * there is one, else the transcript's own tells, else Cline by assumption.
+ */
+export function dialectOf(messages: Rec[], taskId: string | null): { dialect: Dialect; evidence: string } {
+  if (taskId !== null && /^\d{13,}$/.test(taskId))
+    return { dialect: "cline", evidence: "task-id:milliseconds" };
+  if (taskId !== null && UUID.test(taskId)) return { dialect: "roo", evidence: "task-id:uuid" };
+  if (openingText(messages[0]!)?.startsWith("<user_message>"))
+    return { dialect: "roo", evidence: "opener:user_message" };
+  for (const m of messages) {
+    if (m.modelInfo !== undefined || m.metrics !== undefined)
+      return { dialect: "cline", evidence: "message:metrics" };
+    if (
+      m.condenseId !== undefined ||
+      m.condenseParent !== undefined ||
+      m.isSummary === true ||
+      m.type === "reasoning"
+    ) {
+      return { dialect: "roo", evidence: "message:condense" };
+    }
+    const blocks: Json[] =
+      typeof m.content === "string"
+        ? [{ type: "text", text: m.content }]
+        : Array.isArray(m.content)
+          ? m.content
+          : [];
+    for (const b of blocks) {
+      const r = asRec(b);
+      const text = r !== undefined && r.type === "text" ? str(r.text) : null;
+      if (text === null) continue;
+      if (m.role === "user" && RESULT_FRAME_ONLY.test(text))
+        return { dialect: "roo", evidence: "result:framed-alone" };
+      if (m.role === "assistant" && ROO_ONLY_TOOLS.some((t) => text.includes(`<${t}>`))) {
+        return { dialect: "roo", evidence: "tool:roo-only" };
+      }
+    }
+  }
+  return { dialect: "cline", evidence: "assumed" };
 }
 
 interface UiMessage {
@@ -397,6 +608,8 @@ interface UiPairing {
   ts: (string | null)[];
   req: (Rec | null)[];
   byIndex: boolean;
+  /** Order mode only: requests the timeline holds that no assistant message could be paired with. */
+  unpairedRequests: number;
 }
 
 function pairUi(ui: UiMessage[], messages: Rec[]): UiPairing {
@@ -432,13 +645,23 @@ function pairUi(ui: UiMessage[], messages: Rec[]): UiPairing {
       if (assistant >= 0 && assistant < n && messages[assistant]!.role === "assistant")
         req[assistant] = m.req;
     }
-    return { ts, req, byIndex };
+    return { ts, req, byIndex, unpairedRequests: 0 };
   }
   // No index anywhere: the k-th request is the k-th user message and the
   // k-th assistant message. A user message is dated by its api_req_started;
   // an assistant message by the last UI message before the next request.
+  // Usage is paired the same way, but only when the counts agree: a retry
+  // (Roo) or a request dropped on resume (both) says api_req_started
+  // without a message to answer it, and a count that is off would hand one
+  // message another's tokens.
   const starts: number[] = [];
   for (let pos = 0; pos < ui.length; pos++) if (ui[pos]!.say === "api_req_started") starts.push(pos);
+  // Only real turns take part: Roo's reasoning items, truncation markers and
+  // condensed summaries sit in the transcript without a request of their own.
+  const isTurn = (m: Rec): boolean =>
+    m.type !== "reasoning" && m.isTruncationMarker !== true && m.isSummary !== true;
+  const assistantTotal = messages.filter((m) => m.role === "assistant" && isTurn(m)).length;
+  const pairUsage = starts.length === assistantTotal;
   const lastTsBefore = (pos: number): string | null => {
     for (let p = pos - 1; p >= 0; p--) if (ui[p]!.ts !== null) return ui[p]!.ts;
     return null;
@@ -446,6 +669,7 @@ function pairUi(ui: UiMessage[], messages: Rec[]): UiPairing {
   let users = 0;
   let assistants = 0;
   for (let i = 0; i < n; i++) {
+    if (!isTurn(messages[i]!)) continue;
     const role = messages[i]!.role;
     if (role === "user") {
       const pos = starts[users];
@@ -456,12 +680,22 @@ function pairUi(ui: UiMessage[], messages: Rec[]): UiPairing {
       if (k < starts.length) {
         const next = starts[k + 1];
         ts[i] = lastTsBefore(next ?? ui.length);
-        req[i] = ui[starts[k]!]!.req;
+        if (pairUsage) req[i] = ui[starts[k]!]!.req;
       }
       assistants++;
     }
   }
-  return { ts, req, byIndex };
+  return { ts, req, byIndex, unpairedRequests: pairUsage ? 0 : starts.length };
+}
+
+/** Roo's `toolError` at v3.54.0 is JSON with `"status": "error"`; `toolDenied` is `"denied"`, which is not an error. */
+function isRooJsonError(body: string): boolean {
+  if (!body.startsWith("{")) return false;
+  try {
+    return asRec(JSON.parse(body))?.status === "error";
+  } catch {
+    return false;
+  }
 }
 
 /** A tool_result's content is a string or blocks: flatten to text. */
@@ -510,18 +744,23 @@ export const clineClassicAdapter: Adapter = {
   convert(lines: string[], opts?: ConvertOptions): ConvertResult {
     const doc = parseDocument(lines);
     if (!isClassicTranscript(doc))
-      throw new Error("not a Cline task transcript (api_conversation_history.json)");
+      throw new Error("not a Cline or Roo Code task transcript (api_conversation_history.json)");
     const messages = doc;
     const skipped: Record<string, number> = {};
     const skip = (what: string, n = 1): void => {
       skipped[what] = (skipped[what] ?? 0) + n;
     };
 
+    const dirName = opts?.path !== undefined ? basename(dirname(resolve(opts.path))) : null;
+    const { dialect, evidence } = dialectOf(messages, dirName !== null && dirName !== "" ? dirName : null);
+    if (evidence === "assumed") skip("dialect-assumed:cline");
     const ui = readUiMessages(opts?.path);
     if (opts?.path !== undefined && ui === null && existsSync(join(dirname(opts.path), "ui_messages.json"))) {
       skip("ui-messages-unreadable");
     }
     const paired = ui === null ? null : pairUi(ui, messages);
+    if (paired !== null && paired.unpairedRequests > 0)
+      skip("cost-unpaired-requests", paired.unpairedRequests);
 
     // Every message's date, before anything is emitted: the first one dates
     // session.start, and a transcript with none at all is refused rather than
@@ -537,7 +776,7 @@ export const clineClassicAdapter: Adapter = {
 
     // The directory's name, from an absolute form of the path so a relative
     // `api_conversation_history.json` still names its task.
-    const taskId = opts?.path !== undefined ? basename(dirname(resolve(opts.path))) : null;
+    const taskId = dirName;
     let sessionId: string;
     if (taskId !== null && taskId !== "") {
       sessionId = taskId;
@@ -552,13 +791,13 @@ export const clineClassicAdapter: Adapter = {
       ts,
       type: "session.start",
       payload: {
-        runtime: "cline",
+        runtime: dialect === "roo" ? "roo-code" : "cline",
         runtimeVersion: null,
         nativeSessionId: sessionId,
         cwd: null,
         gitBranch: null,
         adapter: { name: ADAPTER_NAME, version: ADAPTER_VERSION },
-        native: { taskId: sessionId, layout: "api_conversation_history" },
+        native: { taskId: sessionId, layout: "api_conversation_history", dialect, dialectEvidence: evidence },
       },
     });
 
@@ -585,7 +824,21 @@ export const clineClassicAdapter: Adapter = {
         inherited++;
       }
 
+      // Roo keeps two kinds of entry in the transcript that are not messages.
+      if (m.type === "reasoning") {
+        skip("reasoning-item");
+        continue;
+      }
+      if (m.isTruncationMarker === true) {
+        skip("truncation-marker");
+        continue;
+      }
       const id = str(m.id);
+      const rooFlags: Rec = {
+        ...(m.isSummary === true ? { isSummary: true } : {}),
+        ...(typeof m.condenseParent === "string" ? { condenseParent: m.condenseParent } : {}),
+        ...(typeof m.truncationParent === "string" ? { truncationParent: m.truncationParent } : {}),
+      };
       const entries: Json[] =
         typeof m.content === "string" ? [{ type: "text", text: m.content }] : (m.content as Json[]);
       const blocks = entries.filter((b): b is Rec => asRec(b) !== undefined);
@@ -595,6 +848,30 @@ export const clineClassicAdapter: Adapter = {
         const texts: string[] = [];
         const results: { toolUseId: string | null; output: string; isError: boolean; native: Rec }[] = [];
         let xmlAt = 0;
+        // Roo's XML era: a framing block opens a result whose body is the
+        // text blocks after it, up to the next frame or Cline-style block.
+        let frame: { tool: string; head: string; body: string[] } | null = null;
+        const pairXml = (tool: string): string | null => {
+          const call = pendingXml[xmlAt];
+          if (call !== undefined && call.name === tool) {
+            xmlAt++;
+            return call.id;
+          }
+          skip("tool-result-unpaired");
+          return null;
+        };
+        const closeFrame = (): void => {
+          if (frame === null) return;
+          const body = frame.body.join("\n");
+          results.push({
+            toolUseId: pairXml(frame.tool),
+            // Joined the way Cline writes its one block, so a result reads the same in either dialect.
+            output: `${frame.head}\n${body}`,
+            isError: false,
+            native: { index: i, tool: frame.tool, xml: true },
+          });
+          frame = null;
+        };
         for (const b of blocks) {
           if (b.type === "text") {
             const text = str(b.text);
@@ -603,21 +880,26 @@ export const clineClassicAdapter: Adapter = {
               continue;
             }
             if (text === "") continue;
+            if (dialect === "roo") {
+              const only = RESULT_FRAME_ONLY.exec(text);
+              if (only !== null) {
+                closeFrame();
+                frame = { tool: only[1]!, body: [], head: text };
+                continue;
+              }
+              if (frame !== null && !isEnvironmentDetails(text)) {
+                frame.body.push(text);
+                continue;
+              }
+              closeFrame();
+            }
             const split = splitResult(text);
             if (split !== null) {
               // A text result belongs to the k-th XML call of the message
               // before, when the names agree; anything else is a result of
               // nothing this adapter saw.
-              const call = pendingXml[xmlAt];
-              let toolUseId: string | null = null;
-              if (call !== undefined && call.name === split.tool) {
-                toolUseId = call.id;
-                xmlAt++;
-              } else {
-                skip("tool-result-unpaired");
-              }
               results.push({
-                toolUseId,
+                toolUseId: pairXml(split.tool),
                 output: text,
                 isError: false,
                 native: { index: i, tool: split.tool, xml: true },
@@ -628,6 +910,7 @@ export const clineClassicAdapter: Adapter = {
               texts.push(text);
             }
           } else if (b.type === "tool_result") {
+            closeFrame();
             const toolUseId = str(b.tool_use_id);
             if (toolUseId === null) skip("tool-result-without-id");
             const output = resultText(b.content);
@@ -639,12 +922,19 @@ export const clineClassicAdapter: Adapter = {
               native: { index: i, tool: splitResult(output)?.tool ?? null, xml: false },
             });
           } else {
+            if (frame === null || b.type !== "image") closeFrame();
+            else skip("result-image"); // Roo pushes a result's images after its text
             skip(`unknown-block:${str(b.type) ?? "(untyped)"}`);
           }
         }
+        closeFrame();
         const text = texts.join("\n");
         if (text !== "") {
-          drafts.push({ ts, type: "message.user", payload: { text, native: { index: i, messageId: id } } });
+          drafts.push({
+            ts,
+            type: "message.user",
+            payload: { text, native: { index: i, messageId: id, ...rooFlags } },
+          });
         }
         for (const r of results) {
           const body = splitResult(r.output)?.body ?? r.output;
@@ -653,7 +943,10 @@ export const clineClassicAdapter: Adapter = {
             type: "tool.result",
             payload: {
               toolUseId: r.toolUseId,
-              isError: r.isError || body.startsWith(TOOL_ERROR_PREFIX),
+              isError:
+                r.isError ||
+                body.startsWith(TOOL_ERROR_PREFIX) ||
+                (dialect === "roo" && isRooJsonError(body)),
               output: r.output,
               structured: null,
               native: r.native,
@@ -674,13 +967,19 @@ export const clineClassicAdapter: Adapter = {
             else if (thinking !== "") out.push({ type: "thinking", text: thinking });
           } else if (b.type === "redacted_thinking") {
             skip("redacted-thinking");
+          } else if (b.type === "reasoning") {
+            // Roo's generic reasoning block (Task.ts addToApiConversationHistory):
+            // the model's reasoning as text, or an encrypted form with none.
+            const reasoning = str(b.text);
+            if (reasoning !== null && reasoning !== "") out.push({ type: "thinking", text: reasoning });
+            else skip("reasoning-encrypted");
           } else if (b.type === "text") {
             const text = str(b.text);
             if (text === null) {
               skip("malformed-block:text");
               continue;
             }
-            for (const part of parseAssistantXml(text)) {
+            for (const part of parseAssistantXml(text, dialect)) {
               if (part.type === "text") {
                 out.push({ type: "text", text: part.text });
                 continue;
@@ -722,6 +1021,7 @@ export const clineClassicAdapter: Adapter = {
                 index: i,
                 messageId: id,
                 ...(modelInfo ? { provider: str(modelInfo.providerId), mode: str(modelInfo.mode) } : {}),
+                ...rooFlags,
               },
             },
           });

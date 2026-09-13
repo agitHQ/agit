@@ -138,8 +138,8 @@ usage:
                                        checkpoint database, an OpenClaw agent
                                        database or OpenCode's opencode.db;
                                        --thread picks one
-  agit import <cline task dir>         a Cline 3.x task directory: its
-                                       transcript, dated from the timeline
+  agit import <task dir>               a Cline 3.x or Roo Code task directory:
+                                       its transcript, dated from the timeline
                                        beside it where the transcript is not
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
