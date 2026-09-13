@@ -3,6 +3,27 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Hermes Agent sessions import from `state.db` (`hermes`, #64).** The
+  `sessions`, `messages` and `session_model_usage` tables, read from
+  Hermes's own DDL with the in-tree SQLite reader: messages in the OpenAI
+  shape (tool calls as a JSON list on the assistant row, results as `tool`
+  rows carrying the tool's JSON as `structured`, `reasoning` as thinking),
+  retired rows kept and flagged, one session per import with `--thread`
+  picking among several. `write_file` becomes a `file.diff` when Hermes's
+  own post-write check says the bytes landed untransformed (`verified` and
+  a `bytes_written` equal to the argument's length); `patch` in replace
+  mode applies Hermes's difflib diff to content agit holds; V4A patches and
+  line-numbered reads are counted, not replayed. No per-message usage
+  exists, so each model's session totals become one aggregate `cost`,
+  flagged. `import --all` scans `$HERMES_HOME/state.db` (default
+  `~/.hermes`, `%LOCALAPPDATA%\hermes` on Windows); an import while Hermes
+  holds the WAL open is refused until a checkpoint, as for every WAL
+  database.
+
 ## 0.12.0 — 2026-09-13
 
 ### Added

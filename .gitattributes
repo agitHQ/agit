@@ -3,3 +3,4 @@
 *.gif -text
 *.cast text eol=lf
 *.sqlite binary
+*.db binary

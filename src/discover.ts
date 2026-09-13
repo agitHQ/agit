@@ -56,6 +56,12 @@
  *                 --<cwd>--/<timestamp>_<session id>.jsonl —
  *                 packages/coding-agent/docs/session-format.md and
  *                 src/config.ts getAgentDir() in badlogic/pi-mono.
+ *  - Hermes       $HERMES_HOME (default ~/.hermes; %LOCALAPPDATA%/hermes on
+ *                 Windows)/state.db — hermes_constants.py get_hermes_home()
+ *                 and hermes_state.py DEFAULT_DB_PATH in
+ *                 NousResearch/hermes-agent. Every session lives in that one
+ *                 file, which runs in WAL mode: while Hermes is up the
+ *                 import is refused until the database is checkpointed.
  *  - Roo Code     the same task directories under the editor's
  *                 User/globalStorage/rooveterinaryinc.roo-cline
  *                 (src/utils/storage.ts in RooCodeInc/Roo-Code; the
@@ -229,6 +235,23 @@ function piAgentDir(home: string, env: NodeJS.ProcessEnv): string {
   return override ? resolve(override) : join(home, ".pi", "agent");
 }
 
+/** Hermes Agent: the one state.db in its home. */
+function scanHermes(home: string, out: DiscoveredLog[]): void {
+  const db = join(home, "state.db");
+  if (isFile(db)) record("hermes", db, out);
+}
+
+/** The home Hermes itself would use: the env override, else the platform default. */
+function hermesHome(home: string, env: NodeJS.ProcessEnv, platform: string): string {
+  const override = env.HERMES_HOME?.trim();
+  if (override) return resolve(override);
+  if (platform === "win32") {
+    const local = env.LOCALAPPDATA?.trim();
+    return join(local || join(home, "AppData", "Local"), "hermes");
+  }
+  return join(home, ".hermes");
+}
+
 /** Cline SDK sessions: data/sessions/<id>/<id>.messages.json. */
 function scanClineSdk(sessionsRoot: string, out: DiscoveredLog[]): void {
   for (const id of listDir(sessionsRoot)) {
@@ -307,6 +330,7 @@ export function discoverSessionLogs(
     { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
     { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
     { runtime: "pi", dir: join(piAgentDir(home, env), "sessions"), scan: scanPi },
+    { runtime: "hermes", dir: hermesHome(home, env, platform), scan: scanHermes },
     { runtime: "cline-sdk", dir: join(cline, "data", "sessions"), scan: scanClineSdk },
     { runtime: "cline-classic", dir: join(cline, "data", "tasks"), scan: scanClineClassic },
     ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
