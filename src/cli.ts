@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
+import { EmptySourceError } from "./adapters/adapter.js";
 import { atifAdapter } from "./adapters/atif.js";
 import { claudeCodeAdapter } from "./adapters/claude-code.js";
 import { clineClassicAdapter } from "./adapters/cline-classic.js";
@@ -637,7 +638,9 @@ function sourceKey(sha256: string, select: string | undefined): string {
 }
 
 interface ImportOutcome {
-  status: "imported" | "updated" | "unchanged" | "unrecognized";
+  status: "imported" | "updated" | "unchanged" | "unrecognized" | "superseded" | "diverged";
+  /** superseded / diverged: where the store's copy of this session came from. */
+  previousPath?: string;
   id?: string;
   adapter?: Adapter;
   events?: number;
@@ -763,6 +766,38 @@ function importNativeLog(
   // no-op when it is in fact a full rewrite of the stored payloads.
   const modeChanged = previous !== null && (previous.redaction?.enabled === false) !== opts.noRedact;
 
+  // The store's copy is replaced only by a chain that extends it. Claude
+  // Code writes a session resumed from another directory to a new file under
+  // that project, with the same session id — sometimes a copy of an earlier
+  // state, which used to shrink the stored history when `import --all` met
+  // it second. A file that is a prefix of the store's chain is superseded by
+  // what is already there; one that shares an id but not a history is a
+  // conflict, named and left alone. Switching redaction on or off is the
+  // one rewrite that is asked for, and passes.
+  if (previous !== null && !modeChanged) {
+    // Compared without the tail an import synthesizes from where the file
+    // ended — the session.end, and a cost flushed at EOF — since a log that
+    // grew always differs there and is exactly the case that must update.
+    const storedCore = importBody(readSessionEvents(opts.dir, converted.sessionId));
+    const newCore = importBody(events);
+    const shorter = Math.min(storedCore.length, newCore.length);
+    let common = 0;
+    while (common < shorter && storedCore[common]!.hash === newCore[common]!.hash) common++;
+    if (common < storedCore.length) {
+      return {
+        status: common === newCore.length ? "superseded" : "diverged",
+        id: converted.sessionId,
+        adapter,
+        events: events.length,
+        previousEvents: previous.eventCount,
+        previousPath: previous.source.path,
+        records: converted.records,
+        skipped: converted.skipped,
+        redactions,
+      };
+    }
+  }
+
   const meta: SessionMeta = {
     agitSchema: SCHEMA_VERSION,
     sessionId: converted.sessionId,
@@ -813,11 +848,40 @@ function importNativeLog(
   };
 }
 
+/**
+ * A chain without the events that depend on where the file ended: a
+ * synthesized session.end, and the cost an adapter flushes at EOF before
+ * it. What is left is what the log itself recorded, which is what two
+ * imports of the same session should be compared on.
+ */
+function importBody(events: AgitEvent[]): AgitEvent[] {
+  let end = events.length;
+  if (end > 0 && events[end - 1]!.type === "session.end" && events[end - 1]!.payload.synthesized === true)
+    end--;
+  if (end > 0 && events[end - 1]!.type === "cost") end--;
+  return events.slice(0, end);
+}
+
 /** The full report for one import — what `agit import <file>` has always printed. */
 function printImportReport(opts: Opts, outcome: ImportOutcome): number {
   if (outcome.status === "unrecognized") {
     console.error(
       "no adapter recognizes this file (adapters available: " + ADAPTERS.map((a) => a.name).join(", ") + ")",
+    );
+    return 1;
+  }
+  if (outcome.status === "superseded") {
+    console.log(
+      `superseded ${outcome.id} — this file is an earlier copy of a session the store already holds in full ` +
+        `(${outcome.previousEvents} events from ${outcome.previousPath}; this file yields ${outcome.events}); nothing changed`,
+    );
+    return 0;
+  }
+  if (outcome.status === "diverged") {
+    console.error(
+      `diverged ${outcome.id} — this file shares the id of the stored session but not its history ` +
+        `(${outcome.previousEvents} events from ${outcome.previousPath}; this file yields ${outcome.events} that part ways earlier). ` +
+        `Not overwritten. To replace the stored session: agit rm ${outcome.id}, then import again.`,
     );
     return 1;
   }
@@ -991,7 +1055,7 @@ function sessionsToImport(
       throw new Error(`no session ${JSON.stringify(named)} in this file; it holds: ${ids.join(", ")}`);
     return [named];
   }
-  if (ids.length === 0) throw new Error("this file holds no sessions");
+  if (ids.length === 0) throw new EmptySourceError("this file holds no sessions");
   return ids;
 }
 
@@ -1001,16 +1065,47 @@ interface ImportTally {
   unchanged: number;
   unrecognized: number;
   failed: number;
+  /** Sources that hold no session (EmptySourceError). */
+  empty: number;
+  /** Files sharing a stored session's id but not its history. */
+  diverged: number;
 }
 
 function newTally(): ImportTally {
-  return { imported: 0, updated: 0, unchanged: 0, unrecognized: 0, failed: 0 };
+  return { imported: 0, updated: 0, unchanged: 0, unrecognized: 0, failed: 0, empty: 0, diverged: 0 };
+}
+
+/** One tally line for an error from a source; an empty source is counted, anything else is a failure. */
+function tallyError(tally: ImportTally, where: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof EmptySourceError) {
+    tally.empty++;
+    console.log(`  empty      ${where}: ${message}`);
+  } else {
+    tally.failed++;
+    console.log(`  failed     ${where}: ${message}`);
+  }
 }
 
 /** One line per outcome, the shape `import --all` has always printed. */
 function printTallyLine(tally: ImportTally, outcome: ImportOutcome, runtime: string, where: string): void {
-  tally[outcome.status]++;
   const id = (outcome.id ?? "").slice(0, 20).padEnd(20);
+  if (outcome.status === "superseded") {
+    // An earlier copy of a session the store already holds in full.
+    tally.unchanged++;
+    console.log(
+      `  superseded ${id} ${runtime.padEnd(12)} ${String(outcome.events).padStart(6)} events   ${where}  (store keeps ${outcome.previousEvents} from ${outcome.previousPath})`,
+    );
+    return;
+  }
+  if (outcome.status === "diverged") {
+    tally.diverged++;
+    console.log(
+      `  diverged   ${id} ${runtime.padEnd(12)} ${String(outcome.events).padStart(6)} events   ${where}  (shares the id of the store's ${outcome.previousEvents} events from ${outcome.previousPath} but not their history; not overwritten — agit rm ${outcome.id} first to replace it)`,
+    );
+    return;
+  }
+  tally[outcome.status]++;
   if (outcome.status === "imported") {
     console.log(
       `  imported   ${id} ${runtime.padEnd(12)} ${String(outcome.events).padStart(6)} events   ${where}`,
@@ -1026,8 +1121,11 @@ function printTallyLine(tally: ImportTally, outcome: ImportOutcome, runtime: str
 
 function printTallySummary(opts: Opts, tally: ImportTally): number {
   const total = listSessionIds(opts.dir).length;
+  const extra =
+    (tally.empty > 0 ? `, ${tally.empty} empty` : "") +
+    (tally.diverged > 0 ? `, ${tally.diverged} diverged` : "");
   console.log(
-    `\n${tally.imported} imported, ${tally.updated} updated, ${tally.unchanged} unchanged, ${tally.unrecognized} skipped, ${tally.failed} failed — ${total} session${total === 1 ? "" : "s"} in ${join(opts.dir, ".agit")}`,
+    `\n${tally.imported} imported, ${tally.updated} updated, ${tally.unchanged} unchanged, ${tally.unrecognized} skipped, ${tally.failed} failed${extra} — ${total} session${total === 1 ? "" : "s"} in ${join(opts.dir, ".agit")}`,
   );
   return tally.failed > 0 ? 1 : 0;
 }
@@ -1095,8 +1193,7 @@ function importPath(opts: Opts, target: string): number {
       try {
         outcome = importNativeLog(opts, path, { kind: "bytes", bytes }, known, redactCfg, undefined, select);
       } catch (err) {
-        tally.failed++;
-        console.log(`  failed     ${select}: ${err instanceof Error ? err.message : String(err)}`);
+        tallyError(tally, String(select), err);
         continue;
       }
       printTallyLine(tally, outcome, binary.name, select ?? path);
@@ -1202,8 +1299,7 @@ function cmdImportDiscovered(opts: Opts): number {
         if (withWal.note !== null) console.log(`  ${withWal.note}`);
         selections = sessionsToImport(binary, dbBytes, undefined);
       } catch (err) {
-        tally.failed++;
-        console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
+        tallyError(tally, log.path, err);
         continue;
       }
       for (const select of selections) {
@@ -1219,10 +1315,7 @@ function cmdImportDiscovered(opts: Opts): number {
           );
           printTallyLine(tally, outcome, log.runtime, `${log.path} ${select ?? ""}`.trimEnd());
         } catch (err) {
-          tally.failed++;
-          console.log(
-            `  failed     ${log.path} ${select ?? ""}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          tallyError(tally, `${log.path} ${select ?? ""}`.trimEnd(), err);
         }
       }
       continue;
@@ -1235,8 +1328,7 @@ function cmdImportDiscovered(opts: Opts): number {
         ? { status: "unrecognized" }
         : importNativeLog(opts, log.path, { kind: "text", raw, lines }, known, redactCfg, discoveredBase);
     } catch (err) {
-      tally.failed++;
-      console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
+      tallyError(tally, log.path, err);
       continue;
     }
     printTallyLine(tally, outcome, log.runtime, log.path);

@@ -52,7 +52,7 @@
  */
 
 import type { DraftEvent, Json } from "../format/events.js";
-import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
+import { EmptySourceError, type Adapter, type ConvertOptions, type ConvertResult } from "./adapter.js";
 
 const ADAPTER_NAME = "cline-sdk";
 const ADAPTER_VERSION = "0.1.0";
@@ -169,7 +169,7 @@ export const clineSdkAdapter: Adapter = {
       skipped[what] = (skipped[what] ?? 0) + n;
     };
 
-    if (messages.length === 0) throw new Error("this Cline SDK session has no messages");
+    if (messages.length === 0) throw new EmptySourceError("this Cline SDK session has no messages");
 
     const firstTs = messages.map((m) => isoTs(m.ts)).find((iso) => iso !== null);
     if (firstTs === undefined) {

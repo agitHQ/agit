@@ -12,7 +12,7 @@
 import { createHash } from "node:crypto";
 import type { DraftEvent, Json } from "../format/events.js";
 import { NO_NEWLINE_MARKER } from "../patch.js";
-import type { Adapter, ConvertOptions, ConvertResult } from "./adapter.js";
+import { EmptySourceError, type Adapter, type ConvertOptions, type ConvertResult } from "./adapter.js";
 
 export const ADAPTER_NAME = "claude-code";
 export const ADAPTER_VERSION = "0.1.0";
@@ -284,7 +284,7 @@ export const claudeCodeAdapter: Adapter = {
     if (!opts?.live) flushCost();
 
     if (firstTs === null || lastTs === null || sessionId === null) {
-      throw new Error("no conversation records found — is this a Claude Code session log?");
+      throw new EmptySourceError("no conversation records found — is this a Claude Code session log?");
     }
 
     // A subagent's own transcript (`<session>/subagents/agent-<id>.jsonl`)
