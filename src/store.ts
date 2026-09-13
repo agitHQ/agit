@@ -242,6 +242,8 @@ export interface ShareState {
   viewUrl: string;
   relay: string;
   nativePath: string;
+  /** For a database holding several sessions: the native id being followed. */
+  select?: string;
   createdAt: string;
   /** Present when the share was started with --steer; same trust domain as the writer token. */
   steerKey?: string;
