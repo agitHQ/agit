@@ -195,7 +195,14 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   reattaches to the same link and pushes only the missing tail. Links
   expire (24h default) and sharing is opt-in per session, always. A stored
   session whose chain does not verify is refused — `share`, `export`, `fork`
-  and `pr` all name the failing event rather than publishing it.
+  and `pr` all name the failing event rather than publishing it. A session
+  that lives in a database is shared the same way — `agit share
+  ~/.hermes/state.db --thread <id>` (the id is optional when the file holds
+  one session) — read as SQLite reads it, WAL sidecar folded in, so a
+  running Hermes or LangGraph session streams as its rows land; totals a
+  runtime records only for the whole session are held back until it ends.
+  A runtime that rewrites earlier rows in place (a compression, a rewind)
+  stops the share as the rewrite of streamed history it is.
 - **`agit share <native.jsonl> --steer`** — let teammates redirect the agent,
   not just watch it. The share prints a **steer key** alongside the link; a
   viewer who enters it (on the page, or from a terminal with
