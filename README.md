@@ -45,8 +45,10 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **Claude Code** (`~/.claude/projects/<project>/<uuid>.jsonl`),
   **Codex CLI** (`~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`),
   **OpenClaw** (its JSONL transcripts, or the agent database that holds
-  them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
-  trajectories, **LangGraph** checkpoint databases
+  them: `agit import openclaw-agent.sqlite`), **Cline** — both the SDK
+  messages file new sessions land in and the 3.x task directories an
+  installed history still sits in (`agit import <globalStorage>/tasks/<id>`)
+  — **ATIF** trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
   (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
   logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
@@ -59,7 +61,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
   database beside them, `~/.gemini/tmp/*/chats`,
   `~/.kimi/sessions/*/*/wire.jsonl`,
-  `~/.local/share/opencode/opencode*.db`) and imports what is new;
+  `~/.local/share/opencode/opencode*.db`, `~/.cline/data/sessions` and
+  `~/.cline/data/tasks`, and VS Code's
+  `User/globalStorage/saoudrizwan.claude-dev/tasks`) and imports what is new;
   `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
@@ -328,15 +332,16 @@ fall out of that chain.
 
 Said plainly:
 
-- **Nine adapters, with different limits.** Claude Code is the reference;
+- **Ten adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. ATIF is a standard rather than a runtime, Cline's SDK
-  format is a published contract, LangGraph's and OpenCode's databases are
-  read from each runtime's own schema, Gemini CLI's recording is folded the
-  way its own loader folds it, and Kimi Code's wire log is folded the way
-  its own replay folds it; none of the six carries file content agit can
-  hash — see below.
+  format is a published contract and its 3.x task directory is read from
+  the source of the last release that wrote it, LangGraph's and OpenCode's
+  databases are read from each runtime's own schema, Gemini CLI's recording
+  is folded the way its own loader folds it, and Kimi Code's wire log is
+  folded the way its own replay folds it; none of the seven carries file
+  content agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
   agit can verify an update only while it already holds that file's content
@@ -410,8 +415,26 @@ Said plainly:
   Windows, which is a hash agit did not compute over bytes it holds, so none
   is emitted. Edit results carry only a diff the runtime truncates at 200
   lines. Every `editor` and `apply_patch` call is counted in the import report
-  as an edit agit cannot verify. The older VS Code globalStorage layout is
-  undocumented and unversioned and is deliberately not read.
+  as an edit agit cannot verify.
+- **A Cline 3.x task directory imports, and its `<final_file_content>` is
+  not the file.** `agit import <globalStorage>/tasks/<taskId>` (or the
+  `api_conversation_history.json` inside it) reads the layout every Cline
+  release up to 3.89 wrote — frozen now that 4.0 moved on — the way that
+  release's own source reads it: XML tool calls split by Cline's own parser
+  and paired with the framed results that follow them, native `tool_use`
+  calls by id, and, for tasks older than the transcript's own `ts` and
+  `metrics` stamps, dates and token counts taken from the `ui_messages.json`
+  beside it by the index Cline writes on every timeline entry (or by request
+  order where even that predates the file). Cline's own injected
+  `<environment_details>` is counted, not filed as the person's words. The
+  research on #63 expected this to be the layout where edits verify, since a
+  write's result carries the whole file in `<final_file_content>`; reading
+  `DiffViewProvider.saveChanges` shows it carries a normalized copy — line
+  endings rewritten to the model's, trailing whitespace trimmed, one newline
+  appended — so a hash over it is not a hash over the bytes on disk, and none
+  is emitted. Roo Code's fork of this layout is not claimed. Derived from the
+  source and checked against fixtures built to it, one per tool-call shape;
+  a real task that disagrees names its unmapped blocks in the import report.
 - **A Gemini CLI import is the recording as Gemini CLI itself would load
   it.** `agit import session-*.jsonl` reads what `ChatRecordingService`
   writes: a metadata line, then messages appended again each time their

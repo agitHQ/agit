@@ -38,6 +38,20 @@
  *                 docs/en/configuration/data-locations.md and
  *                 src/kimi_cli/session.py. context.jsonl beside it is the
  *                 model context, without timestamps, and is not a log.
+ *  - Cline        the SDK sessions at $CLINE_DIR (default ~/.cline)/data/
+ *                 sessions/<id>/<id>.messages.json (sdk/packages/core/docs/
+ *                 messages-contract-v1.md), and the 3.x task directories,
+ *                 <globalStorage>/tasks/<taskId>/api_conversation_history.json
+ *                 (apps/vscode/src/core/storage/disk.ts), where
+ *                 <globalStorage> is $CLINE_DIR/data for the 3.x CLI
+ *                 (standalone/vscode-context.ts) and, for the VS Code
+ *                 extension, the editor's User/globalStorage/
+ *                 saoudrizwan.claude-dev under its user-data directory:
+ *                 %APPDATA%/Code on Windows, ~/Library/Application Support/
+ *                 Code on macOS, $XDG_CONFIG_HOME (default ~/.config)/Code on
+ *                 Linux, per VS Code's own settings docs; Insiders is
+ *                 "Code - Insiders" beside it. Other editors that host the
+ *                 extension are imported by path.
  *
  * Discovery is a directory listing, nothing more: no daemon, no hooks, no
  * state of its own. Retroactive import stays the default — a log written
@@ -188,6 +202,47 @@ function scanKimiCode(sessionsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** Cline SDK sessions: data/sessions/<id>/<id>.messages.json. */
+function scanClineSdk(sessionsRoot: string, out: DiscoveredLog[]): void {
+  for (const id of listDir(sessionsRoot)) {
+    const dir = join(sessionsRoot, id);
+    if (!isDir(dir)) continue;
+    for (const name of listDir(dir)) {
+      if (name.endsWith(".messages.json") && isFile(join(dir, name)))
+        record("cline-sdk", join(dir, name), out);
+    }
+  }
+}
+
+/** Cline 3.x task directories: tasks/<taskId>/api_conversation_history.json. */
+function scanClineClassic(tasksRoot: string, out: DiscoveredLog[]): void {
+  for (const taskId of listDir(tasksRoot)) {
+    const transcript = join(tasksRoot, taskId, "api_conversation_history.json");
+    if (isFile(transcript)) record("cline-classic", transcript, out);
+  }
+}
+
+/** The dir Cline's own CLI would use: the env override, else ~/.cline. */
+function clineDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.CLINE_DIR?.trim();
+  return override ? resolve(override) : join(home, ".cline");
+}
+
+/**
+ * VS Code's user-data directory per platform (settings docs, "User settings
+ * file locations"), for the editors named; `%APPDATA%` and `$XDG_CONFIG_HOME`
+ * are honoured the way VS Code honours them.
+ */
+function vscodeUserDataDirs(home: string, env: NodeJS.ProcessEnv, platform: string): string[] {
+  const base =
+    platform === "win32"
+      ? env.APPDATA?.trim() || join(home, "AppData", "Roaming")
+      : platform === "darwin"
+        ? join(home, "Library", "Application Support")
+        : env.XDG_CONFIG_HOME?.trim() || join(home, ".config");
+  return ["Code", "Code - Insiders"].map((editor) => join(base, editor));
+}
+
 /** The share dir Kimi Code itself would use: the env override, else ~/.kimi. */
 function kimiShareDir(home: string, env: NodeJS.ProcessEnv): string {
   const override = env.KIMI_SHARE_DIR?.trim();
@@ -211,7 +266,12 @@ export interface Discovery {
   roots: ScanRoot[];
 }
 
-export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = process.env): Discovery {
+export function discoverSessionLogs(
+  home: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+): Discovery {
+  const cline = clineDir(home, env);
   const targets: { runtime: string; dir: string; scan: (dir: string, out: DiscoveredLog[]) => void }[] = [
     { runtime: "claude-code", dir: join(home, ".claude", "projects"), scan: scanClaudeCode },
     { runtime: "codex", dir: join(home, ".codex", "sessions"), scan: (d, o) => scanCodex(d, o) },
@@ -219,6 +279,13 @@ export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = proce
     { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
     { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
     { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
+    { runtime: "cline-sdk", dir: join(cline, "data", "sessions"), scan: scanClineSdk },
+    { runtime: "cline-classic", dir: join(cline, "data", "tasks"), scan: scanClineClassic },
+    ...vscodeUserDataDirs(home, env, platform).map((userData) => ({
+      runtime: "cline-classic",
+      dir: join(userData, "User", "globalStorage", "saoudrizwan.claude-dev", "tasks"),
+      scan: scanClineClassic,
+    })),
   ];
   const logs: DiscoveredLog[] = [];
   const roots: ScanRoot[] = [];
