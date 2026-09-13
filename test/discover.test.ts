@@ -49,6 +49,7 @@ describe("discoverSessionLogs", () => {
       ["openclaw", true, 1],
       ["gemini-cli", false, 0],
       ["opencode", false, 0],
+      ["kimi-code", false, 0],
     ]);
   });
 
@@ -87,6 +88,7 @@ describe("discoverSessionLogs", () => {
       "openclaw",
       "gemini-cli",
       "opencode",
+      "kimi-code",
     ]);
   });
 

@@ -7,6 +7,20 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **Kimi Code adapter.** `agit import wire.jsonl` reads the wire log Kimi
+  Code CLI keeps under `~/.kimi/sessions/<work dir>/<session>/` — the
+  timestamped event stream its own replay rebuilds a session from — and
+  folds it the same way: streamed text and thinking pieces into one
+  assistant message per step, a tool call's argument parts into the call,
+  results by call id, the step's `token_usage` into its `cost`, and a
+  `/clear` turn dropping everything before it. The session id is the
+  directory name, per Kimi's docs; `import --all` scans the sessions tree
+  (`KIMI_SHARE_DIR` honoured). Interrupted and retried steps, notifications
+  and every other wire message are counted by name; a diff display block
+  is an excerpt, not the file, so there is no `file.diff`. Started by
+  @thegoodengineer (#119); the adapter was rebuilt on the runtime's source
+  before merging, since the original read a chat-turn shape Kimi does not
+  write.
 - **Gemini CLI adapter.** `agit import session-*.jsonl` reads the
   recordings `ChatRecordingService` writes under
   `~/.gemini/tmp/<project>/chats/` — a metadata line, messages re-appended

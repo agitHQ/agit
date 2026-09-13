@@ -1,0 +1,32 @@
+{"type": "metadata", "protocol_version": "1.10"}
+{"timestamp": 1775030400.0, "message": {"type": "TurnBegin", "payload": {"user_input": "What does the Makefile build?"}}}
+{"timestamp": 1775030400.1, "message": {"type": "StepBegin", "payload": {"n": 1}}}
+{"timestamp": 1775030400.5, "message": {"type": "ThinkPart", "payload": {"type": "think", "think": "I should read the ", "encrypted": null}}}
+{"timestamp": 1775030400.6, "message": {"type": "ThinkPart", "payload": {"type": "think", "think": "Makefile first.", "encrypted": null}}}
+{"timestamp": 1775030400.8, "message": {"type": "TextPart", "payload": {"type": "text", "text": "Let me look at "}}}
+{"timestamp": 1775030400.9, "message": {"type": "TextPart", "payload": {"type": "text", "text": "the Makefile."}}}
+{"timestamp": 1775030401.0, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "call_read_1", "function": {"name": "ReadFile", "arguments": "{\"path\": \"Make"}, "extras": null}}}
+{"timestamp": 1775030401.05, "message": {"type": "ToolCallPart", "payload": {"arguments_part": "file\"}"}}}
+{"timestamp": 1775030401.2, "message": {"type": "StatusUpdate", "payload": {"context_usage": 0.02, "context_tokens": 1800, "max_context_tokens": 128000, "token_usage": {"input_other": 1500, "output": 42, "input_cache_read": 300, "input_cache_creation": 0}, "message_id": "cmpl_a1", "plan_mode": null, "mcp_status": null}}}
+{"timestamp": 1775030401.5, "message": {"type": "ToolResult", "payload": {"tool_call_id": "call_read_1", "return_value": {"is_error": false, "output": "all: build\nbuild:\n\tgo build ./...\n", "message": "", "display": [{"type": "brief", "text": "3 lines"}], "extras": null}}}}
+{"timestamp": 1775030401.6, "message": {"type": "StepBegin", "payload": {"n": 2}}}
+{"timestamp": 1775030402.0, "message": {"type": "TextPart", "payload": {"type": "text", "text": "It builds every Go package with `go build ./...`."}}}
+{"timestamp": 1775030402.2, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1600, "output": 18, "input_cache_read": 1500, "input_cache_creation": 0}, "message_id": "cmpl_a2"}}}
+{"timestamp": 1775030402.3, "message": {"type": "TurnEnd", "payload": {}}}
+{"timestamp": 1775030410.0, "message": {"type": "TurnBegin", "payload": {"user_input": [{"type": "text", "text": "Add a test target."}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}}}
+{"timestamp": 1775030410.1, "message": {"type": "StepBegin", "payload": {"n": 3}}}
+{"timestamp": 1775030410.5, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "call_edit_1", "function": {"name": "StrReplaceFile", "arguments": "{\"path\": \"Makefile\", \"old_str\": \"all: build\", \"new_str\": \"all: build test\\ntest:\\n\\tgo test ./...\"}"}, "extras": null}}}
+{"timestamp": 1775030410.6, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1700, "output": 60, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "cmpl_b1"}}}
+{"timestamp": 1775030410.9, "message": {"type": "ToolResult", "payload": {"tool_call_id": "call_edit_1", "return_value": {"is_error": false, "output": "Edited Makefile", "message": "", "display": [{"type": "diff", "path": "Makefile", "old_text": "all: build", "new_text": "all: build test\ntest:\n\tgo test ./...", "old_start": 1, "new_start": 1, "is_summary": false}], "extras": null}}}}
+{"timestamp": 1775030411.0, "message": {"type": "SteerInput", "payload": {"user_input": "and run it"}}}
+{"timestamp": 1775030411.1, "message": {"type": "StepBegin", "payload": {"n": 4}}}
+{"timestamp": 1775030411.3, "message": {"type": "StepRetry", "payload": {"n": 4, "next_attempt": 2, "max_attempts": 3, "wait_s": 1.0, "error_type": "APIConnectionError", "status_code": null}}}
+{"timestamp": 1775030412.4, "message": {"type": "StepBegin", "payload": {"n": 4}}}
+{"timestamp": 1775030412.8, "message": {"type": "ToolCall", "payload": {"type": "function", "id": "call_sh_1", "function": {"name": "Shell", "arguments": "{\"command\": \"make test\"}"}, "extras": null}}}
+{"timestamp": 1775030412.9, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1800, "output": 15, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "cmpl_b2"}}}
+{"timestamp": 1775030414.0, "message": {"type": "ToolResult", "payload": {"tool_call_id": "call_sh_1", "return_value": {"is_error": true, "output": "go: no test files", "message": "exit status 1", "display": [], "extras": null}}}}
+{"timestamp": 1775030414.1, "message": {"type": "Notification", "payload": {"level": "warning", "message": "make test failed"}}}
+{"timestamp": 1775030414.2, "message": {"type": "StepBegin", "payload": {"n": 5}}}
+{"timestamp": 1775030414.6, "message": {"type": "TextPart", "payload": {"type": "text", "text": "There are no tests yet; the target is in place."}}}
+{"timestamp": 1775030414.7, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 1900, "output": 12, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "cmpl_b3"}}}
+{"timestamp": 1775030414.8, "message": {"type": "TurnEnd", "payload": {}}}

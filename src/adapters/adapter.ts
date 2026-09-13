@@ -34,6 +34,13 @@ export interface ConvertOptions {
    * candidates — when there is more than one.
    */
   select?: string;
+  /**
+   * Where the log was read from. Most adapters never look: the log names
+   * its own session. Kimi Code's wire.jsonl does not — its session id is
+   * the directory it sits in — so an adapter may read the id off the path
+   * when one is given, and derive one from the content when it is not.
+   */
+  path?: string;
 }
 
 export interface Adapter {

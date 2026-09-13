@@ -11,6 +11,7 @@ import { claudeCodeAdapter } from "./adapters/claude-code.js";
 import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
 import { geminiCliAdapter } from "./adapters/gemini-cli.js";
+import { kimiCodeAdapter } from "./adapters/kimi-code.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
 import { opencodeAdapter } from "./adapters/opencode.js";
@@ -115,6 +116,7 @@ const ADAPTERS: Adapter[] = [
   langgraphAdapter,
   geminiCliAdapter,
   opencodeAdapter,
+  kimiCodeAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
@@ -712,7 +714,7 @@ function importNativeLog(
     return { status: "unchanged", id: hit.id };
   }
 
-  const convertOpts = { ...(base ? { base } : {}), ...(select !== undefined ? { select } : {}) };
+  const convertOpts = { path, ...(base ? { base } : {}), ...(select !== undefined ? { select } : {}) };
   let adapter: Adapter | undefined;
   let converted;
   if (input.kind === "bytes") {
