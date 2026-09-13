@@ -3,6 +3,15 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Fixed
+
+- **A WAL sidecar for a database with another page size is refused.**
+  `applyWal` trusted the sidecar's own page size; a mismatched pair would
+  have landed its frames at the wrong offsets. The two must agree (main
+  header bytes 16–17) before any frame is read.
+
 ## 0.15.0 — 2026-09-13
 
 ### Added
