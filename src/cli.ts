@@ -13,6 +13,7 @@ import { codexAdapter } from "./adapters/codex.js";
 import { geminiCliAdapter } from "./adapters/gemini-cli.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
+import { opencodeAdapter } from "./adapters/opencode.js";
 import type { Adapter } from "./adapters/adapter.js";
 import { buildChain, sha256Hex, toJsonl } from "./format/hash.js";
 import { verifyChain } from "./format/verify.js";
@@ -113,6 +114,7 @@ const ADAPTERS: Adapter[] = [
   clineSdkAdapter,
   langgraphAdapter,
   geminiCliAdapter,
+  opencodeAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
@@ -128,8 +130,9 @@ usage:
                                        have written and import what is new
   agit import <db.sqlite> [--thread ID]
                                        import every session in a LangGraph
-                                       checkpoint database or an OpenClaw
-                                       agent database; --thread picks one
+                                       checkpoint database, an OpenClaw agent
+                                       database or OpenCode's opencode.db;
+                                       --thread picks one
   agit import --latest                 import the most recently written session
   agit ls [--tag T] [--runtime R]      list imported sessions; --sort orders by
          [--project P] [--sort KEY]    started (default), events, files or id

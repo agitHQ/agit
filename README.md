@@ -47,14 +47,17 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **OpenClaw** (its JSONL transcripts, or the agent database that holds
   them: `agit import openclaw-agent.sqlite`), **Cline SDK**, **ATIF**
   trajectories, **LangGraph** checkpoint databases
-  (`agit import checkpoints.sqlite`), and **Gemini CLI** recordings
-  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`) — the same event log,
+  (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
+  (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), and **OpenCode**'s
+  session database (`agit import ~/.local/share/opencode/opencode.db`) —
+  the same event log,
   the same verbs, whichever agent produced the session. A database holds sessions rather
   than a session: every one in it is imported, one line each, and
   `--thread <id>` names just one. `agit import --all` finds every session
   those runtimes have written on this machine (`~/.claude/projects`,
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
-  database beside them, `~/.gemini/tmp/*/chats`) and imports what is new;
+  database beside them, `~/.gemini/tmp/*/chats`,
+  `~/.local/share/opencode/opencode*.db`) and imports what is new;
   `--latest`
   takes just the most recent one; `--since 7d` bounds the scan. A directory
   listing plus the ordinary import — no daemon, no hooks — and last month's
@@ -317,13 +320,13 @@ fall out of that chain.
 
 Said plainly:
 
-- **Seven adapters, with different limits.** Claude Code is the reference;
+- **Eight adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. ATIF is a standard rather than a runtime, Cline's SDK
-  format is a published contract, LangGraph's checkpoint database is read
-  from the runtime's own serialization, and Gemini CLI's recording is folded
-  the way its own loader folds it; none of the four carries file content
+  format is a published contract, LangGraph's and OpenCode's databases are
+  read from each runtime's own schema, and Gemini CLI's recording is folded
+  the way its own loader folds it; none of the five carries file content
   agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
@@ -414,6 +417,19 @@ Said plainly:
   legacy single-document `.json` form is read too. Derived from the source
   and checked against a fixture built to it; a real recording that
   disagrees names its unmapped records in the import report.
+- **An OpenCode import has no file history either.** `agit import
+  opencode.db` reads the `session`, `message` and `part` tables OpenCode
+  writes (its drizzle schema and generated DDL, its v1 session schema for
+  the JSON in `data`), in the order its own `MessageV2.page` reads them.
+  Messages, reasoning, tool calls with their results, and one `cost` per
+  model step (from `step-finish` parts, or from the message when there are
+  none) all come through. OpenCode's file changes live in git snapshots of
+  the worktree, not in the database, so a `patch` part names files and
+  carries no content: nothing is hashed, nothing is invented, and
+  `blame`/`fork`/`merge`/`diff` have nothing to work with. Every part type
+  agit has no event for is counted by name. Derived from the schema and
+  checked against a fixture built to it; a real `opencode.db` that disagrees
+  names its unmapped parts in the import report.
 - **A LangGraph import is the thread's current history, and no more.**
   `agit import <checkpoints.sqlite>` reads what `langgraph-checkpoint-sqlite`
   wrote — the SQLite file itself, with a zero-dependency reader for the file

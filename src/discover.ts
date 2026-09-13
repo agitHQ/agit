@@ -15,6 +15,11 @@
  *                 session's transcript rows and is where newer OpenClaw
  *                 versions keep them; the incognito database beside it is
  *                 process-held and deliberately not read.
+ *  - OpenCode     $XDG_DATA_HOME (default ~/.local/share)/opencode/opencode.db,
+ *                 plus opencode-<channel>.db for a non-release channel —
+ *                 packages/core/src/global.ts (xdg-basedir) and
+ *                 packages/core/src/database/database.ts `path()`. Every
+ *                 session lives in that one file.
  *                 Skipped on purpose, per src/config/sessions/artifacts.ts:
  *                 compaction checkpoints (`<id>.checkpoint.<uuid>.jsonl`, which
  *                 carry the same session id and would overwrite the real one),
@@ -137,6 +142,21 @@ function scanGeminiCli(tmpRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** OpenCode: every opencode*.db in its XDG data directory. */
+function scanOpenCode(dataDir: string, out: DiscoveredLog[]): void {
+  for (const name of listDir(dataDir)) {
+    if (!/^opencode(-[A-Za-z0-9._-]+)?\.db$/.test(name)) continue;
+    const p = join(dataDir, name);
+    if (isFile(p)) record("opencode", p, out);
+  }
+}
+
+/** xdg-basedir's rule, which OpenCode uses: $XDG_DATA_HOME when set and non-empty, else ~/.local/share. */
+function xdgDataDir(home: string, env: NodeJS.ProcessEnv): string {
+  const override = env.XDG_DATA_HOME?.trim();
+  return override ? resolve(override) : join(home, ".local", "share");
+}
+
 /** The state dir OpenClaw itself would use: the env override, else ~/.openclaw. */
 function openClawStateDir(home: string, env: NodeJS.ProcessEnv): string {
   const override = env.OPENCLAW_STATE_DIR?.trim();
@@ -160,6 +180,7 @@ export function discoverSessionLogs(home: string, env: NodeJS.ProcessEnv = proce
     { runtime: "codex", dir: join(home, ".codex", "sessions"), scan: (d, o) => scanCodex(d, o) },
     { runtime: "openclaw", dir: join(openClawStateDir(home, env), "agents"), scan: scanOpenClaw },
     { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
+    { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
   ];
   const logs: DiscoveredLog[] = [];
   const roots: ScanRoot[] = [];
