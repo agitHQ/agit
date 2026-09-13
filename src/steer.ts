@@ -68,13 +68,13 @@ export interface SteerMessage {
 }
 
 /** Runtimes with a documented turn-boundary hook. Adapter names, not display names. */
-export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "gemini-cli"]);
+export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "gemini-cli", "pi"]);
 
 /** What to tell the sharer about the hooks their runtime fires. */
 export function steerHookDescription(runtime: string): string {
-  return runtime === "gemini-cli"
-    ? "Gemini CLI AfterAgent / BeforeAgent hooks"
-    : "Claude Code Stop / UserPromptSubmit hooks";
+  if (runtime === "gemini-cli") return "Gemini CLI AfterAgent / BeforeAgent hooks";
+  if (runtime === "pi") return "pi's agent_end / before_agent_start extension events";
+  return "Claude Code Stop / UserPromptSubmit hooks";
 }
 
 /** Claude Code caps hook output strings at 10,000 characters; leave headroom for the framing. */
@@ -226,9 +226,17 @@ export function formatSteerContext(d: Drained): string {
   return `${head}\n\n${body}${tail}`;
 }
 
-export type SteerHookEvent = "Stop" | "UserPromptSubmit" | "AfterAgent" | "BeforeAgent";
+export type SteerHookEvent =
+  "Stop" | "UserPromptSubmit" | "AfterAgent" | "BeforeAgent" | "AgentEnd" | "BeforeAgentStart";
 
-const STEER_EVENTS: ReadonlySet<string> = new Set(["Stop", "UserPromptSubmit", "AfterAgent", "BeforeAgent"]);
+const STEER_EVENTS: ReadonlySet<string> = new Set([
+  "Stop",
+  "UserPromptSubmit",
+  "AfterAgent",
+  "BeforeAgent",
+  "AgentEnd",
+  "BeforeAgentStart",
+]);
 
 /**
  * The documented output shape for the event that fired. Claude Code's two
@@ -238,6 +246,10 @@ const STEER_EVENTS: ReadonlySet<string> = new Set(["Stop", "UserPromptSubmit", "
  */
 export function steerHookOutput(event: SteerHookEvent, context: string): string {
   if (event === "AfterAgent") return JSON.stringify({ decision: "block", reason: context });
+  // pi: the custom message its extension hands to pi.sendMessage / returns from before_agent_start.
+  if (event === "AgentEnd" || event === "BeforeAgentStart") {
+    return JSON.stringify({ message: { customType: "agit-steer", content: context, display: true } });
+  }
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
 }
 
@@ -288,6 +300,7 @@ export function runSteerHook(base: string, input: string): HookRun {
  * `name` for its logs.
  */
 export function steerHookConfig(runtime = "claude-code"): string {
+  if (runtime === "pi") return PI_EXTENSION_LINES.join("\n") + "\n";
   if (runtime === "gemini-cli") {
     const handler = {
       hooks: [{ type: "command", command: "agit hook", name: "agit-steer", timeout: 10_000 }],
@@ -297,6 +310,57 @@ export function steerHookConfig(runtime = "claude-code"): string {
   const handler = { hooks: [{ type: "command", command: "agit hook", timeout: 10 }] };
   return JSON.stringify({ hooks: { Stop: [handler], UserPromptSubmit: [handler] } }, null, 2);
 }
+
+/**
+ * The pi extension `agit hook --config pi` prints, as one TypeScript source
+ * (pi loads `~/.pi/agent/extensions/*.ts` through jiti, uncompiled). It runs
+ * `agit hook` — agit on PATH, in the session's cwd — at the two documented
+ * boundaries and hands what comes back to pi through pi's own API:
+ *   - `before_agent_start` returns `{ message }`, which pi stores in the
+ *     session and sends to the model ("can inject a message");
+ *   - `agent_end` calls `pi.sendMessage(message, { deliverAs: "followUp",
+ *     triggerTurn: true })`: delivered once the agent has no more tool calls,
+ *     and a fresh turn if it was idle.
+ * Lines are joined here so the file carries no template literal of its own.
+ */
+const PI_EXTENSION_LINES: readonly string[] = [
+  "// agit-steer: hands messages queued by `agit share --steer` to pi at its turn boundaries.",
+  "// Printed by `agit hook --config pi`; lives at ~/.pi/agent/extensions/agit-steer.ts.",
+  "// Runs `agit hook` (agit must be on PATH), which prints nothing unless a live share queued a message.",
+  'import { execFileSync } from "node:child_process";',
+  'import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";',
+  "",
+  "type SteerMessage = { customType: string; content: string; display: boolean };",
+  "",
+  "function drain(event: string, sessionId: string, cwd: string): SteerMessage | null {",
+  "  try {",
+  '    const out = execFileSync("agit", ["hook"], {',
+  "      cwd,",
+  '      encoding: "utf8",',
+  "      input: JSON.stringify({ hook_event_name: event, session_id: sessionId }),",
+  "      timeout: 10_000,",
+  "      windowsHide: true,",
+  '      shell: process.platform === "win32",',
+  "    });",
+  '    if (out.trim() === "") return null;',
+  "    const parsed = JSON.parse(out) as { message?: SteerMessage };",
+  '    return parsed !== null && typeof parsed === "object" && parsed.message ? parsed.message : null;',
+  "  } catch {",
+  "    return null;",
+  "  }",
+  "}",
+  "",
+  "export default function (pi: ExtensionAPI) {",
+  '  pi.on("before_agent_start", async (_event, ctx) => {',
+  '    const message = drain("BeforeAgentStart", ctx.sessionManager.getSessionId(), ctx.cwd);',
+  "    return message ? { message } : undefined;",
+  "  });",
+  '  pi.on("agent_end", async (_event, ctx) => {',
+  '    const message = drain("AgentEnd", ctx.sessionManager.getSessionId(), ctx.cwd);',
+  '    if (message) pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });',
+  "  });",
+  "}",
+];
 
 /**
  * Buffers queued messages until the runtime session id is known. A live

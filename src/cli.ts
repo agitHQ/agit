@@ -201,15 +201,15 @@ usage:
   agit share <native.jsonl> --steer    also let viewers who hold the steer key
                                        queue messages for the agent; delivered
                                        at its next turn boundary (Claude Code,
-                                       Gemini CLI)
+                                       Gemini CLI, pi)
   agit steer <link> "<text>" --steer-key K
                                        send a steering message from a terminal
                                        instead of the share page (--name N)
-  agit hook                            the hook Claude Code (Stop, UserPromptSubmit)
-                                       or Gemini CLI (AfterAgent, BeforeAgent)
-                                       runs: hands queued steering messages to
-                                       the agent; --config [runtime] prints the
-                                       settings.json fragment
+  agit hook                            the hook Claude Code (Stop, UserPromptSubmit),
+                                       Gemini CLI (AfterAgent, BeforeAgent) or a
+                                       pi extension runs: hands queued steering
+                                       messages to the agent; --config [runtime]
+                                       prints the settings fragment or extension
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
   agit relay --store <dir>             persist shares, so a restart keeps them
@@ -3224,7 +3224,14 @@ async function cmdHook(opts: Opts): Promise<number> {
       return 2;
     }
     console.log(steerHookConfig(runtime));
-    if (runtime === "gemini-cli") {
+    if (runtime === "pi") {
+      console.error(
+        "\n(save that as ~/.pi/agent/extensions/agit-steer.ts — pi loads it uncompiled — and pi runs `agit hook`",
+      );
+      console.error(
+        " at every agent_end and before_agent_start; it prints nothing unless a live share has queued a message)",
+      );
+    } else if (runtime === "gemini-cli") {
       console.error(
         "\n(put that in .gemini/settings.json — project or ~/.gemini — and Gemini CLI runs `agit hook`",
       );
@@ -3403,7 +3410,7 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!STEERABLE_RUNTIMES.has(adapter.name)) {
       console.error(
         `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
-          " Only Claude Code (Stop / UserPromptSubmit) and Gemini CLI (AfterAgent / BeforeAgent) are wired;" +
+          " Only Claude Code (Stop / UserPromptSubmit), Gemini CLI (AfterAgent / BeforeAgent) and pi (an extension) are wired;" +
           " share without --steer to keep messages terminal-only.",
       );
       return 2;
