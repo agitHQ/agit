@@ -281,8 +281,22 @@ function firstArg(input: Json | undefined): string {
   return `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`;
 }
 
+/**
+ * Text from a log, or from a viewer, is displayed in a terminal — where an
+ * escape sequence is a command. A `message.user` holding ESC `[2J` would
+ * clear the screen from `replay --timeline`; one holding a cursor move could
+ * redraw what a reviewer thought they had read. Every control character
+ * other than tab and newline (C0, DEL, C1) is replaced with U+FFFD, the
+ * same way the share page renders through textContent: the log is
+ * displayed, never executed, on this side of the screen too.
+ */
+export function printable(s: string): string {
+  // eslint-disable-next-line no-control-regex -- deliberately strips terminal controls from untrusted text
+  return s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "�");
+}
+
 export function excerpt(s: string, max: number): string {
-  const one = s.replace(/\s+/g, " ").trim();
+  const one = printable(s).replace(/\s+/g, " ").trim();
   return one.length <= max ? one : one.slice(0, max - 1) + "…";
 }
 
@@ -296,6 +310,7 @@ export function excerpt(s: string, max: number): string {
  * rendered line by line.
  */
 export function clipLine(s: string, max: number): string {
-  const line = s.endsWith("\r") ? s.slice(0, -1) : s; // CRLF logs render on one line
+  const raw = s.endsWith("\r") ? s.slice(0, -1) : s; // CRLF logs render on one line
+  const line = printable(raw);
   return line.length <= max ? line : line.slice(0, max - 1) + "…";
 }

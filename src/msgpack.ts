@@ -8,7 +8,16 @@
  * that knows the writer decodes `data` itself. Integers outside the double's
  * safe range come back as bigint. Map keys are stringified: the format
  * allows any key type, JSON allows one.
+ *
+ * The bytes are untrusted. Every fixed-width read is checked against what
+ * remains, a container cannot claim more elements than there are bytes
+ * left to hold them, and nesting deeper than MAX_DEPTH is refused rather
+ * than recursed into; the answer to a hostile or truncated buffer is a
+ * MsgpackError, never a RangeError or a blown stack.
  */
+
+/** Deeper than any checkpoint nests; far shallower than the stack. */
+export const MAX_DEPTH = 256;
 
 export type MsgpackExt = { $ext: number; data: Uint8Array };
 export type MsgpackValue =
@@ -34,6 +43,7 @@ export function decodeMsgpack(bytes: Uint8Array): MsgpackValue {
 
 class Decoder {
   at = 0;
+  private depth = 0;
   private readonly view: DataView;
   private readonly text = new TextDecoder("utf-8", { fatal: false });
 
@@ -68,11 +78,13 @@ class Decoder {
       case 0xc9:
         return this.ext(this.u32());
       case 0xca: {
+        this.need(4);
         const v = this.view.getFloat32(this.at);
         this.at += 4;
         return v;
       }
       case 0xcb: {
+        this.need(8);
         const v = this.view.getFloat64(this.at);
         this.at += 8;
         return v;
@@ -84,26 +96,31 @@ class Decoder {
       case 0xce:
         return this.u32();
       case 0xcf: {
+        this.need(8);
         const v = this.view.getBigUint64(this.at);
         this.at += 8;
         return safe(v);
       }
       case 0xd0: {
+        this.need(1);
         const v = this.view.getInt8(this.at);
         this.at += 1;
         return v;
       }
       case 0xd1: {
+        this.need(2);
         const v = this.view.getInt16(this.at);
         this.at += 2;
         return v;
       }
       case 0xd2: {
+        this.need(4);
         const v = this.view.getInt32(this.at);
         this.at += 4;
         return v;
       }
       case 0xd3: {
+        this.need(8);
         const v = this.view.getBigInt64(this.at);
         this.at += 8;
         return safe(v);
@@ -178,24 +195,39 @@ class Decoder {
   }
 
   private ext(n: number): MsgpackExt {
+    this.need(1);
     const type = this.view.getInt8(this.at);
     this.at += 1;
     return { $ext: type, data: this.take(n) };
   }
 
+  /** Every element takes at least one byte, so a count past what remains is a lie. */
+  private enter(n: number, perElement: number): void {
+    if (n * perElement > this.bytes.length - this.at) {
+      throw new MsgpackError(
+        `a container of ${n} elements cannot fit in the ${this.bytes.length - this.at} bytes left`,
+      );
+    }
+    if (++this.depth > MAX_DEPTH) throw new MsgpackError(`nesting deeper than ${MAX_DEPTH}`);
+  }
+
   private array(n: number): MsgpackValue[] {
+    this.enter(n, 1);
     const out: MsgpackValue[] = [];
     for (let i = 0; i < n; i++) out.push(this.read());
+    this.depth--;
     return out;
   }
 
   private map(n: number): { [key: string]: MsgpackValue } {
+    this.enter(n, 2);
     const out: { [key: string]: MsgpackValue } = {};
     for (let i = 0; i < n; i++) {
       const k = this.read();
       const key = typeof k === "string" ? k : keyOf(k);
       out[key] = this.read();
     }
+    this.depth--;
     return out;
   }
 }
