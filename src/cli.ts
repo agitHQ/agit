@@ -93,7 +93,7 @@ import {
   writeSession,
   writeShareState,
 } from "./store.js";
-import { clipLine, fileStateAt, timelineLines, usageByModel, usageTotals } from "./state.js";
+import { clipLine, fileStateAt, printable, timelineLines, usageByModel, usageTotals } from "./state.js";
 import {
   computeStats,
   GROUP_BY,
@@ -3466,7 +3466,10 @@ function openShareInbox(
   steerKey: string | null = null,
 ): AbortController {
   let lastViewers = -1;
-  const onMessage = (m: InboxMessage): void => {
+  const onMessage = (raw: InboxMessage): void => {
+    // A viewer's text lands in this terminal, where an escape sequence is a
+    // command; shown, never executed (state.ts printable).
+    const m = { ...raw, name: printable(raw.name), text: printable(raw.text) };
     const when = m.ts.slice(11, 19);
     if (m.steer !== true) {
       console.log(`◀ ${when} [${m.name}] ${m.text}`);

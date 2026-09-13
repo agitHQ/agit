@@ -3,6 +3,29 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Fixed
+
+- **The SQLite and msgpack readers answer hostile bytes with their own
+  errors.** A database or checkpoint blob is untrusted input; before this,
+  a truncated or corrupted one could surface as a bare RangeError from a
+  DataView, an attempt to allocate the size a varint asked for, or a blown
+  stack from deep nesting. Every offset is now checked before it is read, a
+  payload cannot claim more bytes than the file holds, a cell pointer must
+  stay inside its page, a msgpack container cannot claim more elements than
+  the bytes left could hold, and nesting stops at 256. Seeded mutation tests
+  over the real fixtures (byte flips, truncation, header rewrites) pin it:
+  the readers and both database adapters either return or throw an error
+  that names the problem.
+- **Log text and viewer messages reach the terminal displayed, not
+  executed.** A `message.user` holding an escape sequence could clear the
+  screen from `replay --timeline`, and a viewer's message could do the same
+  to the sharing terminal. Control characters other than tab and newline
+  are replaced with U+FFFD on every path that prints untrusted text — the
+  terminal-side counterpart of the share page rendering through
+  `textContent`.
+
 ## 0.9.0 — 2026-09-13
 
 ### Added
