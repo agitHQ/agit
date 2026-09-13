@@ -232,6 +232,36 @@ describe("the hook", () => {
     expect(before.hookSpecificOutput.additionalContext).toContain("bob: and the docs");
   });
 
+  it("hands queued messages to pi as the custom message its extension injects, at both boundaries", () => {
+    // pi's documented channel is an extension: before_agent_start may return
+    // `{ message }`, and agent_end may pi.sendMessage() one (docs/extensions.md).
+    // The hook answers both with that message, ready to pass straight through.
+    const dir = mktemp();
+    queueSteer(dir, SID, { ts: "2026-09-12T10:00:01.000Z", name: "alice", text: "skip the tests" });
+    const end = JSON.parse(runSteerHook(dir, hookInput("AgentEnd")).stdout) as {
+      message: { customType: string; content: string; display: boolean };
+    };
+    expect(end.message).toMatchObject({ customType: "agit-steer", display: true });
+    expect(end.message.content).toContain("[10:00:01] alice: skip the tests");
+    expect(runSteerHook(dir, hookInput("AgentEnd")).stdout).toBe(""); // drained
+    queueSteer(dir, SID, { ts: "2026-09-12T10:00:02.000Z", name: "bob", text: "and lint" });
+    const start = JSON.parse(runSteerHook(dir, hookInput("BeforeAgentStart")).stdout) as {
+      message: { content: string };
+    };
+    expect(start.message.content).toContain("bob: and lint");
+    // The extension itself: one TypeScript source, pi's export shape, both events, agit on PATH.
+    const ext = steerHookConfig("pi");
+    expect(ext).toContain("export default function (pi: ExtensionAPI)");
+    expect(ext).toContain('pi.on("before_agent_start"');
+    expect(ext).toContain('pi.on("agent_end"');
+    expect(ext).toContain('execFileSync("agit", ["hook"]');
+    expect(ext).toContain('deliverAs: "followUp", triggerTurn: true');
+    const cli = agit(["hook", "--config", "pi"]);
+    expect(cli.code).toBe(0);
+    expect(cli.stdout.trimEnd()).toBe(ext.trimEnd());
+    expect(cli.stderr).toContain("~/.pi/agent/extensions/agit-steer.ts");
+  });
+
   it("prints a settings fragment per runtime: seconds for Claude Code, milliseconds and a name for Gemini CLI", () => {
     const claude = JSON.parse(steerHookConfig()) as {
       hooks: Record<string, { hooks: Record<string, unknown>[] }[]>;
@@ -467,6 +497,41 @@ describe("agit share --steer, end to end", () => {
     expect((await agitAsync(["steer", link, "two", "--steer-key", key])).code).toBe(0);
     await new Promise((r) => cli.on("close", r));
     expect(out).toContain("2 steering message(s) were queued but never reached the agent");
+  }, 60_000);
+
+  it("accepts --steer on a pi session, keyed by the session header's id", async () => {
+    const dir = mktemp();
+    const pi = join(
+      ROOT,
+      "fixtures",
+      "pi",
+      "2026-05-28T20-26-40-000Z_8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e.jsonl",
+    );
+    const native = join(dir, "session.jsonl");
+    writeFileSync(native, readFileSync(pi));
+    const { base } = await relay();
+    const cli = spawnShare([native, "--steer", "--relay", base, "--dir", dir], 6000);
+    let out = "";
+    let err = "";
+    cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
+    cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
+    for (let i = 0; i < 60 && !/steer key: /.test(out); i++) await sleep(100);
+    expect(out, out + err).toContain("pi's agent_end / before_agent_start extension events");
+    expect(out).toContain("agit hook --config pi");
+    const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
+    const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
+    await sleep(1500);
+    expect((await agitAsync(["steer", link, "read the README first", "--steer-key", key])).code).toBe(0);
+    await sleep(800);
+    const sid = "8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e";
+    expect(existsSync(steerInboxPath(dir, sid)), out + err).toBe(true);
+    const hook = await agitAsync(
+      ["hook", "--dir", dir],
+      JSON.stringify({ hook_event_name: "AgentEnd", session_id: sid }),
+    );
+    expect(JSON.parse(hook.stdout)).toMatchObject({ message: { customType: "agit-steer" } });
+    expect(hook.stdout).toContain("read the README first");
+    await new Promise((r) => cli.on("close", r));
   }, 60_000);
 
   it("accepts --steer on a Gemini CLI recording, keyed by the recording's own session id", async () => {

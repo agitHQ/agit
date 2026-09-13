@@ -221,15 +221,21 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   terminal first, attributed, and a message with a wrong key is shown too —
   labelled, and delivered to no one. The key never reaches other viewers;
   the relay forwards it to the sharer alone, who is the only party that can
-  check it. Two runtimes are wired, because two document a turn-boundary
-  hook: Claude Code (above, verified against the runtime) and **Gemini
-  CLI**, whose `AfterAgent` hook takes a blocking decision whose `reason`
-  is sent to the agent as the next prompt with the history kept, and whose
-  `BeforeAgent` hook takes `additionalContext` for the idle case —
-  `agit hook --config gemini-cli` prints that fragment (derived from Gemini
-  CLI's source; not yet exercised against a running Gemini CLI). `--steer`
-  on a Codex or OpenClaw session is refused with that reason rather than
-  promising a channel that does not exist.
+  check it. Three runtimes are wired, because three document a
+  turn-boundary channel: Claude Code (above, verified against the
+  runtime); **Gemini CLI**, whose `AfterAgent` hook takes a blocking
+  decision whose `reason` is sent to the agent as the next prompt with the
+  history kept, and whose `BeforeAgent` hook takes `additionalContext` for
+  the idle case — `agit hook --config gemini-cli` prints that fragment; and
+  **pi**, whose extension API lets a handler inject a message from
+  `before_agent_start` and queue one from `agent_end` with
+  `pi.sendMessage(…, { deliverAs: "followUp", triggerTurn: true })` —
+  `agit hook --config pi` prints a small extension that does exactly that
+  by running `agit hook`, to save as `~/.pi/agent/extensions/agit-steer.ts`.
+  Both Gemini CLI's and pi's paths are derived from the source and not yet
+  exercised against a running copy. `--steer` on a Codex or OpenClaw
+  session is refused with that reason rather than promising a channel that
+  does not exist.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -389,12 +395,13 @@ Said plainly:
   Sharing is watch-only unless the sharer passes `--steer`, and even then a
   message is never fed into a running turn: it waits for the runtime's own
   turn boundary — Claude Code's `Stop` / `UserPromptSubmit` hooks, Gemini
-  CLI's `AfterAgent` / `BeforeAgent` — and is delivered through the channel
-  each documents, which the agent weighs like any other context — a
+  CLI's `AfterAgent` / `BeforeAgent`, pi's `agent_end` /
+  `before_agent_start` extension events — and is delivered through the
+  channel each documents, which the agent weighs like any other context — a
   teammate's request, not a command from the keyboard. Codex, OpenClaw,
-  Cline, Kimi Code, OpenCode, LangGraph and ATIF sessions have no documented
-  equivalent, so `--steer` refuses them; a runtime that gains one gets wired
-  the same way, per adapter, opt-in.
+  Cline, Roo Code, Kimi Code, OpenCode, LangGraph, Hermes and ATIF sessions
+  have no documented equivalent, so `--steer` refuses them; a runtime that
+  gains one gets wired the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**
   `agit relay --cert <pem> --key <pem>` serves HTTPS; otherwise it is plain
   HTTP on loopback, and binding beyond loopback without TLS is refused unless
