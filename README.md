@@ -49,7 +49,8 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   messages file new sessions land in and the 3.x task directories an
   installed history still sits in (`agit import <globalStorage>/tasks/<id>`)
   — **Roo Code**'s task directories, which are the same layout in its own
-  dialect, **ATIF** trajectories, **LangGraph** checkpoint databases
+  dialect, **pi** sessions (`~/.pi/agent/sessions/--<cwd>--/*.jsonl`),
+  **ATIF** trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
   (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
   logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
@@ -61,7 +62,7 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   those runtimes have written on this machine (`~/.claude/projects`,
   `~/.codex/sessions`, `~/.openclaw/agents/*/sessions` and the agent
   database beside them, `~/.gemini/tmp/*/chats`,
-  `~/.kimi/sessions/*/*/wire.jsonl`,
+  `~/.kimi/sessions/*/*/wire.jsonl`, `~/.pi/agent/sessions/*/*.jsonl`,
   `~/.local/share/opencode/opencode*.db`, `~/.cline/data/sessions` and
   `~/.cline/data/tasks`, and VS Code's
   `User/globalStorage/{saoudrizwan.claude-dev,rooveterinaryinc.roo-cline}/tasks`)
@@ -334,10 +335,12 @@ fall out of that chain.
 
 Said plainly:
 
-- **Ten adapters, with different limits.** Claude Code is the reference;
+- **Eleven adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
-  matching rules. ATIF is a standard rather than a runtime, Cline's SDK
+  matching rules. pi's `write` writes its argument verbatim and its `edit`
+  records the patch it applied, so both verify — a write against the bytes
+  it wrote, an edit against content agit already holds. ATIF is a standard rather than a runtime, Cline's SDK
   format is a published contract and its 3.x task directory is read from
   the source of the last release that wrote it, LangGraph's and OpenCode's
   databases are read from each runtime's own schema, Gemini CLI's recording
@@ -478,6 +481,26 @@ Said plainly:
   is no `file.diff`. Derived from the source and checked against a fixture
   built to it; a real wire log that disagrees names its unmapped messages
   in the import report.
+- **A pi import verifies writes outright and edits within a window.**
+  `agit import ~/.pi/agent/sessions/<project>/<session>.jsonl` reads the
+  format `session-format.md` documents: a header, then a tree of entries
+  (`/tree` branches in place) linearized in file order with the tree kept
+  under `native`. pi's `write` tool writes its `content` argument verbatim
+  (`fsWriteFile(path, content, "utf-8")`), so a successful write is a
+  `file.diff` hashed over exactly the bytes that reached the disk — recorded
+  as a create when agit holds no prior content, since pi does not say
+  whether the file existed, and counted as such. pi's `edit` records the
+  unified patch it applied over the LF-normalized file; agit replays it the
+  way edit.ts does — BOM off, line ending noted, normalize, apply, restore —
+  when it already holds the file (a write, a verified edit, an untruncated
+  `read`, which returns the text unchanged, or `--base`), and counts the
+  edit otherwise. Shell edits stay invisible. `usage.cost` is dollars and is
+  counted, not stored. OpenClaw writes this same format, being built on pi;
+  the two are told apart by session version (OpenClaw's is 4, pi's 3) and,
+  for a version-3 file, by whose tools it calls, before either adapter
+  claims it. Derived from the source and checked against a fixture built to
+  it; a real session that disagrees names its unmapped entries in the
+  import report.
 - **An OpenCode import has no file history either.** `agit import
   opencode.db` reads the `session`, `message` and `part` tables OpenCode
   writes (its drizzle schema and generated DDL, its v1 session schema for

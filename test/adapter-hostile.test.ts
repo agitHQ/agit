@@ -19,6 +19,7 @@ import { codexAdapter } from "../src/adapters/codex.js";
 import { geminiCliAdapter } from "../src/adapters/gemini-cli.js";
 import { kimiCodeAdapter } from "../src/adapters/kimi-code.js";
 import { openclawAdapter } from "../src/adapters/openclaw.js";
+import { piAdapter } from "../src/adapters/pi.js";
 import type { Adapter } from "../src/adapters/adapter.js";
 import { buildChain } from "../src/format/hash.js";
 
@@ -48,6 +49,10 @@ const CASES: { adapter: Adapter; fixture: string }[] = [
     fixture: F("roo-code", "0192f0e1-d2c3-7b4a-9586-7768594a3b2c", "api_conversation_history.json"),
   },
   { adapter: geminiCliAdapter, fixture: F("gemini-cli", "session.jsonl") },
+  {
+    adapter: piAdapter,
+    fixture: F("pi", "2026-05-28T20-26-40-000Z_8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e.jsonl"),
+  },
   { adapter: kimiCodeAdapter, fixture: F("kimi-code", "01JRZ3K2Y7Q8W6X5V4T3S2R1P0", "wire.jsonl") },
 ];
 

@@ -7,6 +7,26 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **pi sessions import, and their file edits verify (`pi`, #64).** The
+  coding agent in badlogic/pi-mono documents its session file
+  (`packages/coding-agent/docs/session-format.md`): a header, then a tree
+  of entries with `id` / `parentId`, linearized here in file order with the
+  tree kept under `native`. Messages map to the usual events; `usage`
+  tokens to `cost` (dollars counted, not stored); pi's `write` writes its
+  argument verbatim, so a successful write is a `file.diff` over the bytes
+  it wrote (a create with a null `beforeHash` when agit held nothing before,
+  counted as `write:prior content unknown`); pi's `edit` records the patch
+  it applied over LF-normalized text, replayed the way edit.ts applies it
+  when agit holds the file — from a write, a verified edit, an untruncated
+  `read`, or `--base` — and counted otherwise. Compaction and branch
+  summaries carrying `usage` become `cost`; every other entry type is
+  counted by name. `import --all` scans `$PI_CODING_AGENT_DIR` (default
+  `~/.pi/agent`)`/sessions/*/*.jsonl`. **OpenClaw writes this same format**
+  (it is built on pi-mono), so the OpenClaw adapter no longer claims every
+  file with a `{"type":"session"}` header: `classifySessionLog` splits them
+  by session version (OpenClaw 4, pi 3) and, for a version-3 file, by whose
+  tools it calls.
+
 - **Roo Code task directories import, as a dialect of `cline-classic`
   (#63).** Roo forked Cline's layout and kept the two files, so the same
   adapter reads both, deciding the dialect from the directory name (Cline's
