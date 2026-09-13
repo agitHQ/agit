@@ -60,8 +60,8 @@
  *                 Windows)/state.db — hermes_constants.py get_hermes_home()
  *                 and hermes_state.py DEFAULT_DB_PATH in
  *                 NousResearch/hermes-agent. Every session lives in that one
- *                 file, which runs in WAL mode: while Hermes is up the
- *                 import is refused until the database is checkpointed.
+ *                 file, which runs in WAL mode; its sidecar is folded in
+ *                 on import, so a running Hermes reads as it stands.
  *  - Roo Code     the same task directories under the editor's
  *                 User/globalStorage/rooveterinaryinc.roo-cline
  *                 (src/utils/storage.ts in RooCodeInc/Roo-Code; the

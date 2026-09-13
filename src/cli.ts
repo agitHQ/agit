@@ -53,7 +53,7 @@ import {
 import { toAtif, toMarkdown, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
-import { walSidecarWarning } from "./sqlite.js";
+import { readSqliteWithWal, SqliteError } from "./sqlite.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -1056,12 +1056,18 @@ function importPath(opts: Opts, target: string): number {
   // OpenClaw agent database) is recognized from its bytes, before anything
   // tries to read it as UTF-8. Such a file may hold several sessions; every
   // one is imported unless --thread names one.
-  const bytes = readFileSync(path);
+  const buf = readFileSync(path);
+  let bytes: Uint8Array = buf;
   const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
   if (binary !== undefined) {
-    const stale = walSidecarWarning(path);
-    if (stale !== null) {
-      console.error(stale);
+    // A database still open in WAL mode keeps its newest pages in a
+    // sidecar; fold them in the way SQLite would, or say why that failed.
+    try {
+      const withWal = readSqliteWithWal(path);
+      bytes = withWal.bytes;
+      if (withWal.note !== null) console.log(`  ${withWal.note}`);
+    } catch (err) {
+      console.error(err instanceof SqliteError ? err.message : String(err));
       return 1;
     }
     const redactCfg = redactionConfigFor(opts);
@@ -1096,7 +1102,7 @@ function importPath(opts: Opts, target: string): number {
     return printTallySummary(opts, tally);
   }
 
-  const raw = bytes.toString("utf8").replace(/^\uFEFF/, "");
+  const raw = buf.toString("utf8").replace(/^\uFEFF/, "");
   const lines = raw.split("\n").filter((l) => l.trim() !== "");
 
   // Adoption gets the unfiltered text: dropping blank lines first would both
@@ -1184,13 +1190,15 @@ function cmdImportDiscovered(opts: Opts): number {
     const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
     if (binary !== undefined) {
       // A database holds sessions, not a session: one line each, as the
-      // path import prints them. A stale one (unapplied WAL frames) is a
-      // failure to name, not a file to read as if it were current.
-      const stale = walSidecarWarning(log.path);
+      // path import prints them. Its WAL sidecar is folded in; one agit
+      // cannot read is a failure to name, not a file to read as if current.
       let selections: (string | undefined)[];
+      let dbBytes: Uint8Array;
       try {
-        if (stale !== null) throw new Error(stale);
-        selections = sessionsToImport(binary, bytes, undefined);
+        const withWal = readSqliteWithWal(log.path);
+        dbBytes = withWal.bytes;
+        if (withWal.note !== null) console.log(`  ${withWal.note}`);
+        selections = sessionsToImport(binary, dbBytes, undefined);
       } catch (err) {
         tally.failed++;
         console.log(`  failed     ${log.path}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1201,7 +1209,7 @@ function cmdImportDiscovered(opts: Opts): number {
           const outcome = importNativeLog(
             opts,
             log.path,
-            { kind: "bytes", bytes },
+            { kind: "bytes", bytes: dbBytes },
             known,
             redactCfg,
             undefined,

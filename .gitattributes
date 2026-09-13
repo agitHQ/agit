@@ -4,3 +4,4 @@
 *.cast text eol=lf
 *.sqlite binary
 *.db binary
+*.db-wal binary

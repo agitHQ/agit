@@ -7,6 +7,18 @@ Notable changes to agit. The event format itself is versioned separately
 
 ### Added
 
+- **A database still being written imports as it stands.** SQLite in WAL
+  mode keeps committed pages in `<file>-wal` until a checkpoint; agit used
+  to refuse such a file. `applyWal` now folds the sidecar's committed frames
+  over the main file the way SQLite reads them — header, salts and the
+  checksum chain verified, the log ended at the first frame that breaks it,
+  uncommitted frames left out, the latest committed page winning, the
+  commit's page count setting the result's length — for every database
+  adapter, in `agit import <db>` and `import --all`. The report says how
+  many frames in how many commits were folded in; a sidecar that is not a
+  WAL is still refused, naming the checkpoint command. Fixture: a Hermes
+  pair copied while the writer held the WAL open, with a session that lives
+  only in the sidecar.
 - **Hermes Agent sessions import from `state.db` (`hermes`, #64).** The
   `sessions`, `messages` and `session_model_usage` tables, read from
   Hermes's own DDL with the in-tree SQLite reader: messages in the OpenAI
@@ -20,9 +32,7 @@ Notable changes to agit. The event format itself is versioned separately
   line-numbered reads are counted, not replayed. No per-message usage
   exists, so each model's session totals become one aggregate `cost`,
   flagged. `import --all` scans `$HERMES_HOME/state.db` (default
-  `~/.hermes`, `%LOCALAPPDATA%\hermes` on Windows); an import while Hermes
-  holds the WAL open is refused until a checkpoint, as for every WAL
-  database.
+  `~/.hermes`, `%LOCALAPPDATA%\hermes` on Windows).
 
 ## 0.12.0 — 2026-09-13
 

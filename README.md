@@ -523,10 +523,22 @@ Said plainly:
   per-message usage: each model's session totals become one aggregate
   `cost` at the session's end, flagged as such. Rows retired by compression
   or a rewind are kept and flagged. `state.db` runs in WAL mode and Hermes
-  keeps the WAL open, so an import while Hermes is running is refused until
-  the database is checkpointed; the message says how. Derived from the
+  keeps the WAL open, so the newest rows sit in `state.db-wal`; the import
+  folds that sidecar in (below), so a running Hermes reads as it stands.
+  Derived from the
   source and checked against a fixture written with the same DDL; a real
   database that disagrees names its unmapped rows in the import report.
+- **A database still being written imports as it stands.** SQLite in WAL
+  mode keeps committed pages in `<file>-wal` until a checkpoint, and every
+  database agit reads (LangGraph, OpenClaw, OpenCode, Hermes) runs that way,
+  so a reader that ignored the sidecar saw whatever was last checkpointed —
+  agit used to refuse such a file. It now folds the sidecar's committed
+  frames over the main file the way SQLite's own reader does: header
+  checked, salts and the checksum chain verified frame by frame, the log
+  ended at the first frame that breaks it, uncommitted frames left out, the
+  latest committed page winning. The import report says how many frames in
+  how many commits were folded in. A sidecar that is not a WAL at all is
+  still refused, naming the checkpoint command.
 - **An OpenCode import has no file history either.** `agit import
   opencode.db` reads the `session`, `message` and `part` tables OpenCode
   writes (its drizzle schema and generated DDL, its v1 session schema for
