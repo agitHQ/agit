@@ -202,15 +202,16 @@ usage:
   agit share <native.jsonl> --steer    also let viewers who hold the steer key
                                        queue messages for the agent; delivered
                                        at its next turn boundary (Claude Code,
-                                       Gemini CLI, pi)
+                                       Gemini CLI, pi, OpenCode)
   agit steer <link> "<text>" --steer-key K
                                        send a steering message from a terminal
                                        instead of the share page (--name N)
   agit hook                            the hook Claude Code (Stop, UserPromptSubmit),
-                                       Gemini CLI (AfterAgent, BeforeAgent) or a
-                                       pi extension runs: hands queued steering
-                                       messages to the agent; --config [runtime]
-                                       prints the settings fragment or extension
+                                       Gemini CLI (AfterAgent, BeforeAgent), a pi
+                                       extension or an OpenCode plugin runs: hands
+                                       queued steering messages to the agent;
+                                       --config [runtime] prints the settings
+                                       fragment, extension or plugin
   agit relay [--cert P --key P]        run a relay (self-hosted, in-memory);
                                        serves HTTPS when given a cert and key
   agit relay --store <dir>             persist shares, so a restart keeps them
