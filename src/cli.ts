@@ -3336,6 +3336,14 @@ async function cmdHook(opts: Opts): Promise<number> {
       return 2;
     }
     console.log(steerHookConfig(runtime));
+    if (runtime === "opencode") {
+      console.error(
+        "\n(save that as .opencode/plugins/agit-steer.ts in the project, or ~/.config/opencode/plugins/agit-steer.ts" +
+          " for every project — OpenCode loads it at startup — and OpenCode runs `agit hook` at its turn boundaries;" +
+          " agit must be on PATH)",
+      );
+      return 0;
+    }
     if (runtime === "pi") {
       console.error(
         "\n(save that as ~/.pi/agent/extensions/agit-steer.ts — pi loads it uncompiled — and pi runs `agit hook`",
@@ -3522,7 +3530,8 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!STEERABLE_RUNTIMES.has(adapter.name)) {
       console.error(
         `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
-          " Only Claude Code (Stop / UserPromptSubmit), Gemini CLI (AfterAgent / BeforeAgent) and pi (an extension) are wired;" +
+          " Only Claude Code (Stop / UserPromptSubmit), Gemini CLI (AfterAgent / BeforeAgent), pi (an extension)" +
+          " and OpenCode (a plugin) are wired;" +
           " share without --steer to keep messages terminal-only.",
       );
       return 2;

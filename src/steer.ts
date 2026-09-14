@@ -9,7 +9,7 @@
  * terminal on the human's behalf, and the human sees every queued message in
  * the share terminal as it arrives, attributed.
  *
- * A runtime is wired only where it documents a path. Two do:
+ * A runtime is wired only where it documents a path. Four do:
  *
  * Claude Code (code.claude.com/docs/en/hooks, "Stop decision control" and
  * "UserPromptSubmit decision control"):
@@ -42,6 +42,16 @@
  *   Derived from the source above; not yet exercised against a running
  *   Gemini CLI.
  *
+ * pi and OpenCode take an extension or plugin file rather than a settings
+ * fragment; each is printed by `agit hook --config <runtime>` and described
+ * beside its source below. OpenCode's two boundaries are its `chat.message`
+ * plugin hook (the human's next prompt, the idle case) and the
+ * `session.idle` event (the agent just finished), both from
+ * packages/plugin/src/index.ts in sst/opencode; the plugin hands the
+ * messages over as a synthetic text part of the prompt, or as a prompt of
+ * their own through the SDK. Derived from the source; not yet exercised
+ * against a running OpenCode.
+ *
  * Hook output strings are capped at 10,000 characters by Claude Code; a
  * drain that would exceed the budget delivers what fits and leaves the rest
  * queued for the next boundary, and says so. Gemini CLI publishes no cap;
@@ -68,12 +78,18 @@ export interface SteerMessage {
 }
 
 /** Runtimes with a documented turn-boundary hook. Adapter names, not display names. */
-export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set(["claude-code", "gemini-cli", "pi"]);
+export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set([
+  "claude-code",
+  "gemini-cli",
+  "pi",
+  "opencode",
+]);
 
 /** What to tell the sharer about the hooks their runtime fires. */
 export function steerHookDescription(runtime: string): string {
   if (runtime === "gemini-cli") return "Gemini CLI AfterAgent / BeforeAgent hooks";
   if (runtime === "pi") return "pi's agent_end / before_agent_start extension events";
+  if (runtime === "opencode") return "OpenCode's session.idle event / chat.message plugin hook";
   return "Claude Code Stop / UserPromptSubmit hooks";
 }
 
@@ -227,7 +243,14 @@ export function formatSteerContext(d: Drained): string {
 }
 
 export type SteerHookEvent =
-  "Stop" | "UserPromptSubmit" | "AfterAgent" | "BeforeAgent" | "AgentEnd" | "BeforeAgentStart";
+  | "Stop"
+  | "UserPromptSubmit"
+  | "AfterAgent"
+  | "BeforeAgent"
+  | "AgentEnd"
+  | "BeforeAgentStart"
+  | "SessionIdle"
+  | "ChatMessage";
 
 const STEER_EVENTS: ReadonlySet<string> = new Set([
   "Stop",
@@ -236,13 +259,17 @@ const STEER_EVENTS: ReadonlySet<string> = new Set([
   "BeforeAgent",
   "AgentEnd",
   "BeforeAgentStart",
+  "SessionIdle",
+  "ChatMessage",
 ]);
 
 /**
  * The documented output shape for the event that fired. Claude Code's two
  * events and Gemini's BeforeAgent take `hookSpecificOutput.additionalContext`;
  * Gemini's AfterAgent takes a blocking `decision` whose `reason` becomes the
- * next prompt (there is no context field on that event).
+ * next prompt (there is no context field on that event). pi's extension and
+ * OpenCode's plugin are agit's own code, so they take the simplest shape
+ * that carries the text.
  */
 export function steerHookOutput(event: SteerHookEvent, context: string): string {
   if (event === "AfterAgent") return JSON.stringify({ decision: "block", reason: context });
@@ -250,6 +277,8 @@ export function steerHookOutput(event: SteerHookEvent, context: string): string 
   if (event === "AgentEnd" || event === "BeforeAgentStart") {
     return JSON.stringify({ message: { customType: "agit-steer", content: context, display: true } });
   }
+  // OpenCode: the plugin turns the text into a synthetic part or a prompt itself.
+  if (event === "SessionIdle" || event === "ChatMessage") return JSON.stringify({ text: context });
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
 }
 
@@ -263,7 +292,8 @@ export interface HookRun {
 /**
  * One hook invocation. `input` is the JSON the runtime wrote to stdin. Only
  * the main agent's turn-boundary events are served — Claude Code's Stop and
- * UserPromptSubmit, Gemini CLI's AfterAgent and BeforeAgent; a subagent's
+ * UserPromptSubmit, Gemini CLI's AfterAgent and BeforeAgent, pi's AgentEnd
+ * and BeforeAgentStart, OpenCode's SessionIdle and ChatMessage; a subagent's
  * hook (Claude Code marks one with `agent_id`) and every other event drain
  * nothing, because the message was addressed to the session, not to a
  * helper inside it.
@@ -301,6 +331,7 @@ export function runSteerHook(base: string, input: string): HookRun {
  */
 export function steerHookConfig(runtime = "claude-code"): string {
   if (runtime === "pi") return PI_EXTENSION_LINES.join("\n") + "\n";
+  if (runtime === "opencode") return OPENCODE_PLUGIN_LINES.join("\n") + "\n";
   if (runtime === "gemini-cli") {
     const handler = {
       hooks: [{ type: "command", command: "agit hook", name: "agit-steer", timeout: 10_000 }],
@@ -360,6 +391,88 @@ const PI_EXTENSION_LINES: readonly string[] = [
   '    if (message) pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });',
   "  });",
   "}",
+];
+
+/**
+ * The OpenCode plugin `agit hook --config opencode` prints, as one
+ * TypeScript source (OpenCode loads `{plugin,plugins}/*.{ts,js}` under the
+ * project's `.opencode` and the global config dir at startup —
+ * packages/opencode/src/config/plugin.ts). It runs `agit hook` — agit on
+ * PATH, in the project directory the plugin is handed — at the two
+ * documented boundaries and hands what comes back to OpenCode through
+ * OpenCode's own API (packages/plugin/src/index.ts):
+ *   - `chat.message` fires with the parts of the prompt OpenCode is about to
+ *     store (session/prompt.ts) and the hook may add to them: the messages
+ *     ride along as one synthetic text part of the human's next prompt;
+ *   - `event` sees `session.idle`, which session/status.ts publishes when a
+ *     session's status becomes idle: the messages start a fresh turn through
+ *     `client.session.promptAsync` (POST /session/{id}/prompt_async, "start
+ *     if needed and return immediately").
+ * Lines are joined here so the file carries no template literal of its own.
+ */
+const OPENCODE_PLUGIN_LINES: readonly string[] = [
+  "// agit-steer: hands messages queued by `agit share --steer` to OpenCode at its turn boundaries.",
+  "// Printed by `agit hook --config opencode`; save it as .opencode/plugins/agit-steer.ts in the project",
+  "// (or ~/.config/opencode/plugins/agit-steer.ts for every project). OpenCode loads it at startup.",
+  "// Runs `agit hook` (agit must be on PATH), which prints nothing unless a live share queued a message.",
+  'import { execFileSync } from "node:child_process";',
+  'import { randomBytes } from "node:crypto";',
+  'import type { Plugin } from "@opencode-ai/plugin";',
+  "",
+  "function drain(event: string, sessionID: string, cwd: string): string | null {",
+  "  try {",
+  '    const out = execFileSync("agit", ["hook"], {',
+  "      cwd,",
+  '      encoding: "utf8",',
+  "      input: JSON.stringify({ hook_event_name: event, session_id: sessionID }),",
+  "      timeout: 10_000,",
+  "      windowsHide: true,",
+  '      shell: process.platform === "win32",',
+  "    });",
+  '    if (out.trim() === "") return null;',
+  "    const parsed = JSON.parse(out) as { text?: unknown };",
+  '    return parsed !== null && typeof parsed === "object" && typeof parsed.text === "string" ? parsed.text : null;',
+  "  } catch {",
+  "    return null;",
+  "  }",
+  "}",
+  "",
+  "// A part id in OpenCode's own shape (src/id/id.ts: prefix, the low 48 bits of time * 4096 + counter,",
+  "// then 14 base62 characters), with the counter at its maximum so the part sorts after the ones the",
+  "// prompt already has.",
+  "function partId(): string {",
+  "  const mask = (BigInt(1) << BigInt(48)) - BigInt(1);",
+  "  const now = (BigInt(Date.now()) * BigInt(0x1000) + BigInt(0xfff)) & mask;",
+  '  const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";',
+  "  const bytes = randomBytes(14);",
+  '  let tail = "";',
+  "  for (let i = 0; i < 14; i++) tail += chars[bytes[i]! % 62];",
+  '  return "prt_" + now.toString(16).padStart(12, "0") + tail;',
+  "}",
+  "",
+  "export const AgitSteer: Plugin = async ({ client, directory }) => ({",
+  "  // The human's next prompt: the queued messages ride along as one synthetic text part of it.",
+  '  "chat.message": async (input, output) => {',
+  '    const text = drain("ChatMessage", input.sessionID, directory);',
+  "    if (text === null) return;",
+  "    output.parts.push({",
+  "      id: partId(),",
+  "      sessionID: input.sessionID,",
+  "      messageID: output.message.id,",
+  '      type: "text",',
+  "      text,",
+  "      synthetic: true,",
+  "    });",
+  "  },",
+  "  // The agent went idle: the queued messages start a fresh turn of their own.",
+  "  event: async ({ event }) => {",
+  '    if (event.type !== "session.idle") return;',
+  "    const sessionID = event.properties.sessionID;",
+  '    const text = drain("SessionIdle", sessionID, directory);',
+  "    if (text === null) return;",
+  '    await client.session.promptAsync({ path: { id: sessionID }, body: { parts: [{ type: "text", text }] } });',
+  "  },",
+  "});",
 ];
 
 /**
