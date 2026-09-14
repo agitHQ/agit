@@ -490,7 +490,7 @@ describe("agit share --steer, end to end", () => {
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
     // Wait for the banner: it carries the key and the link.
-    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)?.[1];
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)?.[0];
     expect(key, out + err).toBeTruthy();
@@ -552,7 +552,7 @@ describe("agit share --steer, end to end", () => {
     const { cli, stop } = spawnShare([native, "--steer", "--relay", base, "--dir", dir]);
     let out = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
-    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
     const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
     expect((await agitAsync(["steer", link, "one", "--steer-key", key])).code).toBe(0);
@@ -587,7 +587,7 @@ describe("agit share --steer, end to end", () => {
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
-    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
     expect(out, out + err).toContain("pi's agent_end / before_agent_start extension events");
     expect(out).toContain("agit hook --config pi");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
@@ -617,7 +617,7 @@ describe("agit share --steer, end to end", () => {
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
-    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
     expect(out, out + err).toContain("OpenCode's session.idle event / chat.message plugin hook");
     expect(out).toContain("agit hook --config opencode");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
@@ -644,7 +644,7 @@ describe("agit share --steer, end to end", () => {
     let err = "";
     cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
     cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
-    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
     expect(out, out + err).toContain("Gemini CLI AfterAgent / BeforeAgent hooks");
     expect(out).toContain("agit hook --config gemini-cli");
     const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
