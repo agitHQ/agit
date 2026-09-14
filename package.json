@@ -1,6 +1,6 @@
 {
   "name": "agitsh",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "description": "git for running agents — import, inspect, verify, and replay AI coding sessions as an open, hash-chained event log",
   "type": "module",
   "license": "Apache-2.0",
