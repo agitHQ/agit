@@ -271,6 +271,32 @@ describe("the hook", () => {
     expect(cli.stderr).toContain("~/.pi/agent/extensions/agit-steer.ts");
   });
 
+  it("serves OpenCode's two events as the text the plugin needs, and prints the plugin", () => {
+    const dir = mktemp();
+    const oc = "ses_abc123";
+    queueSteer(dir, oc, { ts: "2026-09-12T10:00:01.000Z", name: "alice", text: "run the tests" });
+    const input = (event: string): string => JSON.stringify({ hook_event_name: event, session_id: oc });
+    const idle = JSON.parse(runSteerHook(dir, input("SessionIdle")).stdout) as { text: string };
+    expect(Object.keys(idle)).toEqual(["text"]);
+    expect(idle.text).toContain("alice: run the tests");
+    expect(runSteerHook(dir, input("ChatMessage")).stdout).toBe(""); // drained
+    queueSteer(dir, oc, { ts: "2026-09-12T10:00:02.000Z", name: "bob", text: "and lint" });
+    const chat = JSON.parse(runSteerHook(dir, input("ChatMessage")).stdout) as { text: string };
+    expect(chat.text).toContain("bob: and lint");
+    // The plugin itself: one TypeScript source, OpenCode's export shape, both hooks, agit on PATH.
+    const plugin = steerHookConfig("opencode");
+    expect(plugin).toContain("export const AgitSteer: Plugin = async ({ client, directory }) =>");
+    expect(plugin).toContain('"chat.message": async (input, output) =>');
+    expect(plugin).toContain('if (event.type !== "session.idle") return;');
+    expect(plugin).toContain('execFileSync("agit", ["hook"]');
+    expect(plugin).toContain("client.session.promptAsync({ path: { id: sessionID }");
+    expect(plugin).toContain("synthetic: true");
+    const cli = agit(["hook", "--config", "opencode"]);
+    expect(cli.code).toBe(0);
+    expect(cli.stdout.trimEnd()).toBe(plugin.trimEnd());
+    expect(cli.stderr).toContain(".opencode/plugins/agit-steer.ts");
+  });
+
   it("prints a settings fragment per runtime: seconds for Claude Code, milliseconds and a name for Gemini CLI", () => {
     const claude = JSON.parse(steerHookConfig()) as {
       hooks: Record<string, { hooks: Record<string, unknown>[] }[]>;
@@ -576,6 +602,33 @@ describe("agit share --steer, end to end", () => {
     );
     expect(JSON.parse(hook.stdout)).toMatchObject({ message: { customType: "agit-steer" } });
     expect(hook.stdout).toContain("read the README first");
+    stop();
+    await new Promise((r) => cli.on("close", r));
+  }, 60_000);
+
+  it("accepts --steer on an OpenCode database, keyed by the session's own id", async () => {
+    const dir = mktemp();
+    const native = join(dir, "opencode.db");
+    writeFileSync(native, readFileSync(join(ROOT, "fixtures", "opencode", "opencode-live.sqlite")));
+    const { base } = await relay();
+    const sid = "ses_fixtureaaaa0001";
+    const { cli, stop } = spawnShare([native, "--thread", sid, "--steer", "--relay", base, "--dir", dir]);
+    let out = "";
+    let err = "";
+    cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
+    cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
+    await waitFor(() => /steer key: /.test(out), "the steer banner");
+    expect(out, out + err).toContain("OpenCode's session.idle event / chat.message plugin hook");
+    expect(out).toContain("agit hook --config opencode");
+    const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
+    const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
+    expect((await agitAsync(["steer", link, "ship it", "--steer-key", key])).code).toBe(0);
+    await waitFor(() => existsSync(steerInboxPath(dir, sid)), "the steer inbox file");
+    const hook = await agitAsync(
+      ["hook", "--dir", dir],
+      JSON.stringify({ hook_event_name: "SessionIdle", session_id: sid }),
+    );
+    expect(JSON.parse(hook.stdout)).toEqual({ text: expect.stringContaining("ship it") });
     stop();
     await new Promise((r) => cli.on("close", r));
   }, 60_000);

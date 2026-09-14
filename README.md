@@ -223,7 +223,7 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   terminal first, attributed, and a message with a wrong key is shown too —
   labelled, and delivered to no one. The key never reaches other viewers;
   the relay forwards it to the sharer alone, who is the only party that can
-  check it. Three runtimes are wired, because three document a
+  check it. Four runtimes are wired, because four document a
   turn-boundary channel: Claude Code (above, verified against the
   runtime); **Gemini CLI**, whose `AfterAgent` hook takes a blocking
   decision whose `reason` is sent to the agent as the next prompt with the
@@ -233,11 +233,17 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   `before_agent_start` and queue one from `agent_end` with
   `pi.sendMessage(…, { deliverAs: "followUp", triggerTurn: true })` —
   `agit hook --config pi` prints a small extension that does exactly that
-  by running `agit hook`, to save as `~/.pi/agent/extensions/agit-steer.ts`.
-  Both Gemini CLI's and pi's paths are derived from the source and not yet
-  exercised against a running copy. `--steer` on a Codex or OpenClaw
-  session is refused with that reason rather than promising a channel that
-  does not exist.
+  by running `agit hook`, to save as `~/.pi/agent/extensions/agit-steer.ts`;
+  and **OpenCode**, whose plugin API hands a `chat.message` hook the parts
+  of the prompt it is about to store (the message rides along as a synthetic
+  part of your next prompt) and publishes a `session.idle` event when the
+  agent finishes (the message starts a fresh turn through the SDK's
+  `session.promptAsync`) — `agit hook --config opencode` prints that plugin,
+  to save as `.opencode/plugins/agit-steer.ts`. Gemini CLI's, pi's and
+  OpenCode's paths are derived from the source and not yet exercised
+  against a running copy. `--steer` on a Codex or OpenClaw session is
+  refused with that reason rather than promising a channel that does not
+  exist.
 - **`agit relay`** — the self-hosted relay behind `share`: in-memory only,
   loopback by default, nothing persisted. [PROTOCOL.md](PROTOCOL.md)
   documents the (v0, unstable) wire protocol.
@@ -357,7 +363,7 @@ earlier verified edit, a complete read, or `--base`).
 | LangGraph | `checkpoints.sqlite` | none | yes | no | its checkpoint schema |
 | Gemini CLI | `~/.gemini/tmp/<p>/chats/session-*.jsonl` | none | yes (last message held until settled) | yes (AfterAgent / BeforeAgent hooks; source-derived) | source |
 | Kimi Code | `~/.kimi/sessions/*/*/wire.jsonl` | none | yes | no | docs + source |
-| OpenCode | `~/.local/share/opencode/opencode.db` | none | yes (a streaming message held until complete) | no | its schema |
+| OpenCode | `~/.local/share/opencode/opencode.db` | none | yes (a streaming message held until complete) | yes (a plugin: `session.idle` / `chat.message`; source-derived) | its schema + plugin source |
 | pi | `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `write` verified; `edit` within the window; complete reads seed `fork` | yes | yes (an extension; source-derived) | docs + source |
 | Hermes Agent | `~/.hermes/state.db` | `write_file` when Hermes's own byte count says untransformed; `patch` within the window | yes (totals held until the end) | no | source |
 
@@ -428,10 +434,11 @@ Said plainly:
   message is never fed into a running turn: it waits for the runtime's own
   turn boundary — Claude Code's `Stop` / `UserPromptSubmit` hooks, Gemini
   CLI's `AfterAgent` / `BeforeAgent`, pi's `agent_end` /
-  `before_agent_start` extension events — and is delivered through the
-  channel each documents, which the agent weighs like any other context — a
+  `before_agent_start` extension events, OpenCode's `session.idle` event
+  and `chat.message` plugin hook — and is delivered through the channel
+  each documents, which the agent weighs like any other context — a
   teammate's request, not a command from the keyboard. Codex, OpenClaw,
-  Cline, Roo Code, Kimi Code, OpenCode, LangGraph, Hermes and ATIF sessions
+  Cline, Roo Code, Kimi Code, LangGraph, Hermes and ATIF sessions
   have no documented equivalent, so `--steer` refuses them; a runtime that
   gains one gets wired the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**

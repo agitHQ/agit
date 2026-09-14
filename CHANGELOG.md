@@ -3,6 +3,20 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`--steer` on an OpenCode session.** `agit share opencode.db --thread
+  <id> --steer` now hands teammates' messages to the agent through
+  OpenCode's own plugin API: `agit hook --config opencode` prints a plugin
+  (save it as `.opencode/plugins/agit-steer.ts`) whose `chat.message` hook
+  adds the queued messages to your next prompt as a synthetic part, and
+  whose `event` hook starts a fresh turn from them through
+  `session.promptAsync` when `session.idle` says the agent has finished.
+  Derived from sst/opencode's plugin, session and id sources; not yet
+  exercised against a running OpenCode. Four runtimes now take `--steer`.
+
 ## 0.16.3 — 2026-09-14
 
 The build published to npm (`agitsh@0.16.3`), the first since 0.5.0. Identical to 0.16.2 apart from the version number.
