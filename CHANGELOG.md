@@ -3,6 +3,22 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **Cursor agent transcripts** (#62; supersedes #118). `agit import
+  ~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` (and a
+  subagent's under `subagents/`), and `import --all` finds them. Cursor
+  publishes neither source nor schema, so the adapter is built to the
+  record shapes observed across 104 real transcripts (Cursor IDE 3.13.25)
+  and published under MIT in Einsia/agent-git's format probe: bare
+  `{role, message}` records with text and id-less `tool_use` blocks,
+  `turn_ended` markers, and Cursor's `<timestamp>` / `<user_query>` framing
+  around each prompt — the transcript's only clock. No tool results, no
+  thinking, no model and no file content are recorded, so none are
+  invented: no `tool.result`, no `cost`, no `file.diff`. Thirteen adapters.
+
 ## 0.18.1 — 2026-09-16
 
 The build published to npm (`agitsh@0.18.1`), the first since 0.16.3, so it carries 0.17.0 and 0.18.0. Identical to 0.18.0 apart from the version number.

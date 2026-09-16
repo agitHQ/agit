@@ -54,7 +54,9 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
   **ATIF** trajectories, **LangGraph** checkpoint databases
   (`agit import checkpoints.sqlite`), **Gemini CLI** recordings
   (`~/.gemini/tmp/<project>/chats/session-*.jsonl`), **Kimi Code** wire
-  logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), and
+  logs (`~/.kimi/sessions/<work dir>/<session>/wire.jsonl`), **Cursor**
+  agent transcripts
+  (`~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`), and
   **OpenCode**'s session database
   (`agit import ~/.local/share/opencode/opencode.db`) — the same event log,
   the same verbs, whichever agent produced the session. A database holds sessions rather
@@ -370,6 +372,7 @@ earlier verified edit, a complete read, or `--base`).
 | LangGraph | `checkpoints.sqlite` | none | yes | no | its checkpoint schema |
 | Gemini CLI | `~/.gemini/tmp/<p>/chats/session-*.jsonl` | none | yes (last message held until settled) | yes (AfterAgent / BeforeAgent hooks; source-derived) | source |
 | Kimi Code | `~/.kimi/sessions/*/*/wire.jsonl` | none | yes | no | docs + source |
+| Cursor | `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` | none (no tool results, no prior content recorded) | yes | no | observed transcripts (104, Cursor IDE 3.13.25; the MIT-published probe in Einsia/agent-git) |
 | OpenCode | `~/.local/share/opencode/opencode.db` | none | yes (a streaming message held until complete) | yes (a plugin: `session.idle` / `chat.message`; source-derived) | its schema + plugin source |
 | pi | `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `write` verified; `edit` within the window; complete reads seed `fork` | yes | yes (an extension; source-derived) | docs + source |
 | Hermes Agent | `~/.hermes/state.db` | `write_file` when Hermes's own byte count says untransformed; `patch` within the window | yes (totals held until the end) | yes (`pre_llm_call` / `pre_verify` shell hooks; source-derived; `pre_verify` only after edits) | source |
@@ -395,7 +398,7 @@ fall out of that chain.
 
 Said plainly:
 
-- **Twelve adapters, with different limits.** Claude Code is the reference;
+- **Thirteen adapters, with different limits.** Claude Code is the reference;
   Codex is mapped from its own structured edit records. OpenClaw is mapped
   from the `apply_patch` text it records, replayed with OpenClaw's own
   matching rules. pi's `write` writes its argument verbatim and its `edit`
@@ -406,8 +409,10 @@ Said plainly:
   format is a published contract and its 3.x task directory is read from
   the source of the last release that wrote it, LangGraph's and OpenCode's
   databases are read from each runtime's own schema, Gemini CLI's recording
-  is folded the way its own loader folds it, and Kimi Code's wire log is
-  folded the way its own replay folds it; none of the seven carries file
+  is folded the way its own loader folds it, Kimi Code's wire log is
+  folded the way its own replay folds it, and Cursor's transcript — the one
+  runtime here that publishes neither source nor schema — is read as it was
+  observed across a hundred real ones; none of the eight carries file
   content agit can hash — see below.
 - **Codex updates have a verification window.** Codex records a file's full
   content when it *creates* one, but only a diff when it *updates* one — so
@@ -446,7 +451,7 @@ Said plainly:
   `pre_verify` shell hooks — and is delivered through the channel each
   documents, which the agent weighs like any other context — a teammate's
   request, not a command from the keyboard. Codex, OpenClaw, Cline, Roo
-  Code, Kimi Code, LangGraph and ATIF sessions
+  Code, Kimi Code, Cursor, LangGraph and ATIF sessions
   have no documented equivalent, so `--steer` refuses them; a runtime that
   gains one gets wired the same way, per adapter, opt-in.
 - **The relay speaks TLS only when you give it a certificate.**
@@ -531,6 +536,17 @@ Said plainly:
   legacy single-document `.json` form is read too. Derived from the source
   and checked against a fixture built to it; a real recording that
   disagrees names its unmapped records in the import report.
+- **A Cursor import reads a projection.** Cursor keeps the session in an
+  encrypted state database and writes a transcript beside it that holds
+  what the model said and the tool calls it made — no tool output, no
+  thinking, no model name, no timestamps of its own. The only clock is the
+  localized `<timestamp>` Cursor puts in front of each prompt, so an
+  assistant record is dated by the prompt before it; `Write` and
+  `StrReplace` carry what they were asked to write, but with no result
+  record and no prior content nothing is hashed, so `blame`, `why`, `fork`
+  and `diff` have nothing to work with. The four prompts Cursor writes
+  itself (after a subagent or background task, at a fork, after an
+  interruption) are marked `native.injected`; nothing else is inferred.
 - **A Kimi Code import reads the wire, not the context.** Kimi keeps a
   session's model context in `context.jsonl` (no timestamps) and its event
   stream in `wire.jsonl` (each record stamped); `agit import wire.jsonl`

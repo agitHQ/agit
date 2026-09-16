@@ -14,6 +14,7 @@ import { clineSdkAdapter } from "./adapters/cline-sdk.js";
 import { codexAdapter } from "./adapters/codex.js";
 import { geminiCliAdapter } from "./adapters/gemini-cli.js";
 import { hermesAdapter } from "./adapters/hermes.js";
+import { cursorAdapter } from "./adapters/cursor.js";
 import { kimiCodeAdapter } from "./adapters/kimi-code.js";
 import { langgraphAdapter } from "./adapters/langgraph.js";
 import { openclawAdapter } from "./adapters/openclaw.js";
@@ -125,6 +126,7 @@ const ADAPTERS: Adapter[] = [
   kimiCodeAdapter,
   piAdapter,
   hermesAdapter,
+  cursorAdapter,
 ];
 const DEFAULT_RELAY = process.env.AGIT_RELAY ?? "http://127.0.0.1:7717";
 
