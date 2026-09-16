@@ -9,7 +9,7 @@
  * terminal on the human's behalf, and the human sees every queued message in
  * the share terminal as it arrives, attributed.
  *
- * A runtime is wired only where it documents a path. Four do:
+ * A runtime is wired only where it documents a path. Five do:
  *
  * Claude Code (code.claude.com/docs/en/hooks, "Stop decision control" and
  * "UserPromptSubmit decision control"):
@@ -52,6 +52,31 @@
  * their own through the SDK. Derived from the source; not yet exercised
  * against a running OpenCode.
  *
+ * Hermes Agent (website/docs/user-guide/features/hooks.md in
+ * NousResearch/hermes-agent; the mechanics in agent/shell_hooks.py,
+ * agent/turn_context.py, agent/turn_stop_gates.py, hermes_cli/plugins.py):
+ * shell hooks declared under `hooks:` in ~/.hermes/config.yaml, each a
+ * command Hermes runs with JSON on stdin (`_serialize_payload`:
+ * `hook_event_name`, `session_id`, `cwd`, …) and reads JSON from. Hermes
+ * writes the event name itself, so the two below are its own:
+ *   - `pre_llm_call`: fires once per turn before the tool loop; stdout
+ *     `{"context": …}` (`_parse_context`) is appended to the user message
+ *     (`_collect_pre_llm_call_context`) — the idle case.
+ *   - `pre_verify`: the round-end gate, `{"action": "continue", "message":
+ *     …}` (`_parse_pre_verify`; Claude Code's Stop dialect is accepted too)
+ *     appends the message as a synthetic user nudge and re-enters the turn
+ *     (`_pre_verify_nudge` in turn_stop_gates.py). It fires only after a
+ *     turn that edited files, at most `max_verify_nudges` (3) times per
+ *     turn — so after a turn with no edits a message waits for the next
+ *     prompt's pre_llm_call; README says so.
+ *   `session_id` is `agent.session_id`, the value Hermes persists as
+ *   `sessions.id` / `messages.session_id` in state.db, which the adapter
+ *   reports. Hermes runs the command with `shell=False` in its own cwd
+ *   (`_spawn`), so `agit share` must run from the directory hermes runs in,
+ *   and on Windows the command has to name `agit.cmd`. Hermes asks once
+ *   to allow each (event, command) pair. Derived from the source; not yet
+ *   exercised against a running Hermes.
+ *
  * Hook output strings are capped at 10,000 characters by Claude Code; a
  * drain that would exceed the budget delivers what fits and leaves the rest
  * queued for the next boundary, and says so. Gemini CLI publishes no cap;
@@ -83,6 +108,7 @@ export const STEERABLE_RUNTIMES: ReadonlySet<string> = new Set([
   "gemini-cli",
   "pi",
   "opencode",
+  "hermes",
 ]);
 
 /** What to tell the sharer about the hooks their runtime fires. */
@@ -90,6 +116,7 @@ export function steerHookDescription(runtime: string): string {
   if (runtime === "gemini-cli") return "Gemini CLI AfterAgent / BeforeAgent hooks";
   if (runtime === "pi") return "pi's agent_end / before_agent_start extension events";
   if (runtime === "opencode") return "OpenCode's session.idle event / chat.message plugin hook";
+  if (runtime === "hermes") return "Hermes Agent's pre_llm_call / pre_verify shell hooks";
   return "Claude Code Stop / UserPromptSubmit hooks";
 }
 
@@ -250,7 +277,9 @@ export type SteerHookEvent =
   | "AgentEnd"
   | "BeforeAgentStart"
   | "SessionIdle"
-  | "ChatMessage";
+  | "ChatMessage"
+  | "pre_llm_call"
+  | "pre_verify";
 
 const STEER_EVENTS: ReadonlySet<string> = new Set([
   "Stop",
@@ -261,6 +290,8 @@ const STEER_EVENTS: ReadonlySet<string> = new Set([
   "BeforeAgentStart",
   "SessionIdle",
   "ChatMessage",
+  "pre_llm_call",
+  "pre_verify",
 ]);
 
 /**
@@ -269,7 +300,8 @@ const STEER_EVENTS: ReadonlySet<string> = new Set([
  * Gemini's AfterAgent takes a blocking `decision` whose `reason` becomes the
  * next prompt (there is no context field on that event). pi's extension and
  * OpenCode's plugin are agit's own code, so they take the simplest shape
- * that carries the text.
+ * that carries the text. Hermes names its events itself: pre_llm_call takes
+ * `context`, pre_verify a `continue` action with a `message`.
  */
 export function steerHookOutput(event: SteerHookEvent, context: string): string {
   if (event === "AfterAgent") return JSON.stringify({ decision: "block", reason: context });
@@ -279,6 +311,8 @@ export function steerHookOutput(event: SteerHookEvent, context: string): string 
   }
   // OpenCode: the plugin turns the text into a synthetic part or a prompt itself.
   if (event === "SessionIdle" || event === "ChatMessage") return JSON.stringify({ text: context });
+  if (event === "pre_llm_call") return JSON.stringify({ context });
+  if (event === "pre_verify") return JSON.stringify({ action: "continue", message: context });
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: context } });
 }
 
@@ -293,7 +327,8 @@ export interface HookRun {
  * One hook invocation. `input` is the JSON the runtime wrote to stdin. Only
  * the main agent's turn-boundary events are served — Claude Code's Stop and
  * UserPromptSubmit, Gemini CLI's AfterAgent and BeforeAgent, pi's AgentEnd
- * and BeforeAgentStart, OpenCode's SessionIdle and ChatMessage; a subagent's
+ * and BeforeAgentStart, OpenCode's SessionIdle and ChatMessage, Hermes's
+ * pre_llm_call and pre_verify; a subagent's
  * hook (Claude Code marks one with `agent_id`) and every other event drain
  * nothing, because the message was addressed to the session, not to a
  * helper inside it.
@@ -332,6 +367,7 @@ export function runSteerHook(base: string, input: string): HookRun {
 export function steerHookConfig(runtime = "claude-code"): string {
   if (runtime === "pi") return PI_EXTENSION_LINES.join("\n") + "\n";
   if (runtime === "opencode") return OPENCODE_PLUGIN_LINES.join("\n") + "\n";
+  if (runtime === "hermes") return HERMES_HOOKS_YAML;
   if (runtime === "gemini-cli") {
     const handler = {
       hooks: [{ type: "command", command: "agit hook", name: "agit-steer", timeout: 10_000 }],
@@ -341,6 +377,23 @@ export function steerHookConfig(runtime = "claude-code"): string {
   const handler = { hooks: [{ type: "command", command: "agit hook", timeout: 10 }] };
   return JSON.stringify({ hooks: { Stop: [handler], UserPromptSubmit: [handler] } }, null, 2);
 }
+
+/**
+ * The `hooks:` block for ~/.hermes/config.yaml (agent/shell_hooks.py,
+ * `_parse_hooks_block`: one list of entries per event, `command` required,
+ * `timeout` in seconds, default 60, max 300). Hermes splits the command
+ * itself and runs it without a shell, so it is two words.
+ */
+const HERMES_HOOKS_YAML = [
+  "hooks:",
+  "  pre_llm_call:",
+  '    - command: "agit hook"',
+  "      timeout: 10",
+  "  pre_verify:",
+  '    - command: "agit hook"',
+  "      timeout: 10",
+  "",
+].join("\n");
 
 /**
  * The pi extension `agit hook --config pi` prints, as one TypeScript source

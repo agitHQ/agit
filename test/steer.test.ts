@@ -297,6 +297,44 @@ describe("the hook", () => {
     expect(cli.stderr).toContain(".opencode/plugins/agit-steer.ts");
   });
 
+  it("serves Hermes's two events in Hermes's own shapes, and prints the hooks: block", () => {
+    const dir = mktemp();
+    const hs = "a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60";
+    queueSteer(dir, hs, { ts: "2026-09-12T10:00:01.000Z", name: "alice", text: "run the tests" });
+    // Hermes writes hook_event_name itself, in its own spelling, with its own extra fields.
+    const input = (event: string): string =>
+      JSON.stringify({
+        hook_event_name: event,
+        tool_name: null,
+        tool_input: null,
+        session_id: hs,
+        cwd: "/p",
+      });
+    const verify = JSON.parse(runSteerHook(dir, input("pre_verify")).stdout) as {
+      action: string;
+      message: string;
+    };
+    expect(verify.action).toBe("continue");
+    expect(verify.message).toContain("alice: run the tests");
+    expect(runSteerHook(dir, input("pre_llm_call")).stdout).toBe(""); // drained
+    queueSteer(dir, hs, { ts: "2026-09-12T10:00:02.000Z", name: "bob", text: "and lint" });
+    const llm = JSON.parse(runSteerHook(dir, input("pre_llm_call")).stdout) as { context: string };
+    expect(Object.keys(llm)).toEqual(["context"]);
+    expect(llm.context).toContain("bob: and lint");
+    // The config: one entry per event, a two-word command Hermes splits itself, timeout in seconds.
+    const yaml = steerHookConfig("hermes");
+    expect(yaml.startsWith("hooks:" + NL_)).toBe(true);
+    expect(yaml).toContain(
+      "  pre_llm_call:" + NL_ + '    - command: "agit hook"' + NL_ + "      timeout: 10",
+    );
+    expect(yaml).toContain("  pre_verify:" + NL_ + '    - command: "agit hook"' + NL_ + "      timeout: 10");
+    const cli = agit(["hook", "--config", "hermes"]);
+    expect(cli.code).toBe(0);
+    expect(cli.stdout.trimEnd()).toBe(yaml.trimEnd());
+    expect(cli.stderr).toContain("~/.hermes/config.yaml");
+    expect(cli.stderr).toContain("only after a turn that edited files");
+  });
+
   it("prints a settings fragment per runtime: seconds for Claude Code, milliseconds and a name for Gemini CLI", () => {
     const claude = JSON.parse(steerHookConfig()) as {
       hooks: Record<string, { hooks: Record<string, unknown>[] }[]>;
@@ -629,6 +667,38 @@ describe("agit share --steer, end to end", () => {
       JSON.stringify({ hook_event_name: "SessionIdle", session_id: sid }),
     );
     expect(JSON.parse(hook.stdout)).toEqual({ text: expect.stringContaining("ship it") });
+    stop();
+    await new Promise((r) => cli.on("close", r));
+  }, 60_000);
+
+  it("accepts --steer on a Hermes state.db, keyed by the session's own id", async () => {
+    const dir = mktemp();
+    const live = join(ROOT, "fixtures", "hermes", "live", "state.db");
+    const native = join(dir, "state.db");
+    writeFileSync(native, readFileSync(live));
+    writeFileSync(`${native}-wal`, readFileSync(`${live}-wal`));
+    const { base } = await relay();
+    const sid = "a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60";
+    const { cli, stop } = spawnShare([native, "--thread", sid, "--steer", "--relay", base, "--dir", dir]);
+    let out = "";
+    let err = "";
+    cli.stdout!.on("data", (c: Buffer) => (out += c.toString()));
+    cli.stderr!.on("data", (c: Buffer) => (err += c.toString()));
+    await waitFor(() => /agit hook --config/.test(out), "the whole steer banner");
+    expect(out, out + err).toContain("Hermes Agent's pre_llm_call / pre_verify shell hooks");
+    expect(out).toContain("agit hook --config hermes");
+    const key = /steer key: ([A-Za-z0-9_-]+)/.exec(out)![1]!;
+    const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(out)![0];
+    expect((await agitAsync(["steer", link, "ship it", "--steer-key", key])).code).toBe(0);
+    await waitFor(() => existsSync(steerInboxPath(dir, sid)), "the steer inbox file");
+    const hook = await agitAsync(
+      ["hook", "--dir", dir],
+      JSON.stringify({ hook_event_name: "pre_verify", session_id: sid, cwd: dir }),
+    );
+    expect(JSON.parse(hook.stdout)).toEqual({
+      action: "continue",
+      message: expect.stringContaining("ship it"),
+    });
     stop();
     await new Promise((r) => cli.on("close", r));
   }, 60_000);
