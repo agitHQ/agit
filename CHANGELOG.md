@@ -3,6 +3,10 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## 0.18.1 — 2026-09-16
+
+The build published to npm (`agitsh@0.18.1`), the first since 0.16.3, so it carries 0.17.0 and 0.18.0. Identical to 0.18.0 apart from the version number.
+
 ## 0.18.0 — 2026-09-16
 
 ### Fixed
