@@ -86,6 +86,19 @@ describe("agit import --all", () => {
     for (const runtime of ["claude-code", "codex", "openclaw"]) expect(listed).toContain(runtime);
   });
 
+  it("refuses a path next to --all, --latest or --since instead of ignoring it", () => {
+    const { home, store } = populatedHome();
+    const r = agit(["import", join(home, "anything.jsonl"), "--all", "--dir", store], home);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("--all discovers logs itself and takes no path");
+    expect(r.out).toContain("drop --all");
+    expect(agit(["import", "x.jsonl", "--latest", "--dir", store], home).out).toContain("--latest discovers");
+    expect(agit(["import", "x.jsonl", "--since", "1h", "--dir", store], home).out).toContain(
+      "--since discovers",
+    );
+    expect(ids(store, home)).not.toContain("claude-code"); // nothing was imported behind the refusal
+  });
+
   it("a second run finds everything unchanged and rewrites nothing", () => {
     const { home, store } = populatedHome();
     agit(["import", "--all", "--dir", store], home);
