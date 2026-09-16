@@ -202,12 +202,13 @@ usage:
   agit share <native.jsonl> --steer    also let viewers who hold the steer key
                                        queue messages for the agent; delivered
                                        at its next turn boundary (Claude Code,
-                                       Gemini CLI, pi, OpenCode)
+                                       Gemini CLI, pi, OpenCode, Hermes Agent)
   agit steer <link> "<text>" --steer-key K
                                        send a steering message from a terminal
                                        instead of the share page (--name N)
   agit hook                            the hook Claude Code (Stop, UserPromptSubmit),
-                                       Gemini CLI (AfterAgent, BeforeAgent), a pi
+                                       Gemini CLI (AfterAgent, BeforeAgent), Hermes
+                                       Agent (pre_llm_call, pre_verify), a pi
                                        extension or an OpenCode plugin runs: hands
                                        queued steering messages to the agent;
                                        --config [runtime] prints the settings
@@ -3337,6 +3338,15 @@ async function cmdHook(opts: Opts): Promise<number> {
       return 2;
     }
     console.log(steerHookConfig(runtime));
+    if (runtime === "hermes") {
+      console.error(
+        "\n(merge that into ~/.hermes/config.yaml — Hermes asks once to allow each hook command — and run" +
+          " `agit share` from the directory you run hermes in, which is where Hermes runs the hook;" +
+          " agit must be on PATH, and on Windows the command is `agit.cmd hook`. pre_verify fires only" +
+          " after a turn that edited files; otherwise a message waits for your next prompt)",
+      );
+      return 0;
+    }
     if (runtime === "opencode") {
       console.error(
         "\n(save that as .opencode/plugins/agit-steer.ts in the project, or ~/.config/opencode/plugins/agit-steer.ts" +
@@ -3531,8 +3541,8 @@ async function cmdShare(opts: Opts): Promise<number> {
     if (!STEERABLE_RUNTIMES.has(adapter.name)) {
       console.error(
         `--steer: ${adapter.name} has no documented turn-boundary hook, so agit has nowhere honest to hand a message to.` +
-          " Only Claude Code (Stop / UserPromptSubmit), Gemini CLI (AfterAgent / BeforeAgent), pi (an extension)" +
-          " and OpenCode (a plugin) are wired;" +
+          " Only Claude Code (Stop / UserPromptSubmit), Gemini CLI (AfterAgent / BeforeAgent), pi (an extension)," +
+          " OpenCode (a plugin) and Hermes Agent (shell hooks) are wired;" +
           " share without --steer to keep messages terminal-only.",
       );
       return 2;

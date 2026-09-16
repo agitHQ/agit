@@ -3,6 +3,22 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Added
+
+- **`--steer` on a Hermes Agent session** (#150). `agit share
+  ~/.hermes/state.db --thread <id> --steer` hands teammates' messages to
+  the agent through Hermes's documented shell hooks: `agit hook --config
+  hermes` prints the `hooks:` block for `~/.hermes/config.yaml` that runs
+  `agit hook` at `pre_llm_call` (the message is appended to your next
+  prompt as `context`) and at `pre_verify` (a `continue` directive
+  re-enters the turn with the message as a nudge). Hermes fires
+  `pre_verify` only after a turn that edited files, at most three times per
+  turn, and the README says so. Derived from hermes-agent's shell_hooks,
+  turn_context, turn_stop_gates and plugins sources; not yet exercised
+  against a running Hermes. Five runtimes now take `--steer`.
+
 ## 0.17.0 — 2026-09-14
 
 ### Added
