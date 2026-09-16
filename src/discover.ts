@@ -38,6 +38,10 @@
  *                 docs/en/configuration/data-locations.md and
  *                 src/kimi_cli/session.py. context.jsonl beside it is the
  *                 model context, without timestamps, and is not a log.
+ *  - Cursor       ~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl,
+ *                 and a subagent's under <uuid>/subagents/<uuid>.jsonl — the
+ *                 observed layout (docs/mechanism-probing/cursor-kiro-formats.md
+ *                 in Einsia/agent-git); Cursor publishes none.
  *  - Cline        the SDK sessions at $CLINE_DIR (default ~/.cline)/data/
  *                 sessions/<id>/<id>.messages.json (sdk/packages/core/docs/
  *                 messages-contract-v1.md), and the 3.x task directories,
@@ -235,6 +239,26 @@ function scanKimiCode(sessionsRoot: string, out: DiscoveredLog[]): void {
   }
 }
 
+/** Cursor: projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl, and subagents/<uuid>.jsonl beneath a session. */
+function scanCursor(projectsRoot: string, out: DiscoveredLog[]): void {
+  for (const slug of listDir(projectsRoot)) {
+    const transcripts = join(projectsRoot, slug, "agent-transcripts");
+    if (!isDir(transcripts)) continue;
+    for (const session of listDir(transcripts)) {
+      const dir = join(transcripts, session);
+      if (!isDir(dir)) continue;
+      const main = join(dir, `${session}.jsonl`);
+      if (isFile(main)) record("cursor", main, out);
+      const subagents = join(dir, "subagents");
+      if (!isDir(subagents)) continue;
+      for (const name of listDir(subagents)) {
+        if (name.endsWith(".jsonl") && isFile(join(subagents, name)))
+          record("cursor", join(subagents, name), out);
+      }
+    }
+  }
+}
+
 /** pi sessions: sessions/--<cwd>--/<timestamp>_<id>.jsonl. */
 function scanPi(sessionsRoot: string, out: DiscoveredLog[]): void {
   for (const project of listDir(sessionsRoot)) {
@@ -346,6 +370,7 @@ export function discoverSessionLogs(
     { runtime: "gemini-cli", dir: join(home, ".gemini", "tmp"), scan: scanGeminiCli },
     { runtime: "opencode", dir: join(xdgDataDir(home, env), "opencode"), scan: scanOpenCode },
     { runtime: "kimi-code", dir: join(kimiShareDir(home, env), "sessions"), scan: scanKimiCode },
+    { runtime: "cursor", dir: join(home, ".cursor", "projects"), scan: scanCursor },
     { runtime: "pi", dir: join(piAgentDir(home, env), "sessions"), scan: scanPi },
     { runtime: "hermes", dir: hermesHome(home, env, platform), scan: scanHermes },
     { runtime: "cline-sdk", dir: join(cline, "data", "sessions"), scan: scanClineSdk },

@@ -16,6 +16,7 @@ import { claudeCodeAdapter } from "../src/adapters/claude-code.js";
 import { clineClassicAdapter } from "../src/adapters/cline-classic.js";
 import { clineSdkAdapter } from "../src/adapters/cline-sdk.js";
 import { codexAdapter } from "../src/adapters/codex.js";
+import { cursorAdapter } from "../src/adapters/cursor.js";
 import { geminiCliAdapter } from "../src/adapters/gemini-cli.js";
 import { kimiCodeAdapter } from "../src/adapters/kimi-code.js";
 import { openclawAdapter } from "../src/adapters/openclaw.js";
@@ -54,6 +55,16 @@ const CASES: { adapter: Adapter; fixture: string }[] = [
     fixture: F("pi", "2026-05-28T20-26-40-000Z_8f3b2c1d-4e5a-4b6c-9d7e-0f1a2b3c4d5e.jsonl"),
   },
   { adapter: kimiCodeAdapter, fixture: F("kimi-code", "01JRZ3K2Y7Q8W6X5V4T3S2R1P0", "wire.jsonl") },
+  {
+    adapter: cursorAdapter,
+    fixture: F(
+      "cursor",
+      "Users-alex-Projects-demo",
+      "agent-transcripts",
+      "3f1c9a2e-7b4d-4e8f-9a1b-2c3d4e5f6a7b",
+      "3f1c9a2e-7b4d-4e8f-9a1b-2c3d4e5f6a7b.jsonl",
+    ),
+  },
 ];
 
 function rng(seed: number): () => number {
