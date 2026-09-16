@@ -5,6 +5,14 @@ Notable changes to agit. The event format itself is versioned separately
 
 ## Unreleased
 
+### Fixed
+
+- **`agit import <path> --all` no longer ignores the path.** Discovery
+  flags (`--all`, `--latest`, `--since`) walk every runtime's log directory
+  and used to drop a path given next to them silently, so "45 imported"
+  read as the answer for that one file. A path alongside a discovery flag is
+  now refused with the flag to drop.
+
 ### Added
 
 - **`--steer` on a Hermes Agent session** (#150). `agit share

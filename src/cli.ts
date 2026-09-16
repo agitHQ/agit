@@ -1030,7 +1030,20 @@ function cmdRedact(opts: Opts): number {
 }
 
 function cmdImport(opts: Opts): number {
-  if (opts.all || opts.latest || opts.since !== undefined) return cmdImportDiscovered(opts);
+  if (opts.all || opts.latest || opts.since !== undefined) {
+    // Discovery walks every runtime's log directory; a path alongside it
+    // would be silently ignored, and the caller would read "45 imported" as
+    // the answer for that one file.
+    if (opts.args.length > 0) {
+      const flag = opts.all ? "--all" : opts.latest ? "--latest" : "--since";
+      console.error(
+        `agit import ${flag} discovers logs itself and takes no path; ` +
+          `to import ${JSON.stringify(opts.args[0])} alone, drop ${flag}.`,
+      );
+      return 2;
+    }
+    return cmdImportDiscovered(opts);
+  }
   const src = opts.args[0];
   if (!src) {
     console.error(
