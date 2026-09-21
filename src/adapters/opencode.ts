@@ -40,10 +40,24 @@
  *     counted, not stored (SPEC §5.9). An assistant message without any
  *     `step-finish` part but with `tokens` of its own gets one `cost` from
  *     those, so a session never loses its usage to a missing marker.
+ *   - `file` on a user message is an attachment (`filename`, `mime`, and a
+ *     `data:` URL holding the bytes, megabytes at times) and becomes a
+ *     `[file: name (mime)]` marker in the text, as SPEC §5.3 has non-text
+ *     blocks; the bytes stay out. On an assistant message it is counted.
+ *   - a compaction writes three rows (observed on a real database): a user
+ *     message whose only part is `compaction` (`auto`, `overflow`,
+ *     `tail_start_id` — the boundary, counted), an assistant message with
+ *     `mode: "compaction"` and `summary: true` whose text is the lossy
+ *     summary the model wrote, and a `synthetic` user text carrying
+ *     `metadata.compaction_continue` (counted like every synthetic text).
+ *     The summary message becomes a `message.assistant` (and a `cost`)
+ *     marked `native.compaction`, since it is the runtime's text, not a
+ *     reply to the person. `session.time_compacting` is transient and no
+ *     test for one.
  *   - `patch` names files a git snapshot changed (`hash`, `files`) and holds
- *     no content; `snapshot` and `step-start` are markers; `file`, `agent`,
- *     `subtask`, `compaction` and `retry` are structure agit has no event
- *     for. Every one is counted by type.
+ *     no content; `snapshot` and `step-start` are markers; `agent`,
+ *     `subtask` and `retry` are structure agit has no event for. Every one
+ *     is counted by type.
  *
  * **No `file.diff`.** OpenCode's file changes live in git snapshots of the
  * worktree (`packages/opencode/src/snapshot`), not in the database, so no
@@ -54,10 +68,23 @@
  * the row), all epoch milliseconds.
  *
  * A database holds every session; `sessionsIn` lists them and `agit import`
- * takes each unless `--thread <id>` names one. Derived from the schema and
- * validated against a fixture built to it; not yet run against a real
- * `opencode.db` (#46 asks for one) — a real database that disagrees names
- * its unmapped parts in the import report rather than passing silently.
+ * takes each unless `--thread <id>` names one.
+ *
+ * Rows are not append-only, and that matters for a live share. Streaming
+ * rewrites the assistant message in flight and its parts (held back until
+ * `time.completed`, above); after a turn the summary service rewrites the
+ * user message's `summary.diffs`, and compaction stamps old tool parts'
+ * `state.time.compacted` and the boundary's `tail_start_id` — none of
+ * which this adapter emits, so what was streamed does not change. A native
+ * revert deletes rows, and a live share of a session that reverts stops as
+ * the rewrite of streamed history it is. Observed, not inferred: a real
+ * database of 139 sessions (14,883 parts — `tool` 3838, `step-start` 3011,
+ * `step-finish` 2962, `reasoning` 2460, `text` 1922, `patch` 599, `file`
+ * 86, `compaction` 5; OpenCode 1.18.13) surveyed in Einsia/agent-git's
+ * format probe (docs/mechanism-probing/opencode-format.md, MIT), and one
+ * real `opencode.db` imported locally (#154). Derived from the schema and
+ * checked against both; a database that disagrees names its unmapped parts
+ * in the import report rather than passing silently.
  */
 
 import { createHash } from "node:crypto";
@@ -203,6 +230,13 @@ function sessionIdFor(nativeId: string): string {
 
 function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** The marker a user-side attachment becomes (SPEC §5.3): its name and type, never its bytes. */
+function fileMarker(part: Rec): string {
+  const name = str(part.filename);
+  const mime = str(part.mime);
+  return `[file${name !== null ? `: ${name}` : ""}${mime !== null ? ` (${mime})` : ""}]`;
 }
 
 export const opencodeAdapter: Adapter = {
@@ -352,6 +386,8 @@ export const opencodeAdapter: Adapter = {
             if (p.data.synthetic === true) skip("text-part-synthetic");
             else if (p.data.ignored === true) skip("text-part-ignored");
             else texts.push(str(p.data.text) ?? "");
+          } else if (type === "file") {
+            texts.push(fileMarker(p.data));
           } else {
             skip(`part:${type ?? "(untyped)"}`);
           }
@@ -367,6 +403,10 @@ export const opencodeAdapter: Adapter = {
       }
 
       const model = str(m.data.modelID);
+      // The lossy summary a compaction wrote, as an assistant message of its
+      // own: the runtime's text, not a reply, and marked as such.
+      const compaction = str(m.data.mode) === "compaction" || m.data.summary === true;
+      if (compaction) native.compaction = true;
       const blocks: Json[] = [];
       const after: DraftEvent[] = [];
       let stepFinishes = 0;
@@ -436,6 +476,7 @@ export const opencodeAdapter: Adapter = {
               },
               native: {
                 messageId: m.id,
+                ...(compaction ? { compaction: true } : {}),
                 requestId: null,
                 partId: p.id,
                 reasoningTokens: num(tokens?.reasoning),
@@ -480,7 +521,12 @@ export const opencodeAdapter: Adapter = {
               cacheReadInputTokens: num(cache?.read),
               cacheCreationInputTokens: num(cache?.write),
             },
-            native: { messageId: m.id, requestId: null, reasoningTokens: num(tokens.reasoning) },
+            native: {
+              messageId: m.id,
+              ...(compaction ? { compaction: true } : {}),
+              requestId: null,
+              reasoningTokens: num(tokens.reasoning),
+            },
           },
         });
       }

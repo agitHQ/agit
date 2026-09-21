@@ -223,6 +223,12 @@ conn.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES
 conn.execute("INSERT INTO messages (session_id, role, content, timestamp, finish_reason) VALUES (?,?,?,?,?)", (SID2, "assistant", "pong", T0 + 3602.0, "stop"))
 # A third session with no messages: nothing to import, listed by nothing.
 conn.execute("INSERT INTO sessions (id, source, started_at) VALUES (?,?,?)", ("c0ffee00c0ffee00c0ffee00c0ffee00", "cli", T0 + 7200.0))
+# The second session was delegated by the first: Hermes marks that inside
+# model_config (`_delegate_from`) beside parent_session_id.
+conn.execute(
+    "UPDATE sessions SET parent_session_id = ?, model_config = ? WHERE id = ?",
+    ("a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60", '{"model": "claude-sonnet-5", "_delegate_from": "a3f9c2e1b7d04c5e8f6a1b2c3d4e5f60"}', "b7e1d0c9a8f74b3e9c2d1e0f6a5b4c3d"),
+)
 conn.commit()
 conn.close()
 print("wrote", path)

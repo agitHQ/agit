@@ -128,7 +128,7 @@ def user(sid, mid, t, text, extra_parts=()):
         rows_p.append((f"prt_{mid[4:]}_{i:02d}", mid, sid, t, t, json.dumps(p)))
 
 
-def assistant(sid, mid, parent, t, parts, tokens, finish="stop", completed=True):
+def assistant(sid, mid, parent, t, parts, tokens, finish="stop", completed=True, mode="build"):
     # A part row is created when the part is: a tool part at its start, a
     # step-finish after the step's last part, markers a beat after the
     # previous one. `completed` is stamped after the last part.
@@ -147,12 +147,14 @@ def assistant(sid, mid, parent, t, parts, tokens, finish="stop", completed=True)
     time = {"created": t, "completed": done} if completed else {"created": t}
     data = {
         "role": "assistant", "time": time, "parentID": parent,
-        "modelID": MODEL["modelID"], "providerID": MODEL["providerID"], "mode": "build", "agent": "build",
+        "modelID": MODEL["modelID"], "providerID": MODEL["providerID"], "mode": mode, "agent": mode,
         "path": {"cwd": "/home/dev/demo", "root": "/home/dev/demo"}, "cost": 0.0042 if completed else 0,
         "tokens": tokens,
     }
     if completed:
         data["finish"] = finish
+    if mode == "compaction":
+        data["summary"] = True  # the lossy summary a compaction wrote, as OpenCode marks it
     rows_m.append((mid, sid, t, done if completed else now, json.dumps(data)))
     rows_p.extend(stamped)
 
@@ -160,7 +162,11 @@ def assistant(sid, mid, parent, t, parts, tokens, finish="stop", completed=True)
 # --- session A: a read, an edit through a tool, a second turn ---------------
 A = "ses_fixtureaaaa0001"
 session(A, "Fix the parser test", T0)
-user(A, "msg_a000", T0 + 1000, "The parser test is failing, can you look?")
+user(
+    A, "msg_a000", T0 + 1000, "The parser test is failing, can you look?",
+    # an attachment: name, type and the bytes inline as a data: URL (kept tiny here)
+    extra_parts=[{"type": "file", "mime": "image/png", "filename": "failure.png", "url": "data:image/png;base64,iVBORw0KGgo="}],
+)
 assistant(
     A, "msg_a001", "msg_a000", T0 + 2000,
     [
@@ -202,6 +208,21 @@ assistant(
     [{"type": "text", "text": "It toggles verbose logging.", "time": {"start": T0 + 102100}}],
     {"input": 30, "output": 8, "reasoning": 0, "cache": {"read": 0, "write": 0}},
 )
+# A compaction, in the three rows OpenCode writes: the boundary (a user
+# message whose only part is `compaction`), the summary (an assistant message
+# in `compaction` mode), and the continuation it injects (a synthetic text).
+tb = T0 + 103000
+rows_m.append(("msg_b002", B, tb, tb, json.dumps({"role": "user", "time": {"created": tb}, "agent": "build", "model": MODEL, "summary": {"diffs": []}})))
+rows_p.append(("prt_b002_00", "msg_b002", B, tb, tb, json.dumps({"type": "compaction", "auto": True, "overflow": False, "tail_start_id": "msg_b003"})))
+assistant(
+    B, "msg_b003", "msg_b002", T0 + 104000,
+    [{"type": "text", "text": "## Objective\n- Explain the config flag.\n\n## Status\n- Answered: it toggles verbose logging.", "time": {"start": T0 + 104100}}],
+    {"input": 900, "output": 40, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+    mode="compaction",
+)
+tc = T0 + 105000
+rows_m.append(("msg_b004", B, tc, tc, json.dumps({"role": "user", "time": {"created": tc}, "agent": "build", "model": MODEL})))
+rows_p.append(("prt_b004_00", "msg_b004", B, tc, tc, json.dumps({"type": "text", "text": "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.", "synthetic": True, "metadata": {"compaction_continue": True}})))
 
 # --- session C (--live only): the last message is still streaming -----------
 if LIVE:
