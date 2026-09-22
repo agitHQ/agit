@@ -362,7 +362,9 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i]!;
     // `--flag=value` is the way to pass a value that itself looks like a flag,
-    // which `need` below otherwise refuses.
+    // which `need` below otherwise refuses. The split is only for matching a
+    // known flag: anything unrecognised goes on as `raw`, so a note, tag or
+    // grep pattern like `--retries=3` is not cut at its `=`.
     const eq = raw.startsWith("--") ? raw.indexOf("=") : -1;
     const a = eq === -1 ? raw : raw.slice(0, eq);
     const inline = eq === -1 ? undefined : raw.slice(eq + 1);
@@ -454,7 +456,7 @@ function parseArgs(argv: string[]): { verb: string; opts: Opts } {
     else if (a === "--atif") opts.atif = true;
     else if (a === "--markdown") opts.markdown = true;
     else if (a === "--help" || a === "-h") rest.unshift("help");
-    else rest.push(a);
+    else rest.push(raw);
   }
   const verb = rest.shift() ?? "help";
   opts.args = rest;
@@ -1495,8 +1497,15 @@ function cmdTag(opts: Opts): number {
   }
   const id = resolveSessionId(opts.dir, idArg);
   // `agit tag x --remove y` parses as args [x, --remove?]; keep it explicit.
-  const remove = opts.args.includes("--remove");
-  const value = remove ? opts.args[opts.args.indexOf("--remove") + 1] : tag;
+  // `--remove=y` arrives whole, like any argument the parser does not know, so
+  // read that spelling here too rather than adding a tag named `--remove=y`.
+  const at = opts.args.findIndex((a) => a === "--remove" || a.startsWith("--remove="));
+  const remove = at !== -1;
+  let value: string | undefined = tag;
+  if (remove) {
+    const arg = opts.args[at]!;
+    value = arg === "--remove" ? opts.args[at + 1] : arg.slice("--remove=".length);
+  }
   if (remove && !value) {
     console.error("usage: agit tag <id> --remove <tag>");
     return 2;
