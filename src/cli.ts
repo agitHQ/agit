@@ -30,7 +30,6 @@ import {
   SCHEMA_VERSION,
   SUPPORTED_SCHEMA_VERSIONS,
   type AgitEvent,
-  type AgitSignatureRecord,
   type SessionMeta,
 } from "./format/events.js";
 import { blameFile, sessionTrailer, whyLine, type LineOrigin } from "./blame.js";
@@ -54,7 +53,15 @@ import {
 } from "./redact.js";
 import { toAtif, toMarkdown, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
-import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
+import {
+  checkSignatures,
+  KeyError,
+  loadPrivateKey,
+  signatureEntries,
+  signHead,
+  SIGNATURE_PAYLOAD_VERSION,
+  verifySignature,
+} from "./sign.js";
 import { readSqliteWithWal, SqliteError } from "./sqlite.js";
 import { startRelay } from "./relay/relay.js";
 import {
@@ -2168,39 +2175,6 @@ function cmdSign(opts: Opts): number {
   return 0;
 }
 
-/**
- * One entry of meta.json's `signatures`: a record verifySignature can judge,
- * or a description of why it cannot be one.
- *
- * meta.json is third-party input once a bundle has been adopted (adoption
- * checks the chain, not the meta), and `signatures` used to be mapped as if
- * it were always an array of records. A bundle carrying `"signatures": {}`
- * or `[null]` adopted cleanly, then every verify and sign on that session
- * died with a bare TypeError, and with --json nothing reached stdout at all.
- * The chain verifier holds the line that a tampered input is reported by it
- * rather than crashing it; this gives the signature path the same bar.
- */
-type SignatureEntry = { record: AgitSignatureRecord } | { record: null; malformed: string };
-
-function signatureEntries(meta: SessionMeta | undefined): SignatureEntry[] {
-  const raw: unknown = meta?.signatures;
-  if (raw === undefined || raw === null) return [];
-  const kind = (x: unknown): string =>
-    x === null
-      ? "null"
-      : Array.isArray(x)
-        ? "an array"
-        : typeof x === "object"
-          ? "an object"
-          : `a ${typeof x}`;
-  if (!Array.isArray(raw)) return [{ record: null, malformed: `signatures is ${kind(raw)}, not an array` }];
-  return raw.map((s: unknown, i) =>
-    s !== null && typeof s === "object" && !Array.isArray(s)
-      ? { record: s as AgitSignatureRecord }
-      : { record: null, malformed: `signatures[${i}] is ${kind(s)}, not a signature record` },
-  );
-}
-
 /** Report every signature on a head, for `verify`. */
 function signatureLines(meta: SessionMeta | undefined, sessionId: string): string[] {
   const entries = signatureEntries(meta);
@@ -2254,19 +2228,7 @@ function cmdVerify(opts: Opts): number {
     headHash: meta?.headHash ?? "",
     eventCount: meta?.eventCount ?? 0,
   };
-  // A malformed entry is a failed signature with no fingerprint to report,
-  // not a crash: the verdict document still has to come out.
-  const sigs = signatureEntries(meta).map((e) =>
-    e.record === null
-      ? {
-          keyFingerprint: null,
-          at: null,
-          ok: false as const,
-          fingerprint: null,
-          reason: `malformed record, ${e.malformed}`,
-        }
-      : { keyFingerprint: e.record.keyFingerprint, at: e.record.at, ...verifySignature(e.record, head) },
-  );
+  const sigs = checkSignatures(meta, head);
   // A signature that does not match is a failure even when the chain is
   // intact: something claimed this head and the claim does not hold.
   const signaturesOk = sigs.every((s) => s.ok);
