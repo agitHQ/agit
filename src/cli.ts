@@ -802,6 +802,17 @@ function importNativeLog(
     }
   }
 
+  // A signature covers a head and an event count (SPEC §12), not the source
+  // file. The source's bytes change for reasons the chain never sees (a record
+  // the adapter skips, another session's rows in the same database), and a
+  // meta.json rebuilt from scratch used to drop every signature on a head that
+  // had not moved. They are kept while that head is still the one stored.
+  const headHash = events[events.length - 1]!.hash;
+  const signatures =
+    previous !== null && previous.headHash === headHash && previous.eventCount === events.length
+      ? previous.signatures
+      : undefined;
+
   const meta: SessionMeta = {
     agitSchema: SCHEMA_VERSION,
     sessionId: converted.sessionId,
@@ -834,7 +845,10 @@ function importNativeLog(
       allowRules: redactCfg.allowLiterals.size + redactCfg.allowRegexes.length,
     },
     eventCount: events.length,
-    headHash: events[events.length - 1]!.hash,
+    headHash,
+    // After the head, where `agit sign` puts them, so a re-import does not
+    // reorder a signed session's meta.json.
+    ...(signatures !== undefined ? { signatures } : {}),
   };
   writeSession(opts.dir, converted.sessionId, toJsonl(events), meta);
   known.set(key, { id: converted.sessionId, noRedact: opts.noRedact });
