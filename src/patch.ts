@@ -107,11 +107,15 @@ export function parseHunks(diff: string): Hunk[] {
   const rawLines = diff.split("\n");
   const hunks: Hunk[] = [];
   let current: Hunk | null = null;
+  let declaresNoLines = false;
   for (let i = 0; i < rawLines.length; i++) {
     const raw = rawLines[i]!;
-    const m = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(raw);
+    const m = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(raw);
     if (m) {
       current = { oldStart: Number(m[1]), lines: [] };
+      // An omitted count means one line, so only an explicit ",0" on both
+      // sides declares a hunk with nothing in it.
+      declaresNoLines = m[2] === "0" && m[3] === "0";
       hunks.push(current);
       continue;
     }
@@ -122,6 +126,13 @@ export function parseHunks(diff: string): Hunk[] {
     // value ("") but is not the last element, and must be kept: comparing by
     // value here (the previous bug) silently dropped every such line.
     if (raw === "" && i === rawLines.length - 1 && diff.endsWith("\n")) continue;
+    // The diff the adapters synthesize for an empty file is a "-0,0 +0,0"
+    // header followed by one blank line (the join of no lines), and logs
+    // already hold it under their hash chains. A hunk that declares no lines
+    // on either side cannot carry one, so that blank line is not context:
+    // read as context it could never apply, and fork and blame lost the
+    // file. Anything else in such a hunk is kept and applied as before.
+    if (raw === "" && declaresNoLines) continue;
     current.lines.push(raw);
   }
   if (hunks.length === 0) throw new PatchError("diff contains no hunks");
