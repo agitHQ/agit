@@ -176,25 +176,35 @@ function originalFileFor(events: AgitEvent[], toolUseId: string): string | null 
 }
 
 /**
- * Blame one path across every session given, in timestamp order.
+ * Blame one path across every session given, sessions interleaved by time.
  *
  * Sessions are folded in sequence: a later session's edits apply on top of an
  * earlier one's result, which is what a repository's own history looks like.
- * When a session's first edit does not fit what we hold, its chain for this
- * path is abandoned and the file is re-seeded from that event — attribution
- * before it stays, attribution after it belongs to the new chain.
+ * Inside one session, though, `seq` is the order (SPEC §2) and `ts` is only
+ * what the runtime's clock said: an edit stamped earlier than that session's
+ * previous edit to this path sorts with that edit, so a clock that steps back
+ * cannot replay a session's later edit before its earlier one. When a
+ * session's first edit does not fit what we hold, its chain for this path is
+ * abandoned and the file is re-seeded from that event: attribution before it
+ * stays, attribution after it belongs to the new chain.
  */
 export function blameFile(sessions: { id: string; events: AgitEvent[] }[], path: string): BlameResult {
-  const steps: { id: string; e: AgitEvent; p: DiffPayload }[] = [];
+  const steps: { id: string; e: AgitEvent; p: DiffPayload; clock: string }[] = [];
   for (const { id, events } of sessions) {
+    // The latest `ts` this session's steps have reached. It never goes back,
+    // so the session's own steps sort by seq; while its timestamps never go
+    // back either, it is just `ts`, and the order is the one blame always
+    // gave. Compared the way the sort compares, so the two cannot disagree.
+    let clock = "";
     for (const e of events) {
       if (e.type !== "file.diff" && e.type !== "file.delete") continue;
       const p = e.payload as DiffPayload;
       if (p.path !== path) continue;
-      steps.push({ id, e, p });
+      if (e.ts.localeCompare(clock) > 0) clock = e.ts;
+      steps.push({ id, e, p, clock });
     }
   }
-  steps.sort((a, b) => a.e.ts.localeCompare(b.e.ts) || a.e.seq - b.e.seq);
+  steps.sort((a, b) => a.clock.localeCompare(b.clock) || a.e.seq - b.e.seq);
 
   let file: CarriedFile = EMPTY_FILE;
   let verified = true;
