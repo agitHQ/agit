@@ -43,7 +43,10 @@ const PATTERNS: Pattern[] = [
     label: "slack-webhook",
     regexes: [/\bhttps:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9]+\/[A-Za-z0-9]+\/[A-Za-z0-9]+\b/g],
   },
-  { label: "google-api-key", regexes: [/AIza[0-9A-Za-z_-]{35}\b/g] },
+  // `-` is a key character in every position, the last included (SPEC §8).
+  // After a final `-`, \b needs a word character next, so a match may also end
+  // right after a `-`. \b still refuses a longer word-character run.
+  { label: "google-api-key", regexes: [/AIza[0-9A-Za-z_-]{35}(?:\b|(?<=-))/g] },
   { label: "stripe-key", regexes: [/(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}\b/g] },
   { label: "npm-token", regexes: [/npm_[A-Za-z0-9]{36}\b/g] },
   { label: "jwt", regexes: [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g] },
