@@ -55,7 +55,7 @@ import {
 import { toAtif, toMarkdown, toOtlpJson } from "./interop.js";
 import { serveMcp, setServerVersion } from "./mcp.js";
 import { KeyError, loadPrivateKey, signHead, SIGNATURE_PAYLOAD_VERSION, verifySignature } from "./sign.js";
-import { readSqliteWithWal, SqliteError } from "./sqlite.js";
+import { looksLikeSqlite, readSqliteWithWal, SqliteError } from "./sqlite.js";
 import { startRelay } from "./relay/relay.js";
 import {
   createShare,
@@ -1056,6 +1056,27 @@ function cmdImport(opts: Opts): number {
   return importPath(opts, resolve(src));
 }
 
+/** A binary file an adapter reads, as that adapter is handed it; `note` says what a WAL sidecar added. */
+interface OpenedDatabase {
+  adapter: Adapter;
+  bytes: Uint8Array;
+  note: string | null;
+}
+
+/**
+ * Recognize a binary file from the bytes SQLite would read, not the main
+ * file alone. A database put in WAL mode before its first table exists keeps
+ * only an empty page 1 in the main file until the first checkpoint, with
+ * every table in the sidecar, so the sidecar is folded in before any adapter
+ * is asked. Throws (SqliteError, from readSqliteWithWal) for a sidecar agit
+ * cannot read, since the main file alone cannot be trusted then.
+ */
+function openDatabase(path: string, main: Uint8Array): OpenedDatabase | undefined {
+  const db = looksLikeSqlite(main) ? readSqliteWithWal(path) : { bytes: main, note: null };
+  const adapter = ADAPTERS.find((a) => a.detectBytes?.(db.bytes));
+  return adapter === undefined ? undefined : { adapter, ...db };
+}
+
 /**
  * Which sessions of a binary file to import: the one named, else every one
  * the adapter lists, else (an adapter that cannot list) the file as a whole.
@@ -1174,19 +1195,18 @@ function importPath(opts: Opts, target: string): number {
   // tries to read it as UTF-8. Such a file may hold several sessions; every
   // one is imported unless --thread names one.
   const buf = readFileSync(path);
-  let bytes: Uint8Array = buf;
-  const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
-  if (binary !== undefined) {
-    // A database still open in WAL mode keeps its newest pages in a
-    // sidecar; fold them in the way SQLite would, or say why that failed.
-    try {
-      const withWal = readSqliteWithWal(path);
-      bytes = withWal.bytes;
-      if (withWal.note !== null) console.log(`  ${withWal.note}`);
-    } catch (err) {
-      console.error(err instanceof SqliteError ? err.message : String(err));
-      return 1;
-    }
+  // A database still open in WAL mode keeps its newest pages in a
+  // sidecar; fold them in the way SQLite would, or say why that failed.
+  let db: OpenedDatabase | undefined;
+  try {
+    db = openDatabase(path, buf);
+  } catch (err) {
+    console.error(err instanceof SqliteError ? err.message : String(err));
+    return 1;
+  }
+  if (db !== undefined) {
+    const { adapter: binary, bytes } = db;
+    if (db.note !== null) console.log(`  ${db.note}`);
     const redactCfg = redactionConfigFor(opts);
     if (redactCfg === null) return 2;
     let selections: (string | undefined)[];
@@ -1303,18 +1323,21 @@ function cmdImportDiscovered(opts: Opts): number {
   console.log("");
   for (const log of candidates) {
     const bytes = readFileSync(log.path);
-    const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
-    if (binary !== undefined) {
-      // A database holds sessions, not a session: one line each, as the
-      // path import prints them. Its WAL sidecar is folded in; one agit
-      // cannot read is a failure to name, not a file to read as if current.
+    // A database holds sessions, not a session: one line each, as the
+    // path import prints them. Its WAL sidecar is folded in; one agit
+    // cannot read is a failure to name, not a file to read as if current.
+    let db: OpenedDatabase | undefined;
+    try {
+      db = openDatabase(log.path, bytes);
+    } catch (err) {
+      tallyError(tally, log.path, err);
+      continue;
+    }
+    if (db !== undefined) {
+      if (db.note !== null) console.log(`  ${db.note}`);
       let selections: (string | undefined)[];
-      let dbBytes: Uint8Array;
       try {
-        const withWal = readSqliteWithWal(log.path);
-        dbBytes = withWal.bytes;
-        if (withWal.note !== null) console.log(`  ${withWal.note}`);
-        selections = sessionsToImport(binary, dbBytes, undefined);
+        selections = sessionsToImport(db.adapter, db.bytes, undefined);
       } catch (err) {
         tallyError(tally, log.path, err);
         continue;
@@ -1324,7 +1347,7 @@ function cmdImportDiscovered(opts: Opts): number {
           const outcome = importNativeLog(
             opts,
             log.path,
-            { kind: "bytes", bytes: dbBytes },
+            { kind: "bytes", bytes: db.bytes },
             known,
             redactCfg,
             undefined,
@@ -3472,21 +3495,21 @@ async function cmdShare(opts: Opts): Promise<number> {
   if (existsSync(resolve(target)) && !listSessionIds(opts.dir).includes(target)) {
     nativePath = resolve(target);
     if (statSync(nativePath).isFile()) {
-      const binary = ADAPTERS.find((a) => a.detectBytes?.(readFileSync(nativePath!)));
-      if (binary !== undefined) {
-        try {
-          const { bytes } = readSqliteWithWal(nativePath);
-          const selections = sessionsToImport(binary, bytes, opts.thread);
+      const main = readFileSync(nativePath);
+      try {
+        const db = openDatabase(nativePath, main);
+        if (db !== undefined) {
+          const selections = sessionsToImport(db.adapter, db.bytes, opts.thread);
           if (selections.length > 1) {
             throw new Error(
               `this database holds ${selections.length} sessions; pass --thread <id> to share one: ${selections.join(", ")}`,
             );
           }
           shareSelect = selections[0];
-        } catch (err) {
-          console.error(err instanceof Error ? err.message : String(err));
-          return 2;
         }
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return 2;
       }
     }
   } else {
@@ -3986,10 +4009,14 @@ async function liveLoop(
   return 0;
 }
 
-/** The adapter for a native file: a database is recognized from its bytes first, a log from its lines. */
+/**
+ * The adapter for a native file: a database is recognized from its bytes
+ * first (as SQLite reads them, so it throws for a WAL sidecar agit cannot
+ * read), a log from its lines.
+ */
 function pickAdapterFor(path: string): Adapter | undefined {
   const bytes = readFileSync(path);
-  const binary = ADAPTERS.find((a) => a.detectBytes?.(bytes));
+  const binary = openDatabase(path, bytes)?.adapter;
   if (binary !== undefined) return binary;
   const lines = bytes
     .toString("utf8")
