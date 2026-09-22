@@ -57,6 +57,15 @@
  * millisecond UTC. Derived from the source above and validated against a
  * fixture built to it; a real wire log that disagrees names its unmapped
  * messages in the import report.
+ *
+ * **A live share holds the open step back.** Under `ConvertOptions.live`
+ * the step still open where the file ends is not emitted, and is counted:
+ * its text and thinking can still grow, a call can still gain argument
+ * parts, and the `StatusUpdate` with its usage and `message_id` comes
+ * after them, so anything emitted for it now could change on the next
+ * read. The next `StepBegin`, `TurnBegin` / `SteerInput`, `ToolResult`,
+ * `TurnEnd`, `StepInterrupted` or `StepRetry` closes it, and it streams
+ * whole.
  */
 
 import { createHash } from "node:crypto";
@@ -398,7 +407,10 @@ export const kimiCodeAdapter: Adapter = {
           skip(`message-type:${r.type}`);
       }
     }
-    closeStep();
+    // The step still open here depends on where the file currently ends:
+    // live, it waits for the record that closes it (see the header).
+    if (!opts?.live) closeStep();
+    else if (step !== null) skip("live-open-step-held");
     if (inherited > 0) skip("timestamp-inherited", inherited);
 
     if (!opts?.live) {

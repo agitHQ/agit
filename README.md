@@ -371,7 +371,7 @@ earlier verified edit, a complete read, or `--base`).
 | Cline 3.x / Roo Code | `<globalStorage>/tasks/<id>/` | none (`<final_file_content>` is normalized text) | yes | no | source at v3.89.2 / v3.20 + v3.54 |
 | LangGraph | `checkpoints.sqlite` | none | yes | no | its checkpoint schema |
 | Gemini CLI | `~/.gemini/tmp/<p>/chats/session-*.jsonl` | none | yes (last message held until settled) | yes (AfterAgent / BeforeAgent hooks; source-derived) | source |
-| Kimi Code | `~/.kimi/sessions/*/*/wire.jsonl` | none | yes | no | docs + source |
+| Kimi Code | `~/.kimi/sessions/*/*/wire.jsonl` | none | yes (a step held until it closes) | no | docs + source |
 | Cursor | `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl` | none (no tool results, no prior content recorded) | yes | no | observed transcripts (104, Cursor IDE 3.13.25; the MIT-published probe in Einsia/agent-git) |
 | OpenCode | `~/.local/share/opencode/opencode.db` | none | yes (a streaming message held until complete) | yes (a plugin: `session.idle` / `chat.message`; source-derived) | its schema + plugin source |
 | pi | `~/.pi/agent/sessions/--<cwd>--/*.jsonl` | `write` verified; `edit` within the window; complete reads seed `fork` | yes | yes (an extension; source-derived) | docs + source |
@@ -559,9 +559,12 @@ Said plainly:
   Interrupted and retried steps, notifications, approvals and every other
   wire message agit has no event for are counted by name, as is a diff
   display block — a viewer's excerpt of an edit, not the file — so there
-  is no `file.diff`. Derived from the source and checked against a fixture
-  built to it; a real wire log that disagrees names its unmapped messages
-  in the import report.
+  is no `file.diff`. A live share holds the step still streaming back
+  until the next step, turn, tool result, interruption or retry closes it,
+  since its text, its calls' arguments and its usage are still landing.
+  Derived from the source and checked against a fixture built to it; a
+  real wire log that disagrees names its unmapped messages in the import
+  report.
 - **A pi import verifies writes outright and edits within a window.**
   `agit import ~/.pi/agent/sessions/<project>/<session>.jsonl` reads the
   format `session-format.md` documents: a header, then a tree of entries

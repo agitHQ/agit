@@ -6,15 +6,18 @@
  * are what folding that stream the way Kimi's own replay does yields.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { kimiCodeAdapter } from "../src/adapters/kimi-code.js";
 import { discoverSessionLogs } from "../src/discover.js";
+import { canonicalJson } from "../src/format/canonical.js";
 import type { Json } from "../src/format/events.js";
 import { buildChain, toJsonl } from "../src/format/hash.js";
+import { redactDeep, type RedactionCounts } from "../src/redact.js";
+import { SessionFollower } from "../src/share.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI = join(ROOT, "dist", "cli.js");
@@ -174,6 +177,193 @@ describe("the Kimi Code adapter", () => {
     const a = kimiCodeAdapter.convert(lines, { path: WIRE });
     const b = kimiCodeAdapter.convert(lines, { path: WIRE });
     expect(toJsonl(buildChain(a.sessionId, a.drafts))).toBe(toJsonl(buildChain(b.sessionId, b.drafts)));
+  });
+});
+
+const rec = (timestamp: number, type: string, payload: Json): string =>
+  JSON.stringify({ timestamp, message: { type, payload } });
+const META = JSON.stringify({ type: "metadata", protocol_version: "1.10" });
+
+/** The live read of the first k records, canonical; [] while there is nothing convertible yet. */
+function liveOf(lines: string[], k: number): string[] {
+  try {
+    return kimiCodeAdapter
+      .convert(lines.slice(0, k), { live: true, path: WIRE })
+      .drafts.map((d) => canonicalJson(d));
+  } catch {
+    return []; // metadata only: no timestamp yet
+  }
+}
+
+/** Asserts every longer live read extends every shorter one; returns the last. */
+function expectPrefixStable(lines: string[]): string[] {
+  let prev: string[] = [];
+  for (let k = 1; k <= lines.length; k++) {
+    const now = liveOf(lines, k);
+    expect(now.slice(0, prev.length), `after record ${k}`).toEqual(prev);
+    prev = now;
+  }
+  return prev;
+}
+
+describe("a live share of a Kimi Code session", () => {
+  it("every longer live read of the wire extends the shorter one, and an import of the same bytes extends it too", () => {
+    const lines = linesOf(WIRE);
+    const last = expectPrefixStable(lines);
+    // At every length, what live mode streamed is the head of what an
+    // import of the same bytes stores: the hold only ever drops a tail.
+    for (let k = 2; k <= lines.length; k++) {
+      const live = liveOf(lines, k);
+      const full = kimiCodeAdapter
+        .convert(lines.slice(0, k), { path: WIRE })
+        .drafts.map((d) => canonicalJson(d));
+      expect(full.slice(0, live.length), `after record ${k}`).toEqual(live);
+    }
+    // The fixture ends on a TurnEnd, so nothing is left open: the import
+    // adds only its synthesized end.
+    const full = kimiCodeAdapter.convert(lines, { path: WIRE }).drafts;
+    expect(full.length).toBe(last.length + 1);
+    expect(full[full.length - 1]!.type).toBe("session.end");
+  });
+
+  it("stays prefix-stable over records written whole, where the text and the message id land after the step's first record", () => {
+    // One ThinkPart, one TextPart and one ToolCall with its whole arguments
+    // per step: a step that thinks before it speaks, then a text-only step
+    // whose StatusUpdate (usage and message id) comes after its text.
+    const lines = [
+      META,
+      rec(1775030400.0, "TurnBegin", { user_input: "What does the Makefile build?" }),
+      rec(1775030400.1, "StepBegin", { n: 1 }),
+      rec(1775030400.5, "ThinkPart", {
+        type: "think",
+        think: "I should read the Makefile first.",
+        encrypted: null,
+      }),
+      rec(1775030400.8, "TextPart", { type: "text", text: "Let me look at the Makefile." }),
+      rec(1775030401.0, "ToolCall", {
+        type: "function",
+        id: "call_read_1",
+        function: { name: "ReadFile", arguments: '{"path": "Makefile"}' },
+        extras: null,
+      }),
+      rec(1775030401.2, "StatusUpdate", {
+        token_usage: { input_other: 1500, output: 42, input_cache_read: 300, input_cache_creation: 0 },
+        message_id: "cmpl_a1",
+      }),
+      rec(1775030401.5, "ToolResult", {
+        tool_call_id: "call_read_1",
+        return_value: { is_error: false, output: "all: build\n", message: "", display: [], extras: null },
+      }),
+      rec(1775030401.6, "StepBegin", { n: 2 }),
+      rec(1775030402.0, "TextPart", { type: "text", text: "It builds every Go package." }),
+      rec(1775030402.2, "StatusUpdate", {
+        token_usage: { input_other: 1600, output: 18, input_cache_read: 1500, input_cache_creation: 0 },
+        message_id: "cmpl_a2",
+      }),
+      rec(1775030402.3, "TurnEnd", {}),
+    ];
+    expectPrefixStable(lines);
+
+    // What streams is each step in its final form, not its first record.
+    const live = kimiCodeAdapter.convert(lines, { live: true, path: WIRE }).drafts;
+    const [a1, a2] = payloads(live, "message.assistant");
+    expect(a1!.blocks).toEqual([
+      { type: "thinking", text: "I should read the Makefile first." },
+      { type: "text", text: "Let me look at the Makefile." },
+    ]);
+    expect(a1!.native).toEqual({ messageId: "cmpl_a1" });
+    expect(payloads(live, "tool.call")[0]!.native).toEqual({ messageId: "cmpl_a1" });
+    expect(a2!.native).toEqual({ messageId: "cmpl_a2" });
+  });
+
+  it("holds the open step until a record closes it, and each record that closes one releases it whole", () => {
+    const open = [
+      META,
+      rec(1775030400.0, "TurnBegin", { user_input: "What does the Makefile build?" }),
+      rec(1775030400.1, "StepBegin", { n: 1 }),
+      rec(1775030400.8, "TextPart", { type: "text", text: "Let me look at the Makefile." }),
+      rec(1775030401.0, "ToolCall", {
+        type: "function",
+        id: "call_read_1",
+        function: { name: "ReadFile", arguments: '{"path": "Makefile"}' },
+        extras: null,
+      }),
+    ];
+    const held = kimiCodeAdapter.convert(open, { live: true, path: WIRE });
+    expect(held.drafts.map((d) => d.type)).toEqual(["session.start", "message.user"]);
+    expect(held.skipped["live-open-step-held"]).toBe(1);
+    // Not live, the same bytes emit the step: an import is unchanged.
+    const imported = kimiCodeAdapter.convert(open, { path: WIRE });
+    expect(imported.drafts.map((d) => d.type)).toEqual([
+      "session.start",
+      "message.user",
+      "message.assistant",
+      "tool.call",
+      "session.end",
+    ]);
+    expect(imported.skipped["live-open-step-held"]).toBeUndefined();
+
+    const closers: [string, Json][] = [
+      ["StepBegin", { n: 2 }],
+      ["TurnBegin", { user_input: "Add a test target." }],
+      ["SteerInput", { user_input: "and run it" }],
+      [
+        "ToolResult",
+        {
+          tool_call_id: "call_read_1",
+          return_value: { is_error: false, output: "all: build\n", message: "", display: [], extras: null },
+        },
+      ],
+      ["TurnEnd", {}],
+      ["StepInterrupted", {}], // the adapter reads only the type
+      [
+        "StepRetry",
+        {
+          n: 1,
+          next_attempt: 2,
+          max_attempts: 3,
+          wait_s: 1.0,
+          error_type: "APIConnectionError",
+          status_code: null,
+        },
+      ],
+    ];
+    for (const [type, payload] of closers) {
+      const lines = [...open, rec(1775030401.5, type, payload)];
+      const live = kimiCodeAdapter.convert(lines, { live: true, path: WIRE }).drafts;
+      const full = kimiCodeAdapter.convert(lines, { path: WIRE }).drafts;
+      const released = live.slice(2, 4).map((d) => d.type);
+      expect(released, type).toEqual(["message.assistant", "tool.call"]);
+      // Released as an import of the same bytes has it, less the end.
+      expect(live, type).toEqual(full.slice(0, -1));
+    }
+
+    // A turn that ended leaves nothing open, so nothing is counted as held.
+    const ended = kimiCodeAdapter.convert([...open, rec(1775030401.5, "TurnEnd", {})], {
+      live: true,
+      path: WIRE,
+    });
+    expect(ended.skipped["live-open-step-held"]).toBeUndefined();
+  });
+
+  it("is followed through the whole wire without a rewrite, and the finished stream is the import", () => {
+    const lines = linesOf(WIRE);
+    const dir = join(mktemp(), SID);
+    mkdirSync(dir);
+    const path = join(dir, "wire.jsonl");
+    writeFileSync(path, lines[0] + "\n", "utf8");
+    const follower = new SessionFollower(path, kimiCodeAdapter);
+    const streamed = [...follower.poll()];
+    for (const line of lines.slice(1)) {
+      appendFileSync(path, line + "\n", "utf8");
+      streamed.push(...follower.poll()); // throws StabilityError on a rewrite
+    }
+    streamed.push(...follower.finish());
+
+    const full = kimiCodeAdapter.convert(lines, { path });
+    const counts: RedactionCounts = {};
+    for (const d of full.drafts) d.payload = redactDeep(d.payload, counts);
+    expect(toJsonl(streamed)).toBe(toJsonl(buildChain(full.sessionId, full.drafts)));
   });
 });
 
