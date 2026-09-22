@@ -759,16 +759,26 @@ function importNativeLog(
   // undid the one thing an allowlist exists to do, so a documented example key
   // survived the pass that honoured the config and was rewritten by the pass
   // that did not.
+  //
+  // The payloads as the adapter produced them are kept for one comparison
+  // below, against a stored copy that was made in the other mode.
+  const unredacted = converted.drafts.map((d) => d.payload);
   for (const d of converted.drafts) d.payload = redactDeep(d.payload, redactions, redactCfg);
   const events = buildChain(converted.sessionId, converted.drafts);
   // Same id already stored means the source grew (a resumed session) or changed.
-  const previous = listSessionIds(opts.dir).includes(converted.sessionId)
-    ? readSessionMeta(opts.dir, converted.sessionId)
-    : null;
+  // Asked of the store, not of meta.json: a session adopted from a pull or a
+  // bare events.jsonl has no meta.json, and an adopted one need not record a
+  // source, so the meta is only what the report can say about it.
+  const exists = listSessionIds(opts.dir).includes(converted.sessionId);
+  const previous = exists ? readSessionMeta(opts.dir, converted.sessionId) : null;
+  let previousEvents = previous?.eventCount;
   // Same bytes, different mode: the user is switching redaction on or off,
   // which is the one case where "updated N -> N events" would read as a
   // no-op when it is in fact a full rewrite of the stored payloads.
   const modeChanged = previous !== null && (previous.redaction?.enabled === false) !== opts.noRedact;
+  const sameSource =
+    previous?.source?.sha256 !== undefined &&
+    sourceKey(previous.source.sha256, previous.source.select) === key;
 
   // The store's copy is replaced only by a chain that extends it. Claude
   // Code writes a session resumed from another directory to a new file under
@@ -776,14 +786,32 @@ function importNativeLog(
   // state, which used to shrink the stored history when `import --all` met
   // it second. A file that is a prefix of the store's chain is superseded by
   // what is already there; one that shares an id but not a history is a
-  // conflict, named and left alone. Switching redaction on or off is the
-  // one rewrite that is asked for, and passes.
-  if (previous !== null && !modeChanged) {
+  // conflict, named and left alone. Switching redaction on or off for the
+  // file the store was imported from is the one rewrite that is asked for,
+  // and passes; a different file with the flag flipped still has to extend
+  // the stored history, or the flag would be a way past this check.
+  if (exists && !(modeChanged && sameSource)) {
+    const stored = readSessionEvents(opts.dir, converted.sessionId);
+    previousEvents ??= stored.length;
+    // Under a mode switch the two differ wherever redaction matched, so a
+    // file other than the stored copy's own is chained the way that copy was
+    // made: unredacted, or through the built-in patterns. A project's own
+    // config is not recorded in meta.json, so a copy redacted under one can
+    // read as diverged here; that refuses, it never overwrites.
+    const asStored = modeChanged
+      ? buildChain(
+          converted.sessionId,
+          converted.drafts.map((d, i) => ({
+            ...d,
+            payload: opts.noRedact ? redactDeep(unredacted[i]!, {}, builtinConfig()) : unredacted[i]!,
+          })),
+        )
+      : events;
     // Compared without the tail an import synthesizes from where the file
     // ended — the session.end, and a cost flushed at EOF — since a log that
     // grew always differs there and is exactly the case that must update.
-    const storedCore = importBody(readSessionEvents(opts.dir, converted.sessionId));
-    const newCore = importBody(events);
+    const storedCore = importBody(stored);
+    const newCore = importBody(asStored);
     const shorter = Math.min(storedCore.length, newCore.length);
     let common = 0;
     while (common < shorter && storedCore[common]!.hash === newCore[common]!.hash) common++;
@@ -793,8 +821,8 @@ function importNativeLog(
         id: converted.sessionId,
         adapter,
         events: events.length,
-        previousEvents: previous.eventCount,
-        previousPath: previous.source.path,
+        previousEvents,
+        previousPath: previous?.source?.path ?? "an adopted log with no recorded source",
         records: converted.records,
         skipped: converted.skipped,
         redactions,
@@ -839,12 +867,12 @@ function importNativeLog(
   writeSession(opts.dir, converted.sessionId, toJsonl(events), meta);
   known.set(key, { id: converted.sessionId, noRedact: opts.noRedact });
   return {
-    status: previous ? "updated" : "imported",
+    status: exists ? "updated" : "imported",
     id: converted.sessionId,
     modeChanged,
     adapter,
     events: events.length,
-    previousEvents: previous?.eventCount,
+    previousEvents,
     records: converted.records,
     skipped: converted.skipped,
     redactions,
