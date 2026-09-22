@@ -2522,7 +2522,11 @@ function cmdMerge(opts: Opts): number {
   });
 
   console.log(`merging fork of ${info.sourceSession} (at event ${info.atSeq}) into ${intoDir}`);
-  for (const r of results) console.log(`  ${r.outcome.padEnd(18)} ${r.rel}`);
+  for (const r of results) {
+    console.log(
+      `  ${r.outcome.padEnd(18)} ${r.rel}${r.binary ? "  (binary: no markers, target's copy kept)" : ""}`,
+    );
+  }
   if (deleted > 0) {
     console.log(
       `${deleted} file${deleted === 1 ? "" : "s"} deleted, as ${opts.session} recorded after the fork point.`,
@@ -2542,7 +2546,7 @@ function cmdMerge(opts: Opts): number {
   }
   console.log(
     conflicts > 0
-      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the files, and files the fork deleted but the target had changed were left in place; finish by hand.`
+      ? `${conflicts} conflict${conflicts === 1 ? "" : "s"} — standard markers are in the text files; binary files, and files the fork deleted but the target had changed, were left in place; finish by hand.`
       : "clean: no conflicts.",
   );
   console.log(`recorded in ${join(forkDir, "merge.json")}`);

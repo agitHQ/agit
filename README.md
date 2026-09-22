@@ -177,9 +177,10 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 - **`agit merge <fork-dir>` — bring a fork's files back: ordinary git
   three-way merge per file with the fork point as base (`git merge-file`
   does the merging). Trivial cases fast-forward, real conflicts get
-  standard markers and a nonzero exit, and the merge — outcomes plus your
-  `--summary` of what the fork learned — is recorded in the fork's
-  `merge.json`. Not a merge of two minds; file-level, as promised.
+  standard markers (a binary file keeps the target's copy, unmarked) and a
+  nonzero exit, and the merge — outcomes plus your `--summary` of what the
+  fork learned — is recorded in the fork's `merge.json`. Not a merge of two
+  minds; file-level, as promised.
 - **`agit pr <id>`** — hand a session to a colleague as a directory: the
   full event log, `meta.json`, the reconstructed hash-verified tree,
   `SEED.md` context, and provenance. They run `agit import` on the
@@ -464,13 +465,15 @@ Said plainly:
   built-in three-way merge otherwise (`--no-git` forces the built-in one);
   git is preferred because its results are what everyone's expectations are
   calibrated against, and the two are pinned to each other by differential
-  tests. A file simply absent from a fork tree counts as untouched rather
-  than deleted, because the tree records only what the log could reconstruct
-  — but `agit merge --session <id>` reads the fork's own imported session and
-  honours the `file.delete` events it recorded after the fork point, deleting
-  only where the removed content matches both the fork point and what the
-  target holds today. Fork and `pr` context seeding is a summary by design;
-  you cannot inject history into a running agent.
+  tests. A binary file changed on both sides is a conflict with no markers:
+  the target keeps its copy, as git leaves it. A file simply absent from a
+  fork tree counts as untouched rather than deleted, because the tree
+  records only what the log could reconstruct — but
+  `agit merge --session <id>` reads the fork's own imported session and
+  honours the `file.delete` events it recorded after the fork point,
+  deleting only where the removed content matches both the fork point and
+  what the target holds today. Fork and `pr` context seeding is a summary
+  by design; you cannot inject history into a running agent.
 - **An ATIF import has no file history.** `agit import <trajectory.json>`
   reads Harbor's Agent Trajectory Interchange Format, so anything emitting
   ATIF can be verified, replayed, searched and shared. But ATIF has no

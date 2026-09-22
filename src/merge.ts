@@ -11,8 +11,9 @@
  *
  * Trivial cases resolve without git (unchanged / only-one-side-changed);
  * real three-way content merges shell out to `git merge-file`, the canonical
- * implementation. Conflicts leave standard markers in the target file and
- * are reported, never hidden.
+ * implementation. Conflicts leave standard markers in the target file (a
+ * binary file is left as the target had it, as git does) and are reported,
+ * never hidden.
  *
  * Absence from the fork tree still means "untouched", never "deleted" — the
  * tree only records what the log could reconstruct. A deletion is only ever
@@ -50,13 +51,15 @@ export type MergeOutcome =
   | "identical" // ours == fork (both changed the same way)
   | "added" // new in the fork, absent in target: copied in
   | "clean-merge" // three-way merge succeeded
-  | "conflict" // markers written, human finishes the job
+  | "conflict" // markers written (binary: target left as is), human finishes the job
   | "deleted" // the fork's session deleted it and the target had not moved on
   | "kept-ours-deleted"; // the fork deleted it, but the target changed it since
 
 export interface MergeFileResult {
   rel: string;
   outcome: MergeOutcome;
+  /** On a conflict: the file is binary, so no markers were written and the target's copy stands. */
+  binary?: true;
 }
 
 export interface ForkInfo {
@@ -137,6 +140,15 @@ function deletionsAfter(forkEvents: AgitEvent[], atSeq: number, cwd: string | nu
     }
   }
   return out;
+}
+
+/**
+ * git's own test for a binary file: a NUL byte in the first 8000 bytes.
+ * `git merge-file` refuses such a file outright, so the same cut-off decides
+ * for both engines.
+ */
+function looksBinary(bytes: Buffer): boolean {
+  return bytes.subarray(0, 8000).includes(0);
 }
 
 export function mergeFork(opts: {
@@ -223,28 +235,53 @@ export function mergeFork(opts: {
     if (removed.has(rel)) continue; // just deleted; do not re-add it from the tree
     const target = resolve(intoRoot, rel);
     if (!target.startsWith(intoRoot + sep)) throw new Error(`refusing path escape: ${rel}`);
-    const theirs = readFileSync(join(treeRoot, rel), "utf8");
-    const baseContent = base.get(rel) ?? null;
-    const ours = existsSync(target) ? readFileSync(target, "utf8") : null;
+    // Bytes, not text: the tree and the target hold whatever the agent and
+    // the people around it wrote, images and Latin-1 files included, and a
+    // UTF-8 round trip turns every invalid byte into U+FFFD.
+    const theirs = readFileSync(join(treeRoot, rel));
+    const baseText = base.get(rel);
+    const baseContent = baseText === undefined ? null : Buffer.from(baseText, "utf8");
+    const ours = existsSync(target) ? readFileSync(target) : null;
 
     let outcome: MergeOutcome;
-    if (baseContent !== null && theirs === baseContent) {
+    if (baseContent !== null && theirs.equals(baseContent)) {
       // The fork never touched this file. Whatever the target did — kept it,
       // changed it, even deleted it — stands.
-      outcome = ours === null || ours === baseContent ? "unchanged" : "kept-ours";
+      outcome = ours === null || ours.equals(baseContent) ? "unchanged" : "kept-ours";
     } else if (ours === null) {
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, theirs, "utf8");
+      writeFileSync(target, theirs);
       outcome = "added";
-    } else if (ours === theirs) {
+    } else if (ours.equals(theirs)) {
       outcome = "identical";
-    } else if (baseContent !== null && ours === baseContent) {
-      writeFileSync(target, theirs, "utf8");
+    } else if (baseContent !== null && ours.equals(baseContent)) {
+      writeFileSync(target, theirs);
       outcome = "took-fork";
+    } else if (
+      looksBinary(ours) ||
+      looksBinary(theirs) ||
+      (baseContent !== null && looksBinary(baseContent))
+    ) {
+      // Neither engine can merge this: git refuses it, which used to abort
+      // the whole merge partway, and the built-in merge would write text
+      // markers into it. Do what git does with a binary conflict: leave the
+      // target's copy alone and report it.
+      results.push({ rel, outcome: "conflict", binary: true });
+      conflicts++;
+      continue;
     } else {
-      const merged = mergeFileContents(baseContent ?? "", ours, theirs, { noGit: opts.noGit });
+      // latin1 maps each byte to one character and back, so either engine
+      // merges the files' exact bytes whatever their encoding. Both split
+      // lines on "\n", which never occurs inside a multi-byte UTF-8
+      // sequence, so UTF-8 text merges exactly as it would decoded.
+      const merged = mergeFileContents(
+        (baseContent ?? Buffer.alloc(0)).toString("latin1"),
+        ours.toString("latin1"),
+        theirs.toString("latin1"),
+        { noGit: opts.noGit, encoding: "latin1" },
+      );
       enginesUsed.add(merged.engine);
-      writeFileSync(target, merged.content, "utf8");
+      writeFileSync(target, merged.content, "latin1");
       outcome = merged.clean ? "clean-merge" : "conflict";
       if (!merged.clean) conflicts++;
     }
@@ -298,16 +335,20 @@ export interface MergeEngineResult {
  * on PATH turns `agit merge` into a hard failure at the last step of a
  * handoff. `noGit` forces the fallback, which is also how its behaviour is
  * tested against git's on the same inputs.
+ *
+ * `encoding` is how the strings map to the bytes git sees. mergeFork passes
+ * latin1 strings, one character per byte, so a file's bytes pass through
+ * untouched; the built-in merge works on the strings either way.
  */
 export function mergeFileContents(
   base: string,
   ours: string,
   theirs: string,
-  opts: { noGit?: boolean } = {},
+  opts: { noGit?: boolean; encoding?: BufferEncoding } = {},
 ): MergeEngineResult {
   if (!opts.noGit) {
     try {
-      return { ...gitMergeFile(base, ours, theirs), engine: "git" };
+      return { ...gitMergeFile(base, ours, theirs, opts.encoding), engine: "git" };
     } catch (err) {
       if (!(err instanceof GitNotFound)) throw err;
     }
@@ -321,15 +362,16 @@ export function gitMergeFile(
   base: string,
   ours: string,
   theirs: string,
+  encoding: BufferEncoding = "utf8",
 ): { content: string; clean: boolean } {
   const dir = mkdtempSync(join(tmpdir(), "agit-merge-"));
   try {
     const b = join(dir, "base");
     const o = join(dir, "ours");
     const t = join(dir, "fork");
-    writeFileSync(b, base, "utf8");
-    writeFileSync(o, ours, "utf8");
-    writeFileSync(t, theirs, "utf8");
+    writeFileSync(b, base, encoding);
+    writeFileSync(o, ours, encoding);
+    writeFileSync(t, theirs, encoding);
     // No -p: git merge-file writes the result into its first argument. Piping
     // it through stdout instead ran into execFileSync's 1 MB maxBuffer, so any
     // file whose merged form crossed that died with a bare `spawnSync git
@@ -339,14 +381,14 @@ export function gitMergeFile(
       execFileSync("git", ["merge-file", "-L", "ours", "-L", "base", "-L", "fork", o, b, t], {
         stdio: ["ignore", "ignore", "pipe"],
       });
-      return { content: readFileSync(o, "utf8"), clean: true };
+      return { content: readFileSync(o, encoding), clean: true };
     } catch (err) {
       const e = err as { status?: number | null; code?: string };
       if (e.code === "ENOENT") throw new GitNotFound();
       // git merge-file exits with the number of conflicts; the file it wrote
       // holds the merged content with markers.
       if (typeof e.status === "number" && e.status > 0 && e.status < 128) {
-        return { content: readFileSync(o, "utf8"), clean: false };
+        return { content: readFileSync(o, encoding), clean: false };
       }
       throw err;
     }
