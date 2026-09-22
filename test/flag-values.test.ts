@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -112,6 +112,82 @@ describe("--flag=value", () => {
     const set = agit(["note", "demo", "a=b=c", "--dir", store]);
     expect(set.code).toBe(0);
     expect(agit(["note", "demo", "--dir", store]).out).toContain("a=b=c");
+  });
+});
+
+describe("an unrecognised --x=y reaches the verb as typed", () => {
+  // The split at = exists to fill in a known flag's value. An unknown one used
+  // to go on as only its `--x` half, exit 0.
+
+  it("keeps a note that starts with --x=y whole", () => {
+    expect(agit(["note", "demo", "--retries=3 fixed the flake", "--dir", store]).code).toBe(0);
+    expect(agit(["note", "demo", "--dir", store]).out.trim()).toBe("--retries=3 fixed the flake");
+  });
+
+  it("keeps a tag shaped like --x=y whole, beside a recognised --dir=", () => {
+    const r = agit(["tag", "demo", "--env=prod", `--dir=${store}`]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("--env=prod");
+    expect(agit(["ls", "--tag=--env=prod", `--dir=${store}`]).out).toContain("demo");
+  });
+
+  it("does not turn a grep for --x=4096 into a grep for --x", () => {
+    // The shape a script trips on: the cut pattern matched a line holding
+    // `=8192`, so a check for 4096 reported a hit and exited 0.
+    // The log lives in its own temp dir, apart from the store it is imported
+    // into, so the source file cannot interact with the store layout.
+    const src = mkdtempSync(join(tmpdir(), "agit-flags-grep-src-"));
+    const dir = mkdtempSync(join(tmpdir(), "agit-flags-grep-"));
+    const log = join(src, "probe.jsonl");
+    writeFileSync(
+      log,
+      JSON.stringify({
+        type: "user",
+        uuid: "u1",
+        sessionId: "grep-probe-0001",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        version: "2.1.0",
+        cwd: "/w",
+        message: { role: "user", content: "run node --max-old-space-size=8192 build.js" },
+      }) + "\n",
+      "utf8",
+    );
+    expect(agit(["import", log, "--dir", dir]).code).toBe(0);
+
+    const miss = agit(["grep", "--max-old-space-size=4096", "--dir", dir]);
+    expect(miss.code).toBe(1);
+    expect(miss.out).not.toContain("build.js");
+    const hit = agit(["grep", "--max-old-space-size=8192", "--dir", dir]);
+    expect(hit.code).toBe(0);
+    expect(hit.out).toContain("build.js");
+  });
+
+  it("removes a tag given as --remove=<tag>", () => {
+    // With the argument whole, `tag` has to read this form itself, or
+    // `--remove=wip` would stop being a usage error and add a tag by that name.
+    expect(agit(["tag", "demo", "wip", "--dir", store]).code).toBe(0);
+    const r = agit(["tag", "demo", "--remove=wip", "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("wip");
+  });
+
+  it("removes a tag that itself starts with --, in either spelling", () => {
+    expect(agit(["tag", "demo", "--stage=beta", "--dir", store]).code).toBe(0);
+    const r = agit(["tag", "demo", "--remove=--stage=beta", "--dir", store]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("--stage");
+    // `--remove <tag>` reads the next argument as it stands, so it has always
+    // taken a tag that starts with --. That has to stay true.
+    expect(agit(["tag", "demo", "--stage=rc", "--dir", store]).code).toBe(0);
+    const spaced = agit(["tag", "demo", "--remove", "--stage=rc", "--dir", store]);
+    expect(spaced.code).toBe(0);
+    expect(spaced.out).not.toContain("--stage");
+  });
+
+  it("still refuses --remove= with nothing after it", () => {
+    const r = agit(["tag", "demo", "--remove=", "--dir", store]);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("usage: agit tag");
   });
 });
 
