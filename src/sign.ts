@@ -36,6 +36,7 @@ import {
 } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { canonicalJson } from "./format/canonical.js";
+import type { AgitSignatureRecord, SessionMeta } from "./format/events.js";
 
 /** Bumped only if the signed payload's shape changes; verifiers check it. */
 export const SIGNATURE_PAYLOAD_VERSION = 1;
@@ -410,4 +411,65 @@ export function verifySignature(
         fingerprint: real,
         reason: "does not match this head — the log changed after signing, or the signature was never valid",
       };
+}
+
+// --- reading meta.json ------------------------------------------------------
+
+/**
+ * One entry of meta.json's `signatures`: a record verifySignature can judge,
+ * or a description of why it cannot be one.
+ *
+ * meta.json is third-party input once a bundle has been adopted (adoption
+ * checks the chain, not the meta), and `signatures` used to be mapped as if
+ * it were always an array of records. A bundle carrying `"signatures": {}`
+ * or `[null]` adopted cleanly, then every verify and sign on that session
+ * died with a bare TypeError, and with --json nothing reached stdout at all.
+ * The chain verifier holds the line that a tampered input is reported by it
+ * rather than crashing it; this gives the signature path the same bar.
+ */
+export type SignatureEntry = { record: AgitSignatureRecord } | { record: null; malformed: string };
+
+export function signatureEntries(meta: SessionMeta | undefined): SignatureEntry[] {
+  const raw: unknown = meta?.signatures;
+  if (raw === undefined || raw === null) return [];
+  const kind = (x: unknown): string =>
+    x === null
+      ? "null"
+      : Array.isArray(x)
+        ? "an array"
+        : typeof x === "object"
+          ? "an object"
+          : `a ${typeof x}`;
+  if (!Array.isArray(raw)) return [{ record: null, malformed: `signatures is ${kind(raw)}, not an array` }];
+  return raw.map((s: unknown, i) =>
+    s !== null && typeof s === "object" && !Array.isArray(s)
+      ? { record: s as AgitSignatureRecord }
+      : { record: null, malformed: `signatures[${i}] is ${kind(s)}, not a signature record` },
+  );
+}
+
+/** One signature's verdict, in the shape `agit verify --json` reports it. */
+export type SignatureCheck = { keyFingerprint: string | null; at: string | null } & SignatureVerdict;
+
+/**
+ * Every signature in meta.json, checked against `head`. `agit verify` and
+ * the MCP server both answer from this, so a signature one of them rejects
+ * the other cannot accept. A malformed entry is a failed signature with no
+ * fingerprint to report, not a crash: the verdict still has to come out.
+ */
+export function checkSignatures(
+  meta: SessionMeta | undefined,
+  head: { sessionId: string; headHash: string; eventCount: number },
+): SignatureCheck[] {
+  return signatureEntries(meta).map((e) =>
+    e.record === null
+      ? {
+          keyFingerprint: null,
+          at: null,
+          ok: false as const,
+          fingerprint: null,
+          reason: `malformed record, ${e.malformed}`,
+        }
+      : { keyFingerprint: e.record.keyFingerprint, at: e.record.at, ...verifySignature(e.record, head) },
+  );
 }

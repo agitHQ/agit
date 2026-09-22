@@ -337,7 +337,8 @@ npm ci && npm run build && npm link   # `agit` is now on your PATH
 
   **Read-only by design.** There is no tool that writes, and nothing arriving
   over this transport reaches `import`, `tag`, `rm` or the redaction config.
-  Every answer carries whether that session's chain verifies, and
+  Every answer carries whether that session verifies, the same verdict
+  `agit verify` gives (the chain and any signature on it), and
   `agit_verify` asks directly, so an agent knows what it is trusting. Session
   logs are untrusted input, so each payload is labelled as recorded data
   rather than direction — a label, not a sandbox, and worth the same
