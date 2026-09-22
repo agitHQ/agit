@@ -1,16 +1,18 @@
 /**
  * The write-ahead log folded over the main file the way SQLite reads it:
  * a real pair copied while the writer held the WAL open (fixtures/hermes/
- * live), frames built by hand with the format's own checksum chain, and
- * the sidecar over hostile bytes.
+ * live), frames built by hand with the format's own checksum chain, the
+ * sidecar over hostile bytes, and a database whose schema has not reached
+ * its main file yet.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { hermesAdapter } from "../src/adapters/hermes.js";
+import { startRelay, type RelayHandle } from "../src/relay/relay.js";
 import { applyWal, readSqliteWithWal, SqliteError, SqliteFile } from "../src/sqlite.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -245,5 +247,178 @@ describe("readSqliteWithWal and the CLI", () => {
     expect(refused.code).toBe(1);
     expect(refused.out).toContain("wal_checkpoint");
     expect(refused.out).toContain("bad magic");
+  });
+});
+
+/**
+ * The pair SQLite leaves when a database goes into WAL mode before its first
+ * table exists, as a runtime's first run does: the main file is page 1 alone,
+ * its header naming no schema and no text encoding yet (0) over an empty
+ * table leaf, and every page of the database is in the sidecar until the
+ * first checkpoint. Hermes keeps its connection open and skips the close-time
+ * checkpoint (fixtures/hermes/generate/live.py), so this can last. The pages
+ * here are the checkpointed fixture's, which is what the sidecar folds to.
+ */
+function walOnlyPair(dir: string, opts: { committed?: boolean } = {}): string {
+  const full = read(MAIN);
+  const pageSize = new SqliteFile(full).pageSize;
+  const pages = full.length / pageSize;
+  const main = new Uint8Array(pageSize);
+  main.set(full.subarray(0, 24)); // magic, page size, reserved space, payload fractions
+  main[18] = 2; // file format versions: WAL
+  main[19] = 2;
+  const v = new DataView(main.buffer);
+  v.setUint32(24, 1); // change counter
+  v.setUint32(28, 1); // database size: one page
+  v.setUint32(92, 1); // version-valid-for
+  main.set(full.subarray(96, 100), 96); // SQLite version number
+  main.set([0x0d, 0, 0, 0, 0, (pageSize >> 8) & 0xff, pageSize & 0xff, 0], 100);
+  const db = join(dir, "state.db");
+  writeFileSync(db, main);
+  const commit = opts.committed ?? true;
+  writeFileSync(
+    `${db}-wal`,
+    buildWal(
+      pageSize,
+      Array.from({ length: pages }, (_, i) => ({
+        pageNo: i + 1,
+        commit: commit && i === pages - 1 ? pages : 0,
+        page: full.subarray(i * pageSize, (i + 1) * pageSize),
+      })),
+    ),
+  );
+  return db;
+}
+
+/** The environment `import --all` sees with nothing installed but this Hermes home. */
+function onlyHermes(hermesHome: string): Record<string, string> {
+  const home = mktemp();
+  return {
+    HOME: home,
+    USERPROFILE: home,
+    HERMES_HOME: hermesHome,
+    APPDATA: join(home, "r"),
+    LOCALAPPDATA: join(home, "l"),
+    XDG_CONFIG_HOME: join(home, "c"),
+    XDG_DATA_HOME: join(home, "d"),
+    CLINE_DIR: join(home, "cl"),
+    KIMI_SHARE_DIR: join(home, "k"),
+    OPENCLAW_STATE_DIR: join(home, "o"),
+    PI_CODING_AGENT_DIR: join(home, "p"),
+  };
+}
+
+function agitAsync(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = execFile(process.execPath, [CLI, ...args], { encoding: "utf8" }, (err, stdout, stderr) => {
+      const code = (err as { code?: number } | null)?.code;
+      resolve({ code: typeof code === "number" ? code : err ? 1 : 0, stdout, stderr });
+    });
+    child.stdin!.end("");
+  });
+}
+
+describe("a database whose schema is still only in its WAL", () => {
+  const relays: RelayHandle[] = [];
+  afterEach(async () => {
+    for (const r of relays.splice(0)) await r.close();
+  });
+  const SESSIONS = hermesAdapter.sessionsIn!(read(MAIN));
+  const events = (store: string, id: string): string =>
+    readFileSync(join(store, ".agit", "sessions", id, "events.jsonl"), "utf8");
+
+  it("is recognized from what SQLite reads, and imports exactly as its checkpointed copy does", () => {
+    const db = walOnlyPair(mktemp());
+    // The state itself: the main file alone names no table, and folding the
+    // sidecar in gives back the checkpointed fixture byte for byte.
+    expect(() => new SqliteFile(read(db))).toThrow(/text encoding 0/);
+    expect(hermesAdapter.detectBytes!(read(db))).toBe(false);
+    expect(Buffer.from(readSqliteWithWal(db).bytes).equals(Buffer.from(read(MAIN)))).toBe(true);
+    expect(SESSIONS).toHaveLength(2);
+
+    const store = mktemp();
+    const r = agit(["import", db, "--dir", store]);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain("no adapter recognizes");
+    expect(r.out).toMatch(/\d+ frames in 1 commit folded in/);
+    expect(r.out).toContain("2 sessions");
+    const ref = mktemp();
+    expect(agit(["import", MAIN, "--dir", ref]).code).toBe(0);
+    for (const id of SESSIONS) {
+      expect(events(store, id)).toBe(events(ref, id));
+      expect(agit(["verify", id, "--dir", store]).code).toBe(0);
+    }
+  });
+
+  it("is imported by import --all, not skipped", () => {
+    const home = mktemp();
+    walOnlyPair(home);
+    const all = agit(["import", "--all", "--dir", mktemp()], onlyHermes(home));
+    expect(all.code, all.out).toBe(0);
+    expect(all.out).not.toContain("no adapter recognizes");
+    expect(all.out).toContain("folded in");
+    expect(all.out).toContain("2 imported, 0 updated, 0 unchanged, 0 skipped, 0 failed");
+  });
+
+  it("is shared: refused without --thread since it holds two sessions, and published with one", async () => {
+    const relay = await startRelay({ port: 0 });
+    relays.push(relay);
+    const base = `http://127.0.0.1:${relay.port}`;
+    const dir = mktemp();
+    const db = walOnlyPair(dir);
+    const many = await agitAsync(["share", db, "--static", "--detach", "--relay", base, "--dir", dir]);
+    expect(many.code, many.stdout + many.stderr).toBe(2);
+    expect(many.stderr).toContain("2 sessions");
+    expect(many.stderr).toContain("--thread");
+    const id = SESSIONS[0]!;
+    const one = await agitAsync([
+      "share",
+      db,
+      "--thread",
+      id,
+      "--static",
+      "--detach",
+      "--relay",
+      base,
+      "--dir",
+      dir,
+    ]);
+    expect(one.code, one.stdout + one.stderr).toBe(0);
+    const link = /http:\/\/[^\s]+\/s\/[A-Za-z0-9_-]+/.exec(one.stdout)?.[0];
+    expect(link).toBeTruthy();
+    const res = await fetch(`${base}/api/shares/${link!.split("/s/")[1]!}/events.jsonl`);
+    expect(res.ok).toBe(true);
+    const shared = (await res.text())
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as { type: string; session: string });
+    expect(shared[0]).toMatchObject({ type: "session.start", session: id });
+    expect(shared.at(-1)!.type).toBe("session.end");
+  });
+
+  it("with a sidecar that is not a WAL, is refused naming the checkpoint command, and --all counts it failed", () => {
+    const home = mktemp();
+    const db = walOnlyPair(home);
+    writeFileSync(`${db}-wal`, new Uint8Array(32 + 4096 + 24));
+    const refused = agit(["import", db, "--dir", mktemp()]);
+    expect(refused.code).toBe(1);
+    expect(refused.out).toContain("wal_checkpoint");
+    expect(refused.out).toContain("bad magic");
+    expect(refused.out).not.toContain("no adapter recognizes");
+    const all = agit(["import", "--all", "--dir", mktemp()], onlyHermes(home));
+    expect(all.code).toBe(1);
+    expect(all.out).toContain("bad magic");
+    expect(all.out).toContain("0 imported, 0 updated, 0 unchanged, 0 skipped, 1 failed");
+  });
+
+  it("whose frames were never committed is still the empty main file, and nothing is guessed from them", () => {
+    const home = mktemp();
+    const db = walOnlyPair(home, { committed: false });
+    const r = agit(["import", db, "--dir", mktemp()]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("no adapter recognizes this file");
+    const all = agit(["import", "--all", "--dir", mktemp()], onlyHermes(home));
+    expect(all.code).toBe(0);
+    expect(all.out).toContain("0 imported, 0 updated, 0 unchanged, 1 skipped, 0 failed");
   });
 });
