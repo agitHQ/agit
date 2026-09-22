@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactDeep, redactString, type RedactionCounts } from "../src/redact.js";
+import { redactDeep, redactString, scanValue, type RedactionCounts } from "../src/redact.js";
 
 // Credential fixtures are assembled at runtime from concatenated fragments so
 // that no string literal in this source file matches a real credential
@@ -199,5 +199,46 @@ describe("redaction boundaries (#53)", () => {
     const text = "see disk-usage-report-2026-09-09-final-v2 for details";
     expect(redactString(text, counts)).toBe(text);
     expect(counts).toEqual({});
+  });
+});
+
+describe("google-api-key ending in '-'", () => {
+  // SPEC §8: `AIza` + 35 of [0-9A-Za-z_-], so '-' is legal in the last
+  // position too. Both keys are 39 characters; only the last one differs.
+  const dashEnd = joined("AI", "za", "SyA1234567890abcdefghijklmnopqrstu-");
+  const alnumEnd = K.google;
+
+  it("is redacted before a space, '&', a quote or the end of the string", () => {
+    expect(run(dashEnd).out).toBe("[REDACTED:google-api-key]");
+    expect(run(`maps key ${dashEnd} here`).out).toBe("maps key [REDACTED:google-api-key] here");
+    expect(run(`?key=${dashEnd}&alt=json`).out).toBe("?key=[REDACTED:google-api-key]&alt=json");
+    const quoted = run(`"${dashEnd}"`);
+    expect(quoted.out).toBe('"[REDACTED:google-api-key]"');
+    expect(quoted.counts).toEqual({ "google-api-key": 1 });
+  });
+
+  it("is reported by the dry run, which scans with the same patterns", () => {
+    const found = scanValue({ a: `maps key ${dashEnd} here`, b: `maps key ${alnumEnd} here` });
+    expect(found.map((f) => [f.at, f.label])).toEqual([
+      ["a", "google-api-key"],
+      ["b", "google-api-key"],
+    ]);
+  });
+
+  it("still leaves alone a run that is too long or too short to be a key", () => {
+    const tooLong = joined("AI", "za", "SyA1234567890abcdefghijklmnopqrstuvw");
+    const tooShort = joined("AI", "za", "SyA1234567890abcdefghijklmnopqrst-");
+    for (const text of [`id ${tooLong} end`, `id ${tooShort} end`, tooShort]) {
+      const counts: RedactionCounts = {};
+      expect(redactString(text, counts)).toBe(text);
+      expect(counts).toEqual({});
+    }
+  });
+
+  it("still catches a key with a '-' or a word character straight after it", () => {
+    // Both already redacted before this fix; a lookahead that refuses any
+    // following key character would stop catching them.
+    expect(run(`${alnumEnd}-backup.json`).out).toBe("[REDACTED:google-api-key]-backup.json");
+    expect(run(`${dashEnd}x`).out).toBe("[REDACTED:google-api-key]x");
   });
 });
