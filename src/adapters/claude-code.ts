@@ -7,6 +7,14 @@
  * preserve native ids under payload.native, skip and count what cannot be
  * mapped, never guess. Everything here was written against real logs; when a
  * real session contradicts this adapter, the adapter is what's wrong.
+ *
+ * Compaction appends one record: a `user` record whose `content` is a
+ * string (the summary the runtime wrote, tens of thousands of characters)
+ * with `isCompactSummary: true` — the only reliable test; the body's format
+ * varies and `parentUuid` is not always null. Nothing before it is deleted.
+ * It becomes a `message.user` like any other, marked `native.compactSummary`
+ * so a reader can tell the runtime's summary from what the person typed
+ * (28 such records across the local sessions this was checked against).
  */
 
 import { createHash } from "node:crypto";
@@ -21,6 +29,7 @@ interface NativeRecord {
   type?: string;
   uuid?: string;
   parentUuid?: string | null;
+  isCompactSummary?: boolean;
   sessionId?: string;
   timestamp?: string;
   version?: string;
@@ -185,7 +194,11 @@ export const claudeCodeAdapter: Adapter = {
       }
       lastTs = ts;
 
-      const native = { uuid: rec.uuid ?? null, parentUuid: rec.parentUuid ?? null };
+      const native = {
+        uuid: rec.uuid ?? null,
+        parentUuid: rec.parentUuid ?? null,
+        ...(rec.isCompactSummary === true ? { compactSummary: true } : {}),
+      };
       const m = rec.message!;
 
       if (type === "assistant") {

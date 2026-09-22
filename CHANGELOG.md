@@ -3,6 +3,31 @@
 Notable changes to agit. The event format itself is versioned separately
 (SPEC.md §11); a spec bump is always called out here in bold.
 
+## Unreleased
+
+### Changed
+
+- **Compaction summaries are marked as the runtime's text.** A Claude Code
+  compaction appends a `user` record with `isCompactSummary: true` (the only
+  reliable test; 28 seen across local sessions), and an OpenCode compaction
+  writes an assistant message in `compaction` mode beside a boundary part
+  and a synthetic continuation. Both became ordinary events before; the
+  Claude Code one now carries `native.compactSummary` and the OpenCode one
+  `native.compaction` (on its `message.assistant` and `cost`), so a reader
+  can tell the summary from what the person typed or the model replied.
+- **OpenCode attachments become markers.** A `file` part on a user message
+  (`filename`, `mime`, the bytes inline as a `data:` URL) was counted and
+  dropped; it is now a `[file: name (mime)]` marker in the text, as SPEC
+  §5.3 has non-text blocks, with the bytes kept out.
+- **Hermes relation kinds.** A child session's `model_config` marks whether
+  it was branched, reset or delegated from its parent (`_branched_from`,
+  `_reset_from`, `_delegate_from`); `session.start` now carries the one
+  present beside `parentSessionId`.
+- The OpenCode and Hermes adapter headers now name the real data they were
+  checked against: a real `opencode.db` (#154) and the MIT-published probes
+  of a 139-session OpenCode database and a Hermes `state.db` in
+  Einsia/agent-git.
+
 ## 0.19.0 — 2026-09-16
 
 ### Added

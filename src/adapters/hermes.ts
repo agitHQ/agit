@@ -65,8 +65,14 @@
  * so a running Hermes imports as it stands.
  *
  * Derived from the source above and validated against a fixture written
- * with the same DDL, not against a real state.db; a real one that disagrees
- * names its unmapped rows in the import report.
+ * with the same DDL. The columns named here are the ones a published probe
+ * of a real `state.db` observed (Einsia/agent-git, docs/mechanism-probing/
+ * openclaw-hermes-workbuddy.md, MIT: `sessions.id/source/cwd/model_config/
+ * parent_session_id`, `messages.role/content/tool_calls/tool_call_id/
+ * tool_name/finish_reason/active/compacted/api_content`, an assistant's
+ * `tool_calls[].id` paired with a `tool` row's `tool_call_id`) and the DDL
+ * still carries at its current revision; a real one that disagrees names
+ * its unmapped rows in the import report.
  */
 
 import { createHash } from "node:crypto";
@@ -120,6 +126,25 @@ function jsonOf(v: unknown): Json | undefined {
   }
 }
 
+/**
+ * `sessions.model_config` is JSON, and Hermes marks how a child session
+ * came to be inside it: `_branched_from` (a branch), `_reset_from` (a
+ * reset), `_delegate_from` (a delegated subagent) — the markers
+ * `hermes_state_sessions.py` tells them apart by, since all three also set
+ * `parent_session_id`. Read as written; anything else is null.
+ */
+function relation(modelConfig: unknown, key: string): string | null {
+  if (typeof modelConfig !== "string") return null;
+  try {
+    const parsed: unknown = JSON.parse(modelConfig);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const v = (parsed as Record<string, unknown>)[key];
+    return typeof v === "string" && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 interface SessionRow {
   id: string;
   source: string | null;
@@ -130,6 +155,10 @@ interface SessionRow {
   cwd: string | null;
   gitBranch: string | null;
   parentSessionId: string | null;
+  /** How this session relates to its parent, from `model_config`'s own markers (`hermes_state_sessions.py`). */
+  branchedFrom: string | null;
+  resetFrom: string | null;
+  delegatedFrom: string | null;
   title: string | null;
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; apiCalls: number };
   hasCost: boolean;
@@ -207,6 +236,9 @@ function readTables(bytes: Uint8Array): Tables {
       cwd: str(r.cwd),
       gitBranch: str(r.git_branch),
       parentSessionId: str(r.parent_session_id),
+      branchedFrom: relation(r.model_config, "_branched_from"),
+      resetFrom: relation(r.model_config, "_reset_from"),
+      delegatedFrom: relation(r.model_config, "_delegate_from"),
       title: str(r.title),
       usage: {
         input: num(r.input_tokens) ?? 0,
@@ -458,6 +490,9 @@ export const hermesAdapter: Adapter = {
           source: session.source,
           model: session.model,
           parentSessionId: session.parentSessionId,
+          ...(session.branchedFrom !== null ? { branchedFrom: session.branchedFrom } : {}),
+          ...(session.resetFrom !== null ? { resetFrom: session.resetFrom } : {}),
+          ...(session.delegatedFrom !== null ? { delegatedFrom: session.delegatedFrom } : {}),
           title: session.title,
         },
       },

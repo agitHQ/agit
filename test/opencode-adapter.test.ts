@@ -148,7 +148,7 @@ describe("the OpenCode adapter over opencode.db", () => {
     });
     // The synthetic part is not the user's words: the second prompt is the typed text alone.
     expect(payloads(r.drafts, "message.user").map((p) => p.text)).toEqual([
-      "The parser test is failing, can you look?",
+      "The parser test is failing, can you look?\n[file: failure.png (image/png)]",
       "Thanks. Run the tests.",
     ]);
     // No file.diff: OpenCode's edits live in git snapshots, not in the database.
@@ -162,8 +162,25 @@ describe("the OpenCode adapter over opencode.db", () => {
       "message.user",
       "message.assistant",
       "cost",
+      "message.assistant", // the compaction's summary
+      "cost",
       "session.end",
     ]);
+    // The compaction: its boundary and its continuation are counted, its
+    // summary is the runtime's text and says so.
+    expect(r.skipped["part:compaction"]).toBe(1);
+    expect(r.skipped["text-part-synthetic"]).toBe(1);
+    const [reply, summary] = payloads(r.drafts, "message.assistant");
+    expect(reply!.native).toMatchObject({ messageId: "msg_b001" });
+    expect("compaction" in reply!.native).toBe(false);
+    expect(summary!.native).toMatchObject({ messageId: "msg_b003", compaction: true });
+    expect(summary!.blocks).toEqual([
+      {
+        type: "text",
+        text: "## Objective\n- Explain the config flag.\n\n## Status\n- Answered: it toggles verbose logging.",
+      },
+    ]);
+    expect(payloads(r.drafts, "cost")[1]!.native).toMatchObject({ messageId: "msg_b003", compaction: true });
     expect(payloads(r.drafts, "cost")[0]!.usage).toEqual({
       inputTokens: 30,
       outputTokens: 8,
@@ -190,7 +207,7 @@ describe("agit import on opencode.db", () => {
     expect(all.out).toMatch(/imported {3}ses_fixtureaaaa0001 {2}opencode\s+15 events/);
     expect(agit(["verify", A, "--dir", dir]).code).toBe(0);
     expect(readSessionMeta(dir, A)!.source.select).toBe(A);
-    expect(readSessionEvents(dir, B).length).toBe(5);
+    expect(readSessionEvents(dir, B).length).toBe(7); // the compaction adds its summary and cost
     expect(agit(["export", A, "--atif", "--dir", dir]).code).toBe(0);
     expect(agit(["replay", A, "--timeline", "--dir", dir]).out).toContain("bash command=npm test");
     expect(agit(["import", DB, "--dir", dir]).out).toContain("0 imported, 0 updated, 2 unchanged");
